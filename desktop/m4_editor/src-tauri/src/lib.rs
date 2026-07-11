@@ -29,16 +29,20 @@ fn backup_bundle(path: String, project: Project) -> Result<(), String> {
 fn device_status() -> device::DeviceStatus { device::status() }
 
 #[tauri::command]
-fn sync_project(project: Project) -> Result<device::SyncResult, String> {
-    let summary = compiler::summarize(&project);
-    let bundle = compiler::compile(&project).map_err(|error| error.to_string())?;
-    device::sync(&bundle, summary.fingerprint).map_err(|error| error.to_string())
+async fn sync_project(project: Project) -> Result<device::SyncResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let summary = compiler::summarize(&project);
+        let bundle = compiler::compile(&project).map_err(|error| error.to_string())?;
+        device::sync(&bundle, summary.fingerprint).map_err(|error| error.to_string())
+    }).await.map_err(|error| format!("sync worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn upload_screensaver(path: String) -> Result<device::ScreensaverResult, String> {
-    let media = fs::read(&path).map_err(|error| format!("could not read screensaver: {error}"))?;
-    device::upload_screensaver(&media).map_err(|error| error.to_string())
+async fn upload_screensaver(path: String) -> Result<device::ScreensaverResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let media = fs::read(&path).map_err(|error| format!("could not read screensaver: {error}"))?;
+        device::upload_screensaver(&media).map_err(|error| error.to_string())
+    }).await.map_err(|error| format!("screensaver worker failed: {error}"))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

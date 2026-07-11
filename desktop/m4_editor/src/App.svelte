@@ -77,6 +77,7 @@
   async function sync() {
     if (summary.issues.some((issue) => issue.severity === "error")) { notice = "Resolve validation errors before syncing"; return; }
     busy = true;
+    notice = "Syncing project to device…";
     try {
       const result = await syncProject(project);
       notice = `Synced ${result.bytesSent.toLocaleString()} bytes · generation ${result.generation}${result.resumedAt ? ` · resumed at ${result.resumedAt}` : ""}`;
@@ -89,6 +90,7 @@
     const path = await open({ title: "Upload screensaver", filters: [{ name: "Raw MJPEG screensaver", extensions: ["mjpg", "mjpeg"] }] });
     if (!path || Array.isArray(path)) return;
     busy = true;
+    notice = `Uploading ${path.split(/[\\/]/).pop()}…`;
     try {
       const result = await uploadScreensaverToDevice(path);
       notice = `Screensaver uploaded · ${result.bytesSent.toLocaleString()} bytes${result.resumedAt ? ` · resumed at ${result.resumedAt}` : ""}`;
