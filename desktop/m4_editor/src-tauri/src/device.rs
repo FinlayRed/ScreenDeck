@@ -13,10 +13,13 @@ const STATUS: u8 = 6;
 const MEDIA_BEGIN: u8 = 8;
 const MEDIA_CHUNK: u8 = 9;
 const MEDIA_COMMIT: u8 = 10;
+const MEDIA_BATCH_CAPABILITY: u32 = 0x40;
+const FRAME_FLAG_NO_RESPONSE: u16 = 0x0001;
 const CHUNK_BYTES: usize = 112;
 // Match the project-sync chunk size proven reliable on the physical P4.
-const MEDIA_CHUNK_BYTES: usize = 480;
-const DEVICE_RESPONSE_SETTLE_MS: u64 = 50;
+const MEDIA_CHUNK_BYTES: usize = 1400 - 8; // SDC3 payload limit minus chunk prefix
+const MEDIA_BATCH_CHUNKS: usize = 8;
+const DEVICE_RESPONSE_SETTLE_MS: u64 = 1;
 
 #[derive(Debug, Error)]
 pub enum DeviceError {
@@ -46,12 +49,16 @@ fn status_detail(status: u32) -> &'static str {
     match status { 1 => "bad frame or checksum", 2 => "transfer is not open", 3 => "microSD I/O failure", 4 => "bundle validation failed", 5 => "device is busy", _ => "unknown device error" }
 }
 
-fn frame(opcode: u8, sequence: u32, payload: &[u8]) -> Vec<u8> {
+fn flagged_frame(opcode: u8, sequence: u32, flags: u16, payload: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(20 + payload.len());
     bytes.extend_from_slice(&MAGIC.to_le_bytes()); bytes.push(VERSION); bytes.push(opcode);
-    bytes.extend_from_slice(&0u16.to_le_bytes()); bytes.extend_from_slice(&sequence.to_le_bytes());
+    bytes.extend_from_slice(&flags.to_le_bytes()); bytes.extend_from_slice(&sequence.to_le_bytes());
     bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes()); bytes.extend_from_slice(&crc32(payload).to_le_bytes());
     bytes.extend_from_slice(payload); bytes
+}
+
+fn frame(opcode: u8, sequence: u32, payload: &[u8]) -> Vec<u8> {
+    flagged_frame(opcode, sequence, 0, payload)
 }
 
 fn parse_response(bytes: &[u8], opcode: u8, sequence: u32) -> Result<(u32, u32), DeviceError> {
@@ -151,18 +158,29 @@ pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError
     let mut offset = resumed_at as usize;
     let mut sequence = 3u32;
     while offset < media.len() {
-        let end = (offset + MEDIA_CHUNK_BYTES).min(media.len());
-        let chunk = &media[offset..end];
-        let mut payload = Vec::with_capacity(chunk.len() + 8);
-        payload.extend_from_slice(&(offset as u32).to_le_bytes()); payload.extend_from_slice(&crc32(chunk).to_le_bytes()); payload.extend_from_slice(chunk);
-        let acknowledged = checked_exchange(&mut session, MEDIA_CHUNK, sequence, &payload, "upload screensaver chunk")
-            .map_err(|error| DeviceError::Protocol(format!("screensaver chunk at {offset}: {error}")))?;
-        if acknowledged as usize != end {
-            return Err(DeviceError::Protocol(format!("device acknowledged {acknowledged} screensaver bytes; expected {end}")));
+        let batch_start = offset;
+        let batch_end = (offset + MEDIA_CHUNK_BYTES * MEDIA_BATCH_CHUNKS).min(media.len());
+        while offset < batch_end {
+            let end = (offset + MEDIA_CHUNK_BYTES).min(media.len());
+            let chunk = &media[offset..end];
+            let mut payload = Vec::with_capacity(chunk.len() + 8);
+            payload.extend_from_slice(&(offset as u32).to_le_bytes()); payload.extend_from_slice(&crc32(chunk).to_le_bytes()); payload.extend_from_slice(chunk);
+            let is_batch_end = end == batch_end;
+            if capabilities & MEDIA_BATCH_CAPABILITY != 0 && !is_batch_end {
+                session.send(&flagged_frame(MEDIA_CHUNK, sequence, FRAME_FLAG_NO_RESPONSE, &payload))
+                    .map_err(|error| DeviceError::Protocol(format!("screensaver chunk at {offset}: {error}")))?;
+            } else {
+                let response = session.exchange(&frame(MEDIA_CHUNK, sequence, &payload))?;
+                let (status, acknowledged) = parse_response(&response, MEDIA_CHUNK, sequence)?;
+                if status != 0 { return Err(DeviceError::Rejected { operation: "upload screensaver batch", status, detail: status_detail(status) }); }
+                if acknowledged as usize != end {
+                    return Err(DeviceError::Protocol(format!("device acknowledged {acknowledged} screensaver bytes; expected {end} (batch began at {batch_start})")));
+                }
+            }
+            offset = end;
+            sequence += 1;
         }
-        offset = end; sequence += 1;
     }
-    thread::sleep(Duration::from_secs(3));
     let received = checked_exchange(&mut session, MEDIA_BEGIN, sequence, &begin, "verify screensaver stream")?;
     sequence += 1;
     if received as usize != media.len() {
@@ -328,6 +346,9 @@ mod transport {
 
     impl Session {
         pub fn open() -> Result<Self, DeviceError> { unsafe { Connection::open().map(Self) } }
+        pub fn send(&mut self, frame: &[u8]) -> Result<(), DeviceError> {
+            unsafe { self.0.send(frame) }
+        }
         pub fn exchange(&mut self, frame: &[u8]) -> Result<Vec<u8>, DeviceError> {
             unsafe { self.0.exchange(frame) }
         }
@@ -340,6 +361,7 @@ mod transport {
     pub struct Session;
     impl Session {
         pub fn open() -> Result<Self, DeviceError> { Err(DeviceError::NotFound) }
+        pub fn send(&mut self, _: &[u8]) -> Result<(), DeviceError> { Err(DeviceError::NotFound) }
         pub fn exchange(&mut self, _: &[u8]) -> Result<Vec<u8>, DeviceError> { Err(DeviceError::NotFound) }
     }
 }

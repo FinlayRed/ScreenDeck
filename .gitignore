@@ -13,6 +13,8 @@ dist/
 target/
 target-packaged/
 target-fixed/
+target-fast/
+target-batched/
 
 # Editor and OS noise
 .vscode/

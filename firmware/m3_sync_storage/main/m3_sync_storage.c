@@ -38,8 +38,9 @@ static const char *TAG = "m3";
 #define M3_BUNDLE_MAGIC 0x33424453UL   /* SDB3 */
 #define M3_POINTER_MAGIC 0x33525450UL  /* PTR3 */
 #define M3_MAX_FRAME_PAYLOAD 1400
-#define M3_RX_PACKET_BYTES (sizeof(m3_frame_header_t) + M3_MAX_FRAME_PAYLOAD)
-#define M3_RX_QUEUE_DEPTH 8
+#define M3_RX_FRAME_BYTES (sizeof(m3_frame_header_t) + M3_MAX_FRAME_PAYLOAD)
+#define M3_RX_PACKET_BYTES CONFIG_TINYUSB_VENDOR_RX_BUFSIZE
+#define M3_RX_QUEUE_DEPTH 24
 #define M3_ROOT BSP_SD_MOUNT_POINT "/screendeck"
 #define M3_BUNDLES_DIR M3_ROOT "/bundles"
 #define M3_STAGE_FILE M3_ROOT "/upload.part"
@@ -50,6 +51,7 @@ static const char *TAG = "m3";
 #define M3_MAX_MEDIA_BYTES (16U * 1024U * 1024U)
 #define M3_MEDIA_WRITE_BUFFER_BYTES (64U * 1024U)
 #define M3_RESPONSE_WAIT_MS 250
+#define M3_FRAME_FLAG_NO_RESPONSE 0x0001U
 #define M3_HID_REPORT_ID 1
 #define M3_WINUSB_VENDOR_REQUEST 0x21
 #define M3_MS_OS_20_DESCRIPTOR_LENGTH 0xB2
@@ -149,7 +151,7 @@ typedef struct {
 static QueueHandle_t s_rx_queue;
 static m3_storage_state_t s_storage;
 static m3_media_upload_t s_media_upload;
-static uint8_t s_frame_buffer[sizeof(m3_frame_header_t) + M3_MAX_FRAME_PAYLOAD];
+static uint8_t s_frame_buffer[M3_RX_FRAME_BYTES];
 static size_t s_frame_length;
 static bool s_usb_mounted;
 static lv_display_t *s_display;
@@ -706,8 +708,9 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
 static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *payload)
 {
     if (frame->opcode == M3_OP_HELLO) {
-        // Protocol v1, resume, checksums, atomic bundles, no MSC, media upload.
-        m3_send_response(M3_OP_HELLO, frame->sequence, M3_STATUS_OK, 0x0000003F);
+        // Protocol v1, resume, checksums, atomic bundles, no MSC, media upload,
+        // and batched media chunks (silent intermediate frames).
+        m3_send_response(M3_OP_HELLO, frame->sequence, M3_STATUS_OK, 0x0000007F);
     } else if (frame->opcode == M3_OP_BEGIN) {
         m3_handle_begin(frame, payload);
     } else if (frame->opcode == M3_OP_CHUNK) {
@@ -717,7 +720,8 @@ static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *pay
     } else if (frame->opcode == M3_OP_MEDIA_BEGIN) {
         m3_handle_media_begin(frame, payload);
     } else if (frame->opcode == M3_OP_MEDIA_CHUNK) {
-        m3_handle_media_chunk(frame, payload, true);
+        m3_handle_media_chunk(frame, payload,
+                              (frame->reserved & M3_FRAME_FLAG_NO_RESPONSE) == 0);
     } else if (frame->opcode == M3_OP_MEDIA_COMMIT) {
         m3_handle_media_commit(frame);
     } else if (frame->opcode == M3_OP_MEDIA_ABORT) {

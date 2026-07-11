@@ -12,7 +12,7 @@ Every little-endian frame is a packed 20-byte header followed by its payload:
 | 0 | `u32 magic` = `0x33434453` (`SDC3`) |
 | 4 | `u8 version` = `1` |
 | 5 | `u8 opcode` |
-| 6 | `u16 reserved` = `0` |
+| 6 | `u16 flags` (`0x0001` suppresses the response for a media chunk) |
 | 8 | `u32 sequence` |
 | 12 | `u32 payload_bytes` (at most 1400) |
 | 16 | `u32 payload_crc32` |
@@ -44,4 +44,8 @@ usable.
 wire layouts but operate on a separate media transfer. The device validates the
 whole raw MJPEG stream (size, CRC-32, JPEG SOI and EOI boundaries) and then
 replaces `/sdcard/screendeck/screensaver.mjpg`. The `HELLO` capability bit
-`0x20` indicates this upload path is available.
+`0x20` indicates this upload path is available. Capability bit `0x40` allows
+the host to batch consecutive `MEDIA_CHUNK` frames by setting flag `0x0001`
+on intermediate chunks and leaving it clear on the final chunk. The final
+response acknowledges the cumulative received offset; hosts must keep using
+request/response chunks when `0x40` is absent.
