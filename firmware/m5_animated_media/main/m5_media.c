@@ -324,7 +324,7 @@ static bool m5_decode_and_draw(uint32_t index)
         output_size < M5_RGB565_BYTES) {
         return false;
     }
-    if (esp_lv_adapter_lock(1000)) {
+    if (esp_lv_adapter_lock(1000) == ESP_OK) {
         const esp_err_t result = esp_lcd_panel_draw_bitmap(s_panel, 0, 0, M5_LCD_WIDTH,
                                                             M5_LCD_HEIGHT, s_media.decoded_buffer);
         esp_lv_adapter_unlock();
@@ -344,7 +344,7 @@ static void m5_media_task(void *argument)
             /* The adapter lock is not guaranteed to be available from
              * app_main immediately after bsp_display_start. Retry from the
              * task once the LVGL worker owns its normal scheduling loop. */
-            if (esp_lv_adapter_lock(1000)) {
+            if (esp_lv_adapter_lock(1000) == ESP_OK) {
                 m5_render_active_ui();
                 esp_lv_adapter_unlock();
                 s_ui_ready = true;
@@ -355,7 +355,7 @@ static void m5_media_task(void *argument)
         }
         const int64_t now = esp_timer_get_time();
         if (s_wake_requested) {
-            if (esp_lv_adapter_lock(1000)) {
+            if (esp_lv_adapter_lock(1000) == ESP_OK) {
                 m5_render_active_ui();
                 esp_lv_adapter_unlock();
                 s_wake_requested = false;
@@ -368,7 +368,7 @@ static void m5_media_task(void *argument)
         }
         if (s_state == M5_STATE_ACTIVE) {
             if (s_media.ready && now - s_last_activity_us >= (int64_t) M5_SCREENSAVER_IDLE_MS * 1000) {
-                if (esp_lv_adapter_lock(1000)) {
+                if (esp_lv_adapter_lock(1000) == ESP_OK) {
                     m5_enter_saver_ui();
                     esp_lv_adapter_unlock();
                     saver_frame = 0;
@@ -376,7 +376,7 @@ static void m5_media_task(void *argument)
                     continue;
                 }
             }
-            if (esp_lv_adapter_lock(1000)) {
+            if (esp_lv_adapter_lock(1000) == ESP_OK) {
                 m5_start_icon_scheduler(animation_tick++);
                 esp_lv_adapter_unlock();
             }
@@ -416,6 +416,19 @@ void m5_media_start(lv_display_t *display)
     const bool media_ready = m5_index_mjpeg();
     if (!media_ready) {
         ESP_LOGI(TAG, "M5_MEDIA source=none frames=0 fps=30");
+    }
+
+    /* Render the first page synchronously. Leaving the initial paint to the
+     * worker task made a failed/late worker look like a permanently white
+     * panel, even though the LCD and LVGL were correctly initialized. */
+    if (esp_lv_adapter_lock(1000) == ESP_OK) {
+        m5_render_active_ui();
+        ESP_ERROR_CHECK(esp_lv_adapter_refresh_now(s_display));
+        esp_lv_adapter_unlock();
+        s_ui_ready = true;
+        ESP_LOGI(TAG, "M5_UI state=ready animation_fps=15");
+    } else {
+        ESP_LOGE(TAG, "M5_UI result=initial_lock_timeout");
     }
     BaseType_t task_ok = xTaskCreate(m5_media_task, "m5_media", 8192, NULL, 5, NULL);
     ESP_ERROR_CHECK(task_ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
