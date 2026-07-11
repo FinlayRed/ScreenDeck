@@ -1,0 +1,1288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; style-src 'unsafe-inline' blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; img-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; font-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; media-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; worker-src blob:; connect-src blob: data:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Screendeck Project Plan</title>
+<style>:root{color-scheme:light dark;background:light-dark(rgb(255 255 255), rgb(24 24 24))}html,body{margin:0}body{box-sizing:border-box;padding:1rem;background:inherit}iframe{display:block;width:100%;max-width:736px;height:calc(100vh - 2rem);margin:0 auto;border:0}</style>
+</head>
+<body>
+<iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="Screendeck Project Plan" srcdoc="&lt;!doctype html&gt;
+&lt;html lang=&quot;en&quot;&gt;
+&lt;head&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1&quot;&gt;
+&lt;meta name=&quot;referrer&quot; content=&quot;no-referrer&quot;&gt;
+&lt;meta http-equiv=&quot;Content-Security-Policy&quot; content=&quot;default-src &#x27;none&#x27;; script-src &#x27;unsafe-inline&#x27; &#x27;unsafe-eval&#x27; &#x27;wasm-unsafe-eval&#x27; blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; style-src &#x27;unsafe-inline&#x27; blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; img-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; font-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; media-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; worker-src blob:; connect-src blob: data:; frame-src &#x27;none&#x27;; object-src &#x27;none&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;&quot;&gt;
+&lt;title&gt;Screendeck Project Plan&lt;/title&gt;
+&lt;style&gt;:root {
+  color-scheme: light dark;
+  background-color: var(--background) !important;
+
+  /* Agent-facing contract; keep in sync with SKILL.md. */
+  --background: light-dark(rgb(255 255 255), rgb(24 24 24));
+  --foreground: light-dark(rgb(26 28 31), rgb(255 255 255));
+  --card: color-mix(in oklab, var(--foreground) 5%, transparent);
+  --card-foreground: var(--foreground);
+  --popover: light-dark(rgb(255 255 255), rgb(45 45 45));
+  --popover-foreground: var(--foreground);
+  --primary: light-dark(rgb(51 156 255), rgb(131 195 255));
+  --primary-foreground: light-dark(rgb(255 255 255), rgb(13 13 13));
+  --secondary: light-dark(rgb(255 255 255 / 96%), rgb(54 54 54 / 96%));
+  --secondary-foreground: var(--foreground);
+  --muted: color-mix(in srgb, var(--foreground) 10%, transparent);
+  --muted-foreground: light-dark(
+    rgb(26 28 31 / 49.4%),
+    rgb(255 255 255 / 49.8%)
+  );
+  --accent: light-dark(rgb(229 242 255), rgb(13 39 63));
+  --accent-foreground: var(--primary);
+  --destructive: light-dark(rgb(226 85 7), rgb(255 133 73));
+  --border: light-dark(rgb(26 28 31 / 8%), rgb(255 255 255 / 8.2%));
+  --input: light-dark(
+    rgb(26 28 31 / 11.8%),
+    color-mix(in oklab, rgb(0 0 0) 10%, transparent)
+  );
+  --ring: light-dark(rgb(51 156 255), rgb(131 195 255 / 76%));
+  --font-size-base: 14px;
+  --viz-series-1: var(--primary);
+  --viz-series-2: light-dark(rgb(243 136 59), rgb(245 154 86));
+  --viz-series-3: light-dark(rgb(93 201 119), rgb(116 213 139));
+  --viz-series-4: light-dark(rgb(235 119 177), rgb(240 143 192));
+  --viz-series-5: light-dark(rgb(155 121 236), rgb(170 145 239));
+  --viz-series-6: light-dark(rgb(58 185 177), rgb(90 203 194));
+
+  /* Internal implementation variables; not part of the agent contract. */
+  --font-sans: -apple-system, system-ui, &quot;Segoe UI&quot;, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, &quot;Liberation Mono&quot;,
+    monospace;
+  --font-size-normal: max(11px, var(--font-size-base));
+  --font-size-tooltip: calc(var(--font-size-base) - 1px);
+  --font-size-small: max(11px, calc(var(--font-size-base) - 2px));
+  --font-size-h1: calc(var(--font-size-normal) * 1.7142857143);
+  --font-size-h2: calc(var(--font-size-normal) * 1.4285714286);
+  --font-size-h3: calc(var(--font-size-normal) * 1.2857142857);
+  --font-weight-normal: 430;
+  --font-weight-medium: 500;
+  --line-height-normal: calc(var(--font-size-normal) * 1.5);
+  --line-height-tooltip: calc(var(--font-size-tooltip) * 1.4285714286);
+  --line-height-small: calc(var(--font-size-small) + 4px);
+  --radius: 12.5px;
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-2xl: calc(var(--radius) * 1.6);
+  --radius-full: 9999px;
+  --shadow-sm: 0 1px 2px -1px rgb(0 0 0 / 8%);
+  --checkmark-image: url(&quot;data:image/svg+xml,%3Csvg xmlns=&#x27;http://www.w3.org/2000/svg&#x27; viewBox=&#x27;0 0 17 17&#x27;%3E%3Cpath d=&#x27;M12.8961 3.64101C13.1297 3.41418 13.4984 3.37523 13.7779 3.56581C14.0571 3.75635 14.1554 4.11331 14.0299 4.41347L13.9615 4.53847L7.71151 13.7045C7.59411 13.8767 7.4063 13.9877 7.19881 14.0072C6.99136 14.0267 6.78564 13.9533 6.63826 13.806L2.88826 10.056L2.79842 9.9457C2.6192 9.67407 2.64927 9.30496 2.88826 9.06581C3.12738 8.82669 3.49647 8.79676 3.76815 8.97597L3.8785 9.06581L7.03084 12.2182L12.8053 3.74941L12.8961 3.64101Z&#x27;/%3E%3C/svg%3E&quot;);
+
+  /* Legacy aliases; not part of the current agent contract. */
+  --viz-bg: transparent;
+  --viz-panel: var(--card);
+  --viz-border: var(--border);
+  --viz-text: var(--foreground);
+  --viz-muted: var(--muted-foreground);
+  --viz-accent: var(--primary);
+  --viz-accent-text: var(--primary-foreground);
+  --viz-accent-bg: var(--accent);
+  --viz-font-size: var(--font-size-base);
+  --viz-warning: var(--destructive);
+  --color-background-primary: var(--background);
+  --color-text-primary: var(--foreground);
+  --color-border-secondary: var(--border);
+}
+
+:root[data-theme=&quot;light&quot;] {
+  color-scheme: light;
+}
+
+:root[data-theme=&quot;dark&quot;] {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html &gt; body {
+  margin: 0;
+  padding: 5px;
+  color: var(--foreground);
+  background: transparent !important;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-normal);
+  font-weight: var(--font-weight-normal);
+  line-height: var(--line-height-normal);
+}
+
+a {
+  color: color-mix(in srgb, var(--viz-accent) 80%, var(--viz-text) 20%);
+  cursor: pointer;
+  font-weight: var(--viz-font-weight-medium);
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+
+a:is(:hover, :focus-visible) {
+  text-decoration-line: underline;
+  text-decoration-style: dashed;
+  text-decoration-thickness: 0.5px;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p {
+  margin-block: 0;
+}
+
+h1 {
+  font-size: var(--font-size-h1);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+h2 {
+  font-size: var(--font-size-h2);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+h3,
+h4,
+h5,
+h6 {
+  font-size: var(--font-size-h3);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.3;
+}
+
+b,
+strong,
+th {
+  font-weight: var(--font-weight-medium);
+}
+
+code:not(pre code) {
+  display: inline;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  corner-shape: superellipse(1.5);
+  background: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  word-break: break-word;
+}
+
+#widget {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  background: transparent !important;
+}
+
+.card {
+  min-width: 0;
+  padding: 12px;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  border-radius: var(--radius-2xl);
+  corner-shape: superellipse(1.5);
+  color: var(--card-foreground);
+  background: var(--card);
+}
+
+#widget &gt; :not(.card) {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.tooltip {
+  position: fixed;
+  z-index: 50;
+  top: 0;
+  left: 0;
+  width: max-content;
+  max-width: min(
+    20rem,
+    var(--tooltip-available-width, calc(100vw - 10px)),
+    calc(100vw - 10px)
+  );
+  max-height: min(
+    var(--tooltip-available-height, calc(100vh - 10px)),
+    calc(100vh - 10px)
+  );
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--popover-foreground);
+  background: var(--popover);
+  box-shadow: none;
+  font-size: var(--font-size-tooltip);
+  line-height: var(--line-height-tooltip);
+  overflow-wrap: break-word;
+  white-space: normal;
+  pointer-events: none;
+  user-select: none;
+}
+
+.viz-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(max(180px, 24%), 1fr));
+  gap: 10px;
+}
+
+.viz-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.viz-stat-value {
+  font-size: var(--font-size-h2);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+.viz-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.viz-badge {
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  color: var(--accent-foreground);
+  background: var(--accent);
+  font-weight: var(--font-weight-medium);
+}
+
+small,
+.text-small,
+.viz-badge {
+  font-size: var(--font-size-small);
+  line-height: var(--line-height-small);
+}
+
+.text-muted {
+  color: var(--muted-foreground);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.viz-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.viz-controls &gt; .form-label {
+  display: grid;
+  min-width: min(100%, 260px);
+  flex: 1 1 280px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px 12px;
+  margin-bottom: 0;
+}
+
+.viz-controls &gt; .form-label &gt; :is(.form-control, .form-range, .form-select) {
+  grid-column: 1 / -1;
+}
+
+.btn,
+.form-check-input,
+.form-control,
+.form-range,
+.form-select {
+  font: inherit;
+}
+
+.btn {
+  appearance: button;
+  display: inline-flex;
+  inline-size: fit-content;
+  max-inline-size: 100%;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0 8px;
+  -webkit-app-region: no-drag;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--secondary-foreground);
+  background: var(--secondary);
+  cursor: var(--cursor-interaction, pointer);
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+.btn:is(.btn-block, .viz-tile) {
+  inline-size: 100%;
+}
+
+.btn.viz-tile {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+a.btn {
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn:not(:disabled):hover {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.btn-primary {
+  border-color: transparent;
+  color: var(--primary-foreground);
+  background: var(--foreground);
+  background-clip: padding-box;
+}
+
+.btn-primary .text-muted {
+  color: color-mix(in srgb, var(--primary-foreground) 50%, transparent);
+}
+
+.btn-primary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--foreground) 80%, transparent);
+  background-clip: padding-box;
+}
+
+.btn-ghost {
+  border-color: transparent;
+  color: var(--muted-foreground);
+  background: transparent;
+}
+
+.btn-ghost:not(:disabled):hover {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+[data-lucide] {
+  stroke-width: 1.6;
+}
+
+.form-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--foreground);
+}
+
+.form-control {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  outline: none;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--foreground);
+  background: var(--secondary);
+}
+
+.form-control::placeholder {
+  color: var(--muted-foreground);
+}
+
+.form-control[type=&quot;file&quot;] {
+  padding: 0;
+  overflow: hidden;
+  cursor: var(--cursor-interaction, pointer);
+}
+
+.form-control[type=&quot;file&quot;]::file-selector-button {
+  min-height: 26px;
+  margin-right: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-right: 1px solid var(--input);
+  color: var(--secondary-foreground);
+  background: var(--secondary);
+  cursor: inherit;
+  font: inherit;
+}
+
+.form-control[type=&quot;file&quot;]:not(:disabled):hover::file-selector-button {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.form-control-color[type=&quot;color&quot;] {
+  width: 40px;
+  height: 28px;
+  padding: 3px;
+  cursor: var(--cursor-interaction, pointer);
+}
+
+.form-control-color[type=&quot;color&quot;]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.form-control-color[type=&quot;color&quot;]::-webkit-color-swatch {
+  border: 0;
+  border-radius: calc(var(--radius-lg) - 4px);
+  corner-shape: superellipse(1.5);
+}
+
+textarea.form-control {
+  height: auto;
+  min-height: 72px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.form-control:focus-visible {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-control:disabled,
+.form-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.form-select {
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  margin: 0;
+  padding: 0 32px 0 8px;
+  outline: none;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--foreground);
+  background-color: var(--secondary);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted-foreground) 50%),
+    linear-gradient(135deg, var(--muted-foreground) 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) 50%,
+    calc(100% - 10px) 50%;
+  background-repeat: no-repeat;
+  background-size: 4px 4px;
+  cursor: var(--cursor-interaction, default);
+}
+
+.form-select:not(:disabled):hover {
+  background-color: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.form-select:focus-visible {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-check {
+  display: flex;
+  min-height: 20px;
+  align-items: center;
+  gap: 6px;
+}
+
+.form-check-input {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin: 0;
+  border: 1px solid var(--input);
+  color: var(--primary-foreground);
+  background-color: transparent;
+  cursor: var(--cursor-interaction, default);
+  transition:
+    background-color 150ms,
+    border-color 150ms,
+    box-shadow 150ms;
+}
+
+.form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;] {
+  border-color: var(--input);
+  border-radius: var(--radius-sm);
+  corner-shape: superellipse(1.5);
+  background-color: var(--secondary);
+  box-shadow: var(--shadow-sm);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input:not(:disabled):not(:checked):hover {
+  background-color: var(--card);
+}
+
+.form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;]:checked {
+  border-color: var(--primary);
+  background-color: var(--primary);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input[type=&quot;checkbox&quot;]:checked::before {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--primary-foreground);
+  content: &quot;&quot;;
+  mask: var(--checkmark-image) center / 12px 12px no-repeat;
+}
+
+.form-check-input[type=&quot;radio&quot;] {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+}
+
+.form-check-input[type=&quot;radio&quot;]:checked {
+  border: 2px solid var(--primary);
+  background:
+    radial-gradient(circle, var(--primary-foreground) 0 2.5px, transparent 3px),
+    var(--primary);
+}
+
+.form-check:not(.form-switch) .form-check-input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.form-check:not(.form-switch) .form-check-input:disabled {
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.form-check:not(.form-switch) .form-check-input:disabled + .form-check-label {
+  cursor: not-allowed;
+}
+
+.form-switch .form-check-input:disabled,
+.form-switch .form-check-input:disabled + .form-check-label {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.form-check-label {
+  color: var(--foreground);
+  cursor: var(--cursor-interaction, default);
+}
+
+.form-switch .form-check-input {
+  position: relative;
+  width: 32px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--muted);
+  box-shadow: none;
+  transition: background-color 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.form-switch .form-check-input::before {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid light-dark(var(--primary-foreground), var(--foreground));
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+  box-shadow: var(--shadow-sm);
+  content: &quot;&quot;;
+  transform: translate(2px, -50%);
+  transition: transform 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.form-switch .form-check-input:checked {
+  background: var(--primary);
+}
+
+.form-switch .form-check-input:checked::before {
+  transform: translate(14px, -50%);
+}
+
+.form-switch .form-check-input:focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.form-range {
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 28px;
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  outline: none;
+  border: 0;
+  accent-color: var(--primary);
+  background: linear-gradient(
+      color-mix(in srgb, var(--foreground) 7%, transparent),
+      color-mix(in srgb, var(--foreground) 7%, transparent)
+    )
+    center / 100% 2px no-repeat;
+}
+
+.form-range::-webkit-slider-runnable-track {
+  height: 28px;
+  background: transparent;
+}
+
+.form-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+}
+
+.form-range:focus-visible::-webkit-slider-thumb {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-range::-moz-range-track {
+  height: 28px;
+  background: transparent;
+}
+
+.form-range::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+}
+
+.form-range:focus-visible::-moz-range-thumb {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-range:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.btn:not(.btn-primary, .viz-tile):is(
+    [aria-pressed=&quot;true&quot;],
+    [aria-selected=&quot;true&quot;],
+    .is-selected
+  ) {
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+  background: var(--primary);
+}
+
+.btn.viz-tile:is([aria-pressed=&quot;true&quot;], [aria-selected=&quot;true&quot;], .is-selected) {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+#widget &gt; svg {
+  width: 100%;
+}
+
+.text-warning,
+.text-destructive {
+  color: var(--destructive);
+}
+
+html&gt;body{padding:0}&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;div id=&quot;screendeck-plan&quot;&gt;
+  &lt;style&gt;
+    #screendeck-plan { color: var(--foreground); }
+    #screendeck-plan .hero { display:grid; gap:16px; }
+    #screendeck-plan .lede { color:var(--muted-foreground); max-width:74ch; margin:0; }
+    #screendeck-plan .metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }
+    #screendeck-plan .section { margin-top:28px; }
+    #screendeck-plan .architecture { display:grid; grid-template-columns:1fr auto 1fr auto 1fr; align-items:center; gap:10px; }
+    #screendeck-plan .arch-node { min-width:0; }
+    #screendeck-plan .arch-node h3 { margin-top:0; }
+    #screendeck-plan .arch-node p { margin-bottom:0; color:var(--card-foreground); }
+    #screendeck-plan .arrow { color:var(--muted-foreground); display:flex; align-items:center; justify-content:center; }
+    #screendeck-plan .split { display:grid; grid-template-columns:minmax(190px,.75fr) minmax(0,1.7fr); gap:18px; align-items:start; }
+    #screendeck-plan .milestones { display:grid; gap:8px; }
+    #screendeck-plan .milestones .btn { width:100%; justify-content:flex-start; text-align:left; }
+    #screendeck-plan .milestones .btn .num { color:var(--muted-foreground); min-width:2.2em; }
+    #screendeck-plan .milestone-detail h3 { margin-top:0; }
+    #screendeck-plan .gate { display:flex; gap:8px; align-items:flex-start; margin-top:14px; padding-top:14px; border-top:1px solid var(--border); }
+    #screendeck-plan .gate i { flex:0 0 auto; color:var(--foreground); margin-top:2px; }
+    #screendeck-plan .two-col { display:grid; grid-template-columns:1fr 1fr; gap:22px; }
+    #screendeck-plan .clean-list { margin:8px 0 0; padding-left:20px; }
+    #screendeck-plan .clean-list li + li { margin-top:7px; }
+    #screendeck-plan .contract-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+    #screendeck-plan .contract { border-top:2px solid var(--border); padding-top:12px; }
+    #screendeck-plan .contract h3 { margin:0 0 6px; }
+    #screendeck-plan .contract p { margin:0; color:var(--muted-foreground); }
+    #screendeck-plan table { width:100%; border-collapse:collapse; }
+    #screendeck-plan th, #screendeck-plan td { text-align:left; vertical-align:top; padding:10px 8px; border-bottom:1px solid var(--border); }
+    #screendeck-plan th { font-weight:500; }
+    #screendeck-plan .status { display:inline-flex; gap:6px; align-items:center; }
+    #screendeck-plan .status i { width:14px; height:14px; }
+    #screendeck-plan .risk-high { color:var(--destructive); }
+    #screendeck-plan .foot { color:var(--muted-foreground); margin-top:20px; }
+    @media (max-width:700px) {
+      #screendeck-plan .architecture { grid-template-columns:1fr; }
+      #screendeck-plan .arrow { transform:rotate(90deg); }
+      #screendeck-plan .split, #screendeck-plan .two-col { grid-template-columns:1fr; }
+      #screendeck-plan .contract-grid { grid-template-columns:1fr; }
+      #screendeck-plan .metrics { grid-template-columns:1fr; }
+    }
+  &lt;/style&gt;
+
+  &lt;div class=&quot;hero&quot;&gt;
+    &lt;p class=&quot;lede&quot;&gt;A hardware-first delivery plan for a responsive, autonomous USB macro pad on the Waveshare ESP32-P4-WIFI6-Touch-LCD-5, paired with a lightweight Windows editor.&lt;/p&gt;
+    &lt;div class=&quot;viz-grid metrics&quot; aria-label=&quot;Key project constraints&quot;&gt;
+      &lt;div class=&quot;card viz-stat&quot;&gt;&lt;span class=&quot;text-muted&quot;&gt;Touch surface&lt;/span&gt;&lt;span class=&quot;viz-stat-value&quot;&gt;8 × 4&lt;/span&gt;&lt;span class=&quot;text-small text-muted&quot;&gt;32 square icons, vertically centred&lt;/span&gt;&lt;/div&gt;
+      &lt;div class=&quot;card viz-stat&quot;&gt;&lt;span class=&quot;text-muted&quot;&gt;Media targets&lt;/span&gt;&lt;span class=&quot;viz-stat-value&quot;&gt;15 / 30 FPS&lt;/span&gt;&lt;span class=&quot;text-small text-muted&quot;&gt;buttons / MJPEG screensaver&lt;/span&gt;&lt;/div&gt;
+      &lt;div class=&quot;card viz-stat&quot;&gt;&lt;span class=&quot;text-muted&quot;&gt;Desktop targets&lt;/span&gt;&lt;span class=&quot;viz-stat-value&quot;&gt;x64 + ARM64&lt;/span&gt;&lt;span class=&quot;text-small text-muted&quot;&gt;Windows 10/11, Tauri 2&lt;/span&gt;&lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;section class=&quot;section&quot; aria-labelledby=&quot;architecture-title&quot;&gt;
+    &lt;h2 id=&quot;architecture-title&quot;&gt;System boundary&lt;/h2&gt;
+    &lt;div class=&quot;architecture&quot; role=&quot;img&quot; aria-label=&quot;Desktop project compiles and synchronizes over USB to autonomous ESP32-P4 firmware, which stores runtime assets on microSD and emits HID reports to Windows&quot;&gt;
+      &lt;div class=&quot;card arch-node&quot;&gt;
+        &lt;h3&gt;Windows editor&lt;/h3&gt;
+        &lt;p&gt;Tauri 2 + Svelte, Rust backend, FFmpeg media compiler, editable project archive.&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;arrow&quot;&gt;&lt;i data-lucide=&quot;arrow-right&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;/div&gt;
+      &lt;div class=&quot;card arch-node&quot;&gt;
+        &lt;h3&gt;Composite USB&lt;/h3&gt;
+        &lt;p&gt;WinUSB high-speed bulk sync plus keyboard, consumer-control and mouse HID. One OTG cable.&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;arrow&quot;&gt;&lt;i data-lucide=&quot;arrow-right&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;/div&gt;
+      &lt;div class=&quot;card arch-node&quot;&gt;
+        &lt;h3&gt;Autonomous device&lt;/h3&gt;
+        &lt;p&gt;ESP-IDF firmware, LVGL grid/radials, hardware JPEG path, microSD runtime bundles and A/B OTA.&lt;/p&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;section&quot; aria-labelledby=&quot;roadmap-title&quot;&gt;
+    &lt;h2 id=&quot;roadmap-title&quot;&gt;Hardware-gated roadmap&lt;/h2&gt;
+    &lt;div class=&quot;split&quot;&gt;
+      &lt;div class=&quot;milestones&quot; role=&quot;group&quot; aria-label=&quot;Select a milestone&quot;&gt;
+        &lt;button class=&quot;btn is-selected&quot; type=&quot;button&quot; data-step=&quot;0&quot; aria-pressed=&quot;true&quot;&gt;&lt;span class=&quot;num&quot;&gt;M0&lt;/span&gt; Bring-up benchmark&lt;/button&gt;
+        &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;1&quot; aria-pressed=&quot;false&quot;&gt;&lt;span class=&quot;num&quot;&gt;M1&lt;/span&gt; Touch + HID vertical slice&lt;/button&gt;
+        &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;2&quot; aria-pressed=&quot;false&quot;&gt;&lt;span class=&quot;num&quot;&gt;M2&lt;/span&gt; Runtime UI + macro engine&lt;/button&gt;
+        &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;3&quot; aria-pressed=&quot;false&quot;&gt;&lt;span class=&quot;num&quot;&gt;M3&lt;/span&gt; USB sync + storage&lt;/button&gt;
+        &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;4&quot; aria-pressed=&quot;false&quot;&gt;&lt;span class=&quot;num&quot;&gt;M4&lt;/span&gt; Desktop editor&lt;/button&gt;
+        &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;5&quot; aria-pressed=&quot;false&quot;&gt;&lt;span class=&quot;num&quot;&gt;M5&lt;/span&gt; Animation + screensaver&lt;/button&gt;
+        &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;6&quot; aria-pressed=&quot;false&quot;&gt;&lt;span class=&quot;num&quot;&gt;M6&lt;/span&gt; Radials + full integration&lt;/button&gt;
+        &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;7&quot; aria-pressed=&quot;false&quot;&gt;&lt;span class=&quot;num&quot;&gt;M7&lt;/span&gt; Recovery + tester release&lt;/button&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card milestone-detail&quot; aria-live=&quot;polite&quot;&gt;
+        &lt;h3 id=&quot;step-title&quot;&gt;&lt;/h3&gt;
+        &lt;p id=&quot;step-outcome&quot;&gt;&lt;/p&gt;
+        &lt;h3&gt;Build&lt;/h3&gt;
+        &lt;ul class=&quot;clean-list&quot; id=&quot;step-build&quot;&gt;&lt;/ul&gt;
+        &lt;div class=&quot;gate&quot;&gt;&lt;i data-lucide=&quot;shield-check&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;div&gt;&lt;strong&gt;Exit gate&lt;/strong&gt;&lt;div id=&quot;step-gate&quot;&gt;&lt;/div&gt;&lt;/div&gt;&lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;section&quot; aria-labelledby=&quot;contracts-title&quot;&gt;
+    &lt;h2 id=&quot;contracts-title&quot;&gt;Contracts that keep the halves independent&lt;/h2&gt;
+    &lt;div class=&quot;contract-grid&quot;&gt;
+      &lt;div class=&quot;contract&quot;&gt;&lt;h3&gt;Project format&lt;/h3&gt;&lt;p&gt;Original media and editable definitions remain on the PC in a versioned portable archive.&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;contract&quot;&gt;&lt;h3&gt;Runtime bundle&lt;/h3&gt;&lt;p&gt;Immutable manifest, compiled assets, macro bytecode, checksums and schema version on microSD.&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;contract&quot;&gt;&lt;h3&gt;USB protocol&lt;/h3&gt;&lt;p&gt;Capability negotiation, chunked transfer, resume, verification, atomic activation, diagnostics and OTA.&lt;/p&gt;&lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;section two-col&quot; aria-label=&quot;Interaction and media design&quot;&gt;
+    &lt;div&gt;
+      &lt;h2&gt;Interaction model&lt;/h2&gt;
+      &lt;ul class=&quot;clean-list&quot;&gt;
+        &lt;li&gt;Single active touch contact; immediate pressed feedback.&lt;/li&gt;
+        &lt;li&gt;Tap executes on release. Movement past calibrated slop opens a 4, 6 or 8-way radial.&lt;/li&gt;
+        &lt;li&gt;Slide to select; return to centre to cancel; quick outward flick remains selected.&lt;/li&gt;
+        &lt;li&gt;Profiles contain fixed 8×4 pages of square 1:1 icons, vertically centred with deliberate black bars above and below. Buttons perform explicit page/profile jumps.&lt;/li&gt;
+        &lt;li&gt;Up to eight concurrent timed macros; same-button retrigger cancels and restarts its instance.&lt;/li&gt;
+      &lt;/ul&gt;
+    &lt;/div&gt;
+    &lt;div&gt;
+      &lt;h2&gt;Media pipeline&lt;/h2&gt;
+      &lt;ul class=&quot;clean-list&quot;&gt;
+        &lt;li&gt;Import PNG, JPEG, GIF, APNG, WebP and common video containers through FFmpeg.&lt;/li&gt;
+        &lt;li&gt;Compile icon-only 144×144 assets, target 15 FPS and throttle animation before input.&lt;/li&gt;
+        &lt;li&gt;Compile landscape 1280×720 MJPEG, target 30 FPS using ESP32-P4 JPEG hardware.&lt;/li&gt;
+        &lt;li&gt;Preload short compressed loops when the live PSRAM budget permits; otherwise stream with a ring buffer.&lt;/li&gt;
+        &lt;li&gt;Wake touch is consumed; LVGL returns on a pre-rendered frame.&lt;/li&gt;
+      &lt;/ul&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;section&quot; aria-labelledby=&quot;sla-title&quot;&gt;
+    &lt;h2 id=&quot;sla-title&quot;&gt;Acceptance targets&lt;/h2&gt;
+    &lt;table&gt;
+      &lt;thead&gt;&lt;tr&gt;&lt;th&gt;Path&lt;/th&gt;&lt;th&gt;Target&lt;/th&gt;&lt;th&gt;Test gate&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;
+      &lt;tbody&gt;
+        &lt;tr&gt;&lt;td&gt;Touch feedback&lt;/td&gt;&lt;td&gt;≤20 ms&lt;/td&gt;&lt;td&gt;Measured on the physical panel under animated-icon load&lt;/td&gt;&lt;/tr&gt;
+        &lt;tr&gt;&lt;td&gt;HID after release&lt;/td&gt;&lt;td&gt;≤10 ms&lt;/td&gt;&lt;td&gt;F13–F24 and mixed reports captured on x64 and ARM64 Windows&lt;/td&gt;&lt;/tr&gt;
+        &lt;tr&gt;&lt;td&gt;Radial opening&lt;/td&gt;&lt;td&gt;≤30 ms&lt;/td&gt;&lt;td&gt;Threshold crossing to visible menu; no accidental tap&lt;/td&gt;&lt;/tr&gt;
+        &lt;tr&gt;&lt;td&gt;Page transition&lt;/td&gt;&lt;td&gt;≤100 ms&lt;/td&gt;&lt;td&gt;First usable frame; animations may populate afterward&lt;/td&gt;&lt;/tr&gt;
+        &lt;tr&gt;&lt;td&gt;Screensaver wake&lt;/td&gt;&lt;td&gt;≤150 ms&lt;/td&gt;&lt;td&gt;Touch to usable grid; wake touch never triggers a macro&lt;/td&gt;&lt;/tr&gt;
+        &lt;tr&gt;&lt;td&gt;PSRAM screensaver&lt;/td&gt;&lt;td&gt;30 FPS, &amp;lt;1% drops&lt;/td&gt;&lt;td&gt;Representative high-quality short loop&lt;/td&gt;&lt;/tr&gt;
+        &lt;tr&gt;&lt;td&gt;Safety&lt;/td&gt;&lt;td&gt;Zero stuck controls&lt;/td&gt;&lt;td&gt;Cancellation, USB loss, malformed macro, reboot and firmware rollback&lt;/td&gt;&lt;/tr&gt;
+      &lt;/tbody&gt;
+    &lt;/table&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;section two-col&quot; aria-label=&quot;Scope and risk register&quot;&gt;
+    &lt;div&gt;
+      &lt;h2&gt;Committed v1&lt;/h2&gt;
+      &lt;ul class=&quot;clean-list&quot;&gt;
+        &lt;li&gt;Keyboard chords/sequences including F13–F24, explicit down/up steps and delays.&lt;/li&gt;
+        &lt;li&gt;Consumer controls, mouse buttons, wheel and relative movement.&lt;/li&gt;
+        &lt;li&gt;Manual profiles/pages, static and animated icons, radial actions and screensaver settings.&lt;/li&gt;
+        &lt;li&gt;Atomic sync, card initialization/diagnostics, local project export/import and device backup.&lt;/li&gt;
+        &lt;li&gt;A/B firmware update over OTG with provisional boot and rollback.&lt;/li&gt;
+        &lt;li&gt;Landscape default with USB ports on the right; reversible device-level rotation.&lt;/li&gt;
+      &lt;/ul&gt;
+      &lt;h3&gt;Explicitly deferred&lt;/h3&gt;
+      &lt;p class=&quot;text-muted&quot;&gt;Host-assisted actions and state feedback, stateful toggles, configurable grid geometry, 30 FPS button icons, user fonts, labels, multi-touch, Wi-Fi, BLE, audio, battery and public-release hardening.&lt;/p&gt;
+    &lt;/div&gt;
+    &lt;div&gt;
+      &lt;h2&gt;Top risks and kill tests&lt;/h2&gt;
+      &lt;table&gt;
+        &lt;tbody&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;span class=&quot;status risk-high&quot;&gt;&lt;i data-lucide=&quot;triangle-alert&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;Media bandwidth&lt;/span&gt;&lt;/td&gt;&lt;td&gt;M0 measures JPEG, SDIO, PSRAM and DSI separately and together before UI architecture is frozen.&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;span class=&quot;status&quot;&gt;&lt;i data-lucide=&quot;usb&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;Composite USB&lt;/span&gt;&lt;/td&gt;&lt;td&gt;M1 validates no-driver WinUSB plus HID enumeration on both Windows architectures.&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;span class=&quot;status&quot;&gt;&lt;i data-lucide=&quot;memory-stick&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;Memory pressure&lt;/span&gt;&lt;/td&gt;&lt;td&gt;Fixed reservations, allocation telemetry and graceful animation throttling; HID never depends on media allocation.&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;span class=&quot;status&quot;&gt;&lt;i data-lucide=&quot;refresh-cw&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;Update failure&lt;/span&gt;&lt;/td&gt;&lt;td&gt;M7 fault-injects unplug, corrupt image, boot crash and incompatible schema.&lt;/td&gt;&lt;/tr&gt;
+        &lt;/tbody&gt;
+      &lt;/table&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;p class=&quot;foot text-small&quot;&gt;Every firmware milestone ends on the attached Waveshare board with captured logs and measurements; a successful compile alone does not satisfy a gate.&lt;/p&gt;
+
+  &lt;script&gt;
+    (() =&gt; {
+      const root = document.getElementById(&#x27;screendeck-plan&#x27;);
+      const steps = [
+        {
+          title: &#x27;M0 — Board bring-up and performance truth&#x27;,
+          outcome: &#x27;Freeze the low-level architecture only after measuring the real board.&#x27;,
+          build: [
+            &#x27;Pin ESP-IDF and Waveshare/Espressif BSP revisions; document reproducible toolchain setup.&#x27;,
+            &#x27;Bring up 1280×720 landscape display and rotated touch with USB ports on the right.&#x27;,
+            &#x27;Benchmark MIPI-DSI flush modes, SDIO reads, PSRAM copies, JPEG decode and combined playback.&#x27;,
+            &#x27;Record heap/PSRAM maps for candidate LVGL and media buffer layouts.&#x27;
+          ],
+          gate: &#x27;Stable 30-minute benchmark run; selected buffer plan has measured headroom and no corruption.&#x27;
+        },
+        {
+          title: &#x27;M1 — Touch-to-F13 vertical slice&#x27;,
+          outcome: &#x27;Prove the shortest complete path from a finger to AutoHotkey before adding features.&#x27;,
+          build: [
+            &#x27;TinyUSB composite device: keyboard, consumer, mouse and WinUSB vendor interface.&#x27;,
+            &#x27;Microsoft OS descriptors for driverless WinUSB enumeration.&#x27;,
+            &#x27;Single-contact touch state machine with press/release telemetry.&#x27;,
+            &#x27;Minimal 8×4 diagnostic grid sending F13–F24 and timing markers.&#x27;
+          ],
+          gate: &#x27;x64 and ARM64 Windows enumerate without a custom driver; AHK sees F13–F24; latency meets target.&#x27;
+        },
+        {
+          title: &#x27;M2 — Runtime UI and safe macro engine&#x27;,
+          outcome: &#x27;Deliver autonomous static pages and robust concurrent HID execution.&#x27;,
+          build: [
+            &#x27;LVGL page renderer, icon cache, pressed feedback and explicit page/profile actions.&#x27;,
+            &#x27;Versioned configuration parser with strict bounds and recovery fallback.&#x27;,
+            &#x27;Eight-slot concurrent scheduler with same-button restart and centralized HID state accounting.&#x27;,
+            &#x27;USB loss, reboot and error paths that always release controls.&#x27;
+          ],
+          gate: &#x27;Stress tapping, cancellation and profile changes produce no stuck or malformed HID reports.&#x27;
+        },
+        {
+          title: &#x27;M3 — Atomic USB synchronization and microSD ownership&#x27;,
+          outcome: &#x27;Make the device safely deployable without exposing the card as mass storage.&#x27;,
+          build: [
+            &#x27;Framed bulk protocol with versions, capabilities, chunk checksums, acknowledgements and resume.&#x27;,
+            &#x27;Staging directory, whole-bundle validation and atomic active-pointer swap.&#x27;,
+            &#x27;Card initialize, capacity, health, cleanup and diagnostic operations.&#x27;,
+            &#x27;Internal-flash recovery UI while HID output remains disabled without a valid bundle.&#x27;
+          ],
+          gate: &#x27;Power or cable removal at every upload phase preserves either the old or complete new bundle.&#x27;
+        },
+        {
+          title: &#x27;M4 — Lightweight Windows macro editor&#x27;,
+          outcome: &#x27;Create, preview, validate and synchronize complete projects on x64 and ARM64.&#x27;,
+          build: [
+            &#x27;Tauri 2 shell, Svelte UI and Rust domain model shared with the bundle compiler.&#x27;,
+            &#x27;Centred 8×4 square-icon page editor with black letterbox preview, profile tree, drag/drop icons, macro step editor and HID key picker.&#x27;,
+            &#x27;Portable project archive containing original media and editable source.&#x27;,
+            &#x27;Device status, diff summary, explicit Sync to device, backup and actionable errors.&#x27;
+          ],
+          gate: &#x27;The same sample project round-trips and synchronizes from native x64 and ARM64 builds.&#x27;
+        },
+        {
+          title: &#x27;M5 — Animated icons and hardware-JPEG screensaver&#x27;,
+          outcome: &#x27;Add rich motion without allowing media to steal input responsiveness.&#x27;,
+          build: [
+            &#x27;Minimal LGPL FFmpeg sidecars for both architectures and deterministic conversion presets.&#x27;,
+            &#x27;15 FPS icon asset pipeline and visible-page animation scheduler with adaptive throttling.&#x27;,
+            &#x27;1280×720 30 FPS MJPEG indexer, hardware decode path and display handoff.&#x27;,
+            &#x27;Runtime PSRAM-preload decision plus buffered SDIO fallback; LVGL pause/resume state machine.&#x27;
+          ],
+          gate: &#x27;Representative 32-icon page remains responsive; short screensaver meets frame-drop and wake targets.&#x27;
+        },
+        {
+          title: &#x27;M6 — Radial menus and integrated UX polish&#x27;,
+          outcome: &#x27;Make tap and flick gestures predictable under real use.&#x27;,
+          build: [
+            &#x27;Per-button 4/6/8-way icon-only radial definitions.&#x27;,
+            &#x27;Calibrated movement threshold, centre cancel, sticky outer selection and edge-aware placement.&#x27;,
+            &#x27;Editor preview/simulator using the same geometry rules as firmware.&#x27;,
+            &#x27;Brightness, idle timeout, orientation and screensaver settings.&#x27;
+          ],
+          gate: &#x27;Gesture test matrix passes corners, edges, jitter, fast flicks and wake-touch suppression.&#x27;
+        },
+        {
+          title: &#x27;M7 — Firmware recovery and trusted-tester release&#x27;,
+          outcome: &#x27;Ship a recoverable build that testers cannot casually brick.&#x27;,
+          build: [
+            &#x27;A/B partition table, OTG upload, hash verification, provisional boot health checks and rollback.&#x27;,
+            &#x27;Transactional configuration migrations with retained previous bundle.&#x27;,
+            &#x27;x64/ARM64 installers plus portable builds, logs export and diagnostic report.&#x27;,
+            &#x27;Soak, suspend/resume, hot-unplug, corrupt-card and fault-injected update testing.&#x27;
+          ],
+          gate: &#x27;Release checklist passes on the attached board and at least one clean x64 and ARM64 Windows system.&#x27;
+        }
+      ];
+
+      const title = root.querySelector(&#x27;#step-title&#x27;);
+      const outcome = root.querySelector(&#x27;#step-outcome&#x27;);
+      const build = root.querySelector(&#x27;#step-build&#x27;);
+      const gate = root.querySelector(&#x27;#step-gate&#x27;);
+      const buttons = [...root.querySelectorAll(&#x27;[data-step]&#x27;)];
+
+      function showStep(index) {
+        const step = steps[index];
+        title.textContent = step.title;
+        outcome.textContent = step.outcome;
+        build.replaceChildren(...step.build.map(item =&gt; {
+          const li = document.createElement(&#x27;li&#x27;);
+          li.textContent = item;
+          return li;
+        }));
+        gate.textContent = step.gate;
+        buttons.forEach((button, i) =&gt; {
+          const selected = i === index;
+          button.classList.toggle(&#x27;is-selected&#x27;, selected);
+          button.setAttribute(&#x27;aria-pressed&#x27;, String(selected));
+        });
+      }
+
+      buttons.forEach(button =&gt; button.addEventListener(&#x27;click&#x27;, () =&gt; showStep(Number(button.dataset.step))));
+      showStep(0);
+    })();
+  &lt;/script&gt;
+&lt;/div&gt;
+
+&lt;script src=&quot;https://unpkg.com/@floating-ui/core@1.7.3/dist/floating-ui.core.umd.min.js&quot;&gt;&lt;/script&gt;
+&lt;script src=&quot;https://unpkg.com/@floating-ui/dom@1.7.4/dist/floating-ui.dom.umd.min.js&quot;&gt;&lt;/script&gt;
+&lt;script&gt;
+(() =&gt; {
+  if (window.FloatingUIDOM == null) {
+    return;
+  }
+  const { autoUpdate, computePosition, flip, offset, shift, size } =
+    window.FloatingUIDOM;
+  const tooltipPlacements = new Set([&quot;top&quot;, &quot;right&quot;, &quot;bottom&quot;, &quot;left&quot;]);
+  const tooltipId = `codex-visualization-tooltip-${
+    window.crypto?.randomUUID?.() ?? Date.now().toString(36)
+  }`;
+  const tooltipGap = 5;
+  const hoverDelay = 700;
+  const skipDelay = 300;
+  let activeTrigger = null;
+  let pendingTrigger = null;
+  let tooltip = null;
+  let openTimeout = null;
+  let autoUpdateCleanup = null;
+  let positionRequest = 0;
+  let skipDelayUntil = 0;
+
+  const getTrigger = (target) =&gt;
+    target?.nodeType === Node.ELEMENT_NODE
+      ? target.closest(&quot;[data-tooltip]&quot;)
+      : null;
+  const containsTarget = (trigger, target) =&gt;
+    target?.nodeType != null &amp;&amp; trigger.contains(target);
+  const getContent = (trigger) =&gt;
+    trigger.getAttribute(&quot;data-tooltip&quot;)?.trim() ?? &quot;&quot;;
+  const getPlacement = (trigger) =&gt; {
+    const placement = trigger.getAttribute(&quot;data-tooltip-placement&quot;);
+    return tooltipPlacements.has(placement) ? placement : &quot;top&quot;;
+  };
+  const getTooltip = () =&gt; {
+    if (tooltip == null) {
+      tooltip = document.createElement(&quot;div&quot;);
+      tooltip.id = tooltipId;
+      tooltip.className = &quot;tooltip&quot;;
+      tooltip.setAttribute(&quot;role&quot;, &quot;tooltip&quot;);
+    }
+    return tooltip;
+  };
+  const setDescribedBy = (trigger, described) =&gt; {
+    const ids = new Set(
+      (trigger.getAttribute(&quot;aria-describedby&quot;) ?? &quot;&quot;)
+        .split(/\s+/)
+        .filter(Boolean),
+    );
+    if (described) {
+      ids.add(tooltipId);
+    } else {
+      ids.delete(tooltipId);
+    }
+    if (ids.size === 0) {
+      trigger.removeAttribute(&quot;aria-describedby&quot;);
+    } else {
+      trigger.setAttribute(&quot;aria-describedby&quot;, [...ids].join(&quot; &quot;));
+    }
+  };
+  const clearOpenTimeout = () =&gt; {
+    if (openTimeout != null) {
+      window.clearTimeout(openTimeout);
+      openTimeout = null;
+    }
+    pendingTrigger = null;
+  };
+  const closeTooltip = (activateSkipDelay = true) =&gt; {
+    clearOpenTimeout();
+    positionRequest += 1;
+    autoUpdateCleanup?.();
+    autoUpdateCleanup = null;
+    if (activeTrigger == null) {
+      return;
+    }
+    setDescribedBy(activeTrigger, false);
+    activeTrigger = null;
+    tooltip?.remove();
+    if (activateSkipDelay) {
+      skipDelayUntil = Date.now() + skipDelay;
+    }
+  };
+  const updatePosition = (trigger, floating) =&gt; {
+    const request = ++positionRequest;
+    void computePosition(trigger, floating, {
+      middleware: [
+        offset(tooltipGap),
+        flip({ padding: tooltipGap }),
+        shift({ padding: tooltipGap }),
+        size({
+          padding: tooltipGap,
+          apply({ availableHeight, availableWidth, elements }) {
+            elements.floating.style.setProperty(
+              &quot;--tooltip-available-width&quot;,
+              `${Math.max(0, availableWidth)}px`,
+            );
+            elements.floating.style.setProperty(
+              &quot;--tooltip-available-height&quot;,
+              `${Math.max(0, availableHeight)}px`,
+            );
+          },
+        }),
+      ],
+      placement: getPlacement(trigger),
+      strategy: &quot;fixed&quot;,
+    })
+      .then(({ x, y }) =&gt; {
+        if (activeTrigger !== trigger || request !== positionRequest) {
+          return;
+        }
+        const scale = window.devicePixelRatio || 1;
+        floating.style.transform = `translate(${Math.round(x * scale) / scale}px, ${Math.round(y * scale) / scale}px)`;
+        floating.style.visibility = &quot;visible&quot;;
+      })
+      .catch(() =&gt; {
+        if (activeTrigger === trigger &amp;&amp; request === positionRequest) {
+          closeTooltip(false);
+        }
+      });
+  };
+  const openTooltip = (trigger) =&gt; {
+    const content = getContent(trigger);
+    if (!trigger.isConnected || content.length === 0) {
+      return;
+    }
+    clearOpenTimeout();
+    if (activeTrigger === trigger) {
+      return;
+    }
+    closeTooltip();
+    const floating = getTooltip();
+    floating.textContent = content;
+    floating.style.visibility = &quot;hidden&quot;;
+    floating.style.transform = &quot;translate(0, 0)&quot;;
+    document.body.appendChild(floating);
+    activeTrigger = trigger;
+    setDescribedBy(trigger, true);
+    autoUpdateCleanup = autoUpdate(trigger, floating, () =&gt; {
+      updatePosition(trigger, floating);
+    });
+  };
+  const requestOpen = (trigger, immediate = false) =&gt; {
+    if (
+      getContent(trigger).length === 0 ||
+      activeTrigger === trigger ||
+      pendingTrigger === trigger
+    ) {
+      return;
+    }
+    clearOpenTimeout();
+    pendingTrigger = trigger;
+    const delay =
+      immediate || activeTrigger != null || Date.now() &lt; skipDelayUntil
+        ? 0
+        : hoverDelay;
+    if (delay === 0) {
+      openTooltip(trigger);
+      return;
+    }
+    openTimeout = window.setTimeout(() =&gt; {
+      openTimeout = null;
+      pendingTrigger = null;
+      openTooltip(trigger);
+    }, delay);
+  };
+  const handlePointerOpen = (event) =&gt; {
+    if (event.pointerType === &quot;touch&quot;) {
+      return;
+    }
+    const trigger = getTrigger(event.target);
+    if (trigger == null || containsTarget(trigger, event.relatedTarget)) {
+      return;
+    }
+    requestOpen(trigger);
+  };
+  const handleLeave = (event) =&gt; {
+    const trigger = getTrigger(event.target);
+    if (trigger == null || containsTarget(trigger, event.relatedTarget)) {
+      return;
+    }
+    if (activeTrigger === trigger || pendingTrigger === trigger) {
+      closeTooltip();
+    }
+  };
+  const handleFocusIn = (event) =&gt; {
+    const trigger = getTrigger(event.target);
+    if (trigger?.matches(&quot;:focus-visible&quot;)) {
+      requestOpen(trigger, true);
+    }
+  };
+  const handleKeyDown = (event) =&gt; {
+    if (event.key === &quot;Escape&quot;) {
+      closeTooltip();
+    }
+  };
+  const handleContextMenu = (event) =&gt; {
+    const trigger = getTrigger(event.target);
+    if (activeTrigger === trigger || pendingTrigger === trigger) {
+      closeTooltip();
+    }
+  };
+  const destroy = () =&gt; {
+    closeTooltip(false);
+    document.removeEventListener(&quot;pointerover&quot;, handlePointerOpen);
+    document.removeEventListener(&quot;pointerout&quot;, handleLeave);
+    document.removeEventListener(&quot;focusin&quot;, handleFocusIn);
+    document.removeEventListener(&quot;focusout&quot;, handleLeave);
+    document.removeEventListener(&quot;keydown&quot;, handleKeyDown);
+    document.removeEventListener(&quot;contextmenu&quot;, handleContextMenu);
+    tooltip = null;
+  };
+
+  document.addEventListener(&quot;pointerover&quot;, handlePointerOpen);
+  document.addEventListener(&quot;pointerout&quot;, handleLeave);
+  document.addEventListener(&quot;focusin&quot;, handleFocusIn);
+  document.addEventListener(&quot;focusout&quot;, handleLeave);
+  document.addEventListener(&quot;keydown&quot;, handleKeyDown);
+  document.addEventListener(&quot;contextmenu&quot;, handleContextMenu);
+  window.addEventListener(&quot;pagehide&quot;, destroy, { once: true });
+})();
+&lt;/script&gt;
+&lt;script id=&quot;codex-visualization-lucide&quot; async src=&quot;https://unpkg.com/lucide@1.17.0/dist/umd/lucide.js&quot;&gt;&lt;/script&gt;
+&lt;script&gt;
+(() =&gt; {
+  const initialize = () =&gt; {
+    globalThis.lucide?.createIcons({ attrs: { width: 16, height: 16 } });
+  };
+  if (globalThis.lucide != null) {
+    initialize();
+    return;
+  }
+  document
+    .getElementById(&quot;codex-visualization-lucide&quot;)
+    ?.addEventListener(&quot;load&quot;, initialize, { once: true });
+})();
+&lt;/script&gt;
+
+&lt;/body&gt;
+&lt;/html&gt;
+"></iframe>
+</body>
+</html>

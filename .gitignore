@@ -1,0 +1,18 @@
+# ESP-IDF build output
+build/
+.m5_build*/
+.m5_direct/
+sdkconfig.old
+managed_components/
+
+# Desktop build/dependency output
+node_modules/
+dist/
+target/
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

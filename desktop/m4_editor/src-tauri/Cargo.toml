@@ -1,0 +1,26 @@
+[package]
+name = "screendeck-editor"
+version = "0.4.0"
+description = "Screendeck Windows macro editor"
+authors = ["Screendeck"]
+edition = "2021"
+
+[lib]
+name = "screendeck_editor_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+thiserror = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"
