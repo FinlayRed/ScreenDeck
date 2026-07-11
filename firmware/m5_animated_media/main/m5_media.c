@@ -40,6 +40,7 @@ static const char *TAG = "m5";
 #define M5_LCD_WIDTH 1280
 #define M5_LCD_HEIGHT 720
 #define M5_RGB565_BYTES (M5_LCD_WIDTH * M5_LCD_HEIGHT * 2U)
+#define M5_INDEX_BUFFER_BYTES (16U * 1024U)
 
 typedef enum {
     M5_STATE_ACTIVE,
@@ -75,6 +76,7 @@ static volatile m5_state_t s_state = M5_STATE_ACTIVE;
 static volatile int64_t s_last_activity_us;
 static volatile bool s_ui_ready;
 static volatile bool s_wake_requested;
+static uint8_t s_index_buffer[M5_INDEX_BUFFER_BYTES];
 
 static const char *const s_symbols[M5_BUTTONS] = {
     LV_SYMBOL_PLAY, LV_SYMBOL_STOP, LV_SYMBOL_SETTINGS, LV_SYMBOL_LOOP,
@@ -212,29 +214,31 @@ static bool m5_index_mjpeg(void)
     uint32_t start = 0;
     uint8_t previous = 0;
     bool in_frame = false;
-    int value;
-    while ((value = fgetc(file)) != EOF) {
-        const uint8_t current = (uint8_t) value;
-        if (!in_frame && previous == 0xFF && current == 0xD8) {
-            start = position - 1U;
-            in_frame = true;
-        } else if (in_frame && previous == 0xFF && current == 0xD9) {
-            if (s_media.frame_count < M5_MAX_FRAMES) {
-                const uint32_t end = position + 1U;
-                const uint32_t length = end - start;
-                s_media.frames[s_media.frame_count++] = (m5_frame_index_t) {
-                    .offset = start, .length = length,
-                };
-                if (length > s_media.largest_frame) s_media.largest_frame = length;
-            } else {
-                ESP_LOGW(TAG, "M5_MEDIA result=too_many_frames limit=%u", M5_MAX_FRAMES);
-                fclose(file);
-                return false;
+    size_t block_bytes;
+    while ((block_bytes = fread(s_index_buffer, 1, sizeof(s_index_buffer), file)) != 0) {
+        for (size_t index = 0; index < block_bytes; ++index) {
+            const uint8_t current = s_index_buffer[index];
+            if (!in_frame && previous == 0xFF && current == 0xD8) {
+                start = position - 1U;
+                in_frame = true;
+            } else if (in_frame && previous == 0xFF && current == 0xD9) {
+                if (s_media.frame_count < M5_MAX_FRAMES) {
+                    const uint32_t end = position + 1U;
+                    const uint32_t length = end - start;
+                    s_media.frames[s_media.frame_count++] = (m5_frame_index_t) {
+                        .offset = start, .length = length,
+                    };
+                    if (length > s_media.largest_frame) s_media.largest_frame = length;
+                } else {
+                    ESP_LOGW(TAG, "M5_MEDIA result=too_many_frames limit=%u", M5_MAX_FRAMES);
+                    fclose(file);
+                    return false;
+                }
+                in_frame = false;
             }
-            in_frame = false;
+            previous = current;
+            ++position;
         }
-        previous = current;
-        ++position;
     }
     fclose(file);
     if (in_frame || s_media.frame_count == 0) return false;
@@ -336,6 +340,12 @@ static bool m5_decode_and_draw(uint32_t index)
 static void m5_media_task(void *argument)
 {
     (void) argument;
+    const bool media_ready = m5_index_mjpeg();
+    if (!media_ready) {
+        ESP_LOGI(TAG, "M5_MEDIA source=none frames=0 fps=30");
+    }
+    s_last_activity_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "M5_COMPLETE animation_fps=15 saver_ready=%u", media_ready);
     uint32_t animation_tick = 0;
     uint32_t saver_frame = 0;
     int64_t next_frame_us = 0;
@@ -413,14 +423,8 @@ void m5_media_start(lv_display_t *display)
     memset(&s_media, 0, sizeof(s_media));
     s_ui_ready = false;
     s_wake_requested = false;
-    const bool media_ready = m5_index_mjpeg();
-    if (!media_ready) {
-        ESP_LOGI(TAG, "M5_MEDIA source=none frames=0 fps=30");
-    }
-
-    /* Render the first page synchronously. Leaving the initial paint to the
-     * worker task made a failed/late worker look like a permanently white
-     * panel, even though the LCD and LVGL were correctly initialized. */
+    /* Paint the first page before touching the potentially large media file.
+     * The worker indexes it in the background after the usable UI is visible. */
     if (esp_lv_adapter_lock(1000) == ESP_OK) {
         m5_render_active_ui();
         ESP_ERROR_CHECK(esp_lv_adapter_refresh_now(s_display));
@@ -432,5 +436,5 @@ void m5_media_start(lv_display_t *display)
     }
     BaseType_t task_ok = xTaskCreate(m5_media_task, "m5_media", 8192, NULL, 5, NULL);
     ESP_ERROR_CHECK(task_ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
-    ESP_LOGI(TAG, "M5_COMPLETE animation_fps=15 saver_ready=%u", media_ready);
+    ESP_LOGI(TAG, "M5_MEDIA indexing=background");
 }
