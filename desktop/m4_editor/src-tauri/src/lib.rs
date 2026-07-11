@@ -4,7 +4,12 @@ mod device;
 mod model;
 
 use model::Project;
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[tauri::command]
 fn validate_project(project: Project) -> compiler::CompileSummary { compiler::summarize(&project) }
@@ -40,9 +45,65 @@ async fn sync_project(project: Project) -> Result<device::SyncResult, String> {
 #[tauri::command]
 async fn upload_screensaver(path: String) -> Result<device::ScreensaverResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let media = fs::read(&path).map_err(|error| format!("could not read screensaver: {error}"))?;
+        let media = prepare_screensaver(Path::new(&path))?;
         device::upload_screensaver(&media).map_err(|error| error.to_string())
     }).await.map_err(|error| format!("screensaver worker failed: {error}"))?
+}
+
+fn prepare_screensaver(path: &Path) -> Result<Vec<u8>, String> {
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
+    if matches!(extension.as_str(), "mjpg" | "mjpeg") {
+        return fs::read(path).map_err(|error| format!("could not read screensaver: {error}"));
+    }
+
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let output = std::env::temp_dir().join(format!("screendeck-{stamp}-{}.mjpeg", std::process::id()));
+    let ffmpeg = ffmpeg_path();
+    for quality in ["20", "26", "31"] {
+        let result = Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-stream_loop", "-1", "-i"])
+            .arg(path)
+            .args([
+                "-an",
+                "-vf",
+                "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,format=yuvj420p",
+                "-frames:v",
+                "900",
+                "-c:v",
+                "mjpeg",
+                "-q:v",
+                quality,
+                "-f",
+                "mjpeg",
+            ])
+            .arg(&output)
+            .output()
+            .map_err(|error| format!(
+                "could not start FFmpeg ({error}). Install FFmpeg or place ffmpeg.exe beside the Screendeck app"
+            ))?;
+
+        if !result.status.success() {
+            let _ = fs::remove_file(&output);
+            let detail = String::from_utf8_lossy(&result.stderr);
+            return Err(format!("FFmpeg conversion failed: {}", detail.trim()));
+        }
+        let size = fs::metadata(&output).map_err(|error| format!("could not inspect converted screensaver: {error}"))?.len();
+        if size <= 16 * 1024 * 1024 {
+            let media = fs::read(&output).map_err(|error| format!("could not read converted screensaver: {error}"));
+            let _ = fs::remove_file(&output);
+            return media;
+        }
+        let _ = fs::remove_file(&output);
+    }
+    Err("converted screensaver exceeds the 16 MiB device limit even at maximum compression; choose a shorter or less detailed source".into())
+}
+
+fn ffmpeg_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("ffmpeg.exe")))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -89,6 +150,15 @@ mod tests {
         let restored = archive::open(&path).unwrap();
         assert_eq!(restored.name, "Round trip");
         assert!(model::validate(&restored).is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg"]
+    fn ffmpeg_converts_image_to_device_mjpeg() {
+        let media = prepare_screensaver(Path::new("icons/32x32.png")).unwrap();
+        assert!(media.len() <= 16 * 1024 * 1024);
+        assert_eq!(&media[..2], &[0xff, 0xd8]);
+        assert_eq!(&media[media.len() - 2..], &[0xff, 0xd9]);
     }
 
     #[test]

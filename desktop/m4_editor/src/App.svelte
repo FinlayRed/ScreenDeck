@@ -87,10 +87,17 @@
   }
 
   async function uploadScreensaver() {
-    const path = await open({ title: "Upload screensaver", filters: [{ name: "Raw MJPEG screensaver", extensions: ["mjpg", "mjpeg"] }] });
+    const path = await open({
+      title: "Upload screensaver",
+      filters: [
+        { name: "Images and videos", extensions: ["mp4", "mov", "mkv", "avi", "webm", "gif", "png", "jpg", "jpeg", "webp", "bmp", "mjpg", "mjpeg"] },
+        { name: "Raw MJPEG screensaver", extensions: ["mjpg", "mjpeg"] }
+      ]
+    });
     if (!path || Array.isArray(path)) return;
     busy = true;
-    notice = `Uploading ${path.split(/[\\/]/).pop()}…`;
+    const rawMjpeg = /\.(mjpg|mjpeg)$/i.test(path);
+    notice = `${rawMjpeg ? "Uploading" : "Converting and uploading"} ${path.split(/[\\/]/).pop()}…`;
     try {
       const result = await uploadScreensaverToDevice(path);
       notice = `Screensaver uploaded · ${result.bytesSent.toLocaleString()} bytes${result.resumedAt ? ` · resumed at ${result.resumedAt}` : ""}`;
@@ -168,7 +175,7 @@
       <button class="icon-button" title="Save project" on:click={() => saveProject()}><Save size={17}/></button>
       <button class="icon-button" title="Export compiled backup" on:click={backup}><Archive size={17}/></button>
       <div class="divider"></div>
-      <button class="icon-button" title="Upload screensaver (.mjpg)" disabled={busy || !device.connected} on:click={uploadScreensaver}><MonitorUp size={17}/></button>
+      <button class="icon-button" title="Upload screensaver image or video" disabled={busy || !device.connected} on:click={uploadScreensaver}><MonitorUp size={17}/></button>
       <button class="sync-button" disabled={busy || !device.connected} on:click={sync}><Upload size={16}/>{busy ? "Working…" : "Sync to device"}</button>
     </nav>
   </header>

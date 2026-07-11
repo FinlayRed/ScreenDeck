@@ -15,6 +15,7 @@ target-packaged/
 target-fixed/
 target-fast/
 target-batched/
+target-converter/
 
 # Editor and OS noise
 .vscode/
