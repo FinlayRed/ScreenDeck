@@ -44,6 +44,7 @@ static const char *TAG = "m5";
 typedef enum {
     M5_STATE_ACTIVE,
     M5_STATE_PLAYING,
+    M5_STATE_WAKING,
 } m5_state_t;
 
 typedef struct {
@@ -73,6 +74,7 @@ static m5_media_t s_media;
 static volatile m5_state_t s_state = M5_STATE_ACTIVE;
 static volatile int64_t s_last_activity_us;
 static volatile bool s_ui_ready;
+static volatile bool s_wake_requested;
 
 static const char *const s_symbols[M5_BUTTONS] = {
     LV_SYMBOL_PLAY, LV_SYMBOL_STOP, LV_SYMBOL_SETTINGS, LV_SYMBOL_LOOP,
@@ -110,12 +112,12 @@ static void m5_input_event_cb(lv_event_t *event)
         return;
     }
     m5_touch_activity();
-    if (s_state == M5_STATE_PLAYING) {
-        s_state = M5_STATE_ACTIVE;
-        ESP_LOGI(TAG, "M5_STATE from=playing to=active reason=touch");
-        if (s_display != NULL) {
-            m5_render_active_ui();
-        }
+    if (s_state == M5_STATE_PLAYING && code == LV_EVENT_PRESSED) {
+        /* Never clean the screen from the callback of the object being
+         * deleted. The media task performs the transition after LVGL has
+         * returned from input dispatch; this also consumes the wake press. */
+        s_state = M5_STATE_WAKING;
+        s_wake_requested = true;
     }
 }
 
@@ -224,6 +226,10 @@ static bool m5_index_mjpeg(void)
                     .offset = start, .length = length,
                 };
                 if (length > s_media.largest_frame) s_media.largest_frame = length;
+            } else {
+                ESP_LOGW(TAG, "M5_MEDIA result=too_many_frames limit=%u", M5_MAX_FRAMES);
+                fclose(file);
+                return false;
             }
             in_frame = false;
         }
@@ -348,6 +354,18 @@ static void m5_media_task(void *argument)
             continue;
         }
         const int64_t now = esp_timer_get_time();
+        if (s_wake_requested) {
+            if (esp_lv_adapter_lock(1000)) {
+                m5_render_active_ui();
+                esp_lv_adapter_unlock();
+                s_wake_requested = false;
+                s_state = M5_STATE_ACTIVE;
+                s_last_activity_us = esp_timer_get_time();
+                ESP_LOGI(TAG, "M5_STATE from=playing to=active reason=touch consumed=1");
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
         if (s_state == M5_STATE_ACTIVE) {
             if (s_media.ready && now - s_last_activity_us >= (int64_t) M5_SCREENSAVER_IDLE_MS * 1000) {
                 if (esp_lv_adapter_lock(1000)) {
@@ -371,7 +389,17 @@ static void m5_media_task(void *argument)
             if (!drawn) {
                 ESP_LOGW(TAG, "M5_FRAME index=%u dropped=1", saver_frame - 1);
             }
-            next_frame_us = now + (1000000 / M5_SCREENSAVER_FPS);
+            const int64_t period_us = 1000000 / M5_SCREENSAVER_FPS;
+            if (next_frame_us == 0) next_frame_us = now;
+            next_frame_us += period_us;
+            /* Drop timeline slots instead of slowing the whole video when a
+             * read/decode overruns. Input therefore gets CPU time promptly. */
+            if (next_frame_us <= esp_timer_get_time()) {
+                const uint32_t skipped = (uint32_t) ((esp_timer_get_time() - next_frame_us) / period_us) + 1U;
+                saver_frame += skipped;
+                next_frame_us += (int64_t) skipped * period_us;
+                ESP_LOGW(TAG, "M5_FRAME index=%u dropped=1 count=%u reason=deadline", saver_frame, skipped);
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -384,6 +412,7 @@ void m5_media_start(lv_display_t *display)
     s_last_activity_us = esp_timer_get_time();
     memset(&s_media, 0, sizeof(s_media));
     s_ui_ready = false;
+    s_wake_requested = false;
     const bool media_ready = m5_index_mjpeg();
     if (!media_ready) {
         ESP_LOGI(TAG, "M5_MEDIA source=none frames=0 fps=30");

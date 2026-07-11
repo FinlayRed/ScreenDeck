@@ -23,3 +23,16 @@ M5_COMPLETE animation_fps=15 saver_ready=1
 
 The file is intentionally a raw MJPEG stream (concatenated SOI/EOI JPEG
 frames), so the host can produce it deterministically without a container.
+
+## Deterministic conversion
+
+Use `tools/m5_convert_media.ps1`. It selects the matching x64/ARM64 sidecar
+from `desktop/m4_editor/src-tauri/resources/ffmpeg/<arch>/ffmpeg.exe`, falling
+back to an installed `ffmpeg` during development:
+
+```powershell
+.\tools\m5_convert_media.ps1 -Kind Screensaver -InputPath .\clip.mp4 `
+  -OutputPath .\screensaver.mjpg
+.\tools\m5_convert_media.ps1 -Kind Icon -InputPath .\icon.gif `
+  -OutputPath '.\icon-frames\frame-%04d.jpg'
+```

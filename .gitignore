@@ -2,6 +2,8 @@
 build/
 .m5_build*/
 .m5_direct/
+.m5_verify*/
+.ccache/
 sdkconfig.old
 managed_components/
 
@@ -16,3 +18,7 @@ target/
 .DS_Store
 Thumbs.db
 *.log
+
+# Local M5 media smoke-test output
+.m5_sample.*
+.m5_icon-*.jpg
