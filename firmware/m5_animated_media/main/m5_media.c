@@ -62,6 +62,7 @@ typedef struct {
     uint8_t *preload;
     uint8_t *read_buffer;
     uint8_t *decoded_buffer;
+    size_t decoded_buffer_size;
     jpeg_decoder_handle_t decoder;
     bool ready;
     bool preloaded;
@@ -274,7 +275,11 @@ static bool m5_index_mjpeg(void)
             return false;
         }
     }
-    s_media.decoded_buffer = heap_caps_malloc(M5_RGB565_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const jpeg_decode_memory_alloc_cfg_t output_alloc_cfg = {
+        .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
+    };
+    s_media.decoded_buffer = jpeg_alloc_decoder_mem(M5_RGB565_BYTES, &output_alloc_cfg,
+                                                     &s_media.decoded_buffer_size);
     if (s_media.decoded_buffer == NULL || jpeg_new_decoder_engine(&(jpeg_decode_engine_cfg_t) {
         .intr_priority = 1, .timeout_ms = 100,
     }, &s_media.decoder) != ESP_OK) {
@@ -324,7 +329,7 @@ static bool m5_decode_and_draw(uint32_t index)
         .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
     };
     if (jpeg_decoder_process(s_media.decoder, &decode_cfg, input, input_size,
-                             s_media.decoded_buffer, M5_RGB565_BYTES, &output_size) != ESP_OK ||
+                             s_media.decoded_buffer, s_media.decoded_buffer_size, &output_size) != ESP_OK ||
         output_size < M5_RGB565_BYTES) {
         return false;
     }
