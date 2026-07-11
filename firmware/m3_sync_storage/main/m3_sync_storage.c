@@ -38,13 +38,17 @@ static const char *TAG = "m3";
 #define M3_BUNDLE_MAGIC 0x33424453UL   /* SDB3 */
 #define M3_POINTER_MAGIC 0x33525450UL  /* PTR3 */
 #define M3_MAX_FRAME_PAYLOAD 1400
-#define M3_RX_PACKET_BYTES 512
+#define M3_RX_PACKET_BYTES (sizeof(m3_frame_header_t) + M3_MAX_FRAME_PAYLOAD)
 #define M3_RX_QUEUE_DEPTH 8
 #define M3_ROOT BSP_SD_MOUNT_POINT "/screendeck"
 #define M3_BUNDLES_DIR M3_ROOT "/bundles"
 #define M3_STAGE_FILE M3_ROOT "/upload.part"
 #define M3_STATE_FILE M3_ROOT "/upload.state"
+#define M3_MEDIA_STAGE_FILE M3_ROOT "/screensaver.upload"
+#define M3_MEDIA_FILE M3_ROOT "/screensaver.mjpg"
 #define M3_MAX_BUNDLE_BYTES (16U * 1024U * 1024U)
+#define M3_MAX_MEDIA_BYTES (16U * 1024U * 1024U)
+#define M3_MEDIA_WRITE_BUFFER_BYTES (64U * 1024U)
 #define M3_RESPONSE_WAIT_MS 250
 #define M3_HID_REPORT_ID 1
 #define M3_WINUSB_VENDOR_REQUEST 0x21
@@ -58,6 +62,10 @@ typedef enum {
     M3_OP_ABORT = 5,
     M3_OP_STATUS = 6,
     M3_OP_DIAG = 7,
+    M3_OP_MEDIA_BEGIN = 8,
+    M3_OP_MEDIA_CHUNK = 9,
+    M3_OP_MEDIA_COMMIT = 10,
+    M3_OP_MEDIA_ABORT = 11,
 } m3_opcode_t;
 
 typedef enum {
@@ -128,8 +136,19 @@ typedef struct {
     uint32_t active_generation;
 } m3_storage_state_t;
 
+typedef struct {
+    bool open;
+    FILE *file;
+    uint8_t *write_buffer;
+    size_t write_buffer_used;
+    uint32_t total_bytes;
+    uint32_t crc32;
+    uint32_t received_bytes;
+} m3_media_upload_t;
+
 static QueueHandle_t s_rx_queue;
 static m3_storage_state_t s_storage;
+static m3_media_upload_t s_media_upload;
 static uint8_t s_frame_buffer[sizeof(m3_frame_header_t) + M3_MAX_FRAME_PAYLOAD];
 static size_t s_frame_length;
 static bool s_usb_mounted;
@@ -561,17 +580,151 @@ static void m3_handle_commit(const m3_frame_header_t *frame)
     m3_send_response(M3_OP_COMMIT, frame->sequence, M3_STATUS_OK, generation);
 }
 
+static bool m3_validate_mjpeg_file(const char *path, uint32_t expected_bytes, uint32_t expected_crc)
+{
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) return false;
+    uint8_t block[512];
+    uint32_t crc = UINT32_MAX;
+    uint32_t bytes = 0;
+    uint8_t first[2] = {0};
+    uint8_t last[2] = {0};
+    size_t read;
+    while ((read = fread(block, 1, sizeof(block), file)) != 0) {
+        if (bytes == 0 && read >= 2) memcpy(first, block, 2);
+        for (size_t index = 0; index < read; ++index) {
+            last[0] = last[1]; last[1] = block[index];
+        }
+        crc = esp_crc32_le(crc, block, read);
+        bytes += read;
+    }
+    fclose(file);
+    return bytes == expected_bytes && crc == expected_crc &&
+           first[0] == 0xFF && first[1] == 0xD8 && last[0] == 0xFF && last[1] == 0xD9;
+}
+
+static void m3_handle_media_begin(const m3_frame_header_t *frame, const uint8_t *payload)
+{
+    if (!s_storage.mounted || frame->payload_size != sizeof(m3_begin_t)) {
+        m3_send_response(M3_OP_MEDIA_BEGIN, frame->sequence, M3_STATUS_BAD_FRAME, 0); return;
+    }
+    m3_begin_t begin; memcpy(&begin, payload, sizeof(begin));
+    if (begin.total_bytes < 4 || begin.total_bytes > M3_MAX_MEDIA_BYTES) {
+        m3_send_response(M3_OP_MEDIA_BEGIN, frame->sequence, M3_STATUS_BAD_BUNDLE, 0); return;
+    }
+    if (s_media_upload.open && s_media_upload.total_bytes == begin.total_bytes && s_media_upload.crc32 == begin.bundle_crc32) {
+        m3_send_response(M3_OP_MEDIA_BEGIN, frame->sequence, M3_STATUS_OK, s_media_upload.received_bytes); return;
+    }
+    if (s_media_upload.file != NULL) fclose(s_media_upload.file);
+    free(s_media_upload.write_buffer);
+    unlink(M3_MEDIA_STAGE_FILE);
+    FILE *file = fopen(M3_MEDIA_STAGE_FILE, "wb");
+    if (file == NULL) {
+        s_media_upload = (m3_media_upload_t) {0};
+        m3_send_response(M3_OP_MEDIA_BEGIN, frame->sequence, M3_STATUS_IO, 0); return;
+    }
+    uint8_t *write_buffer = malloc(M3_MEDIA_WRITE_BUFFER_BYTES);
+    if (write_buffer == NULL) {
+        free(write_buffer);
+        fclose(file); unlink(M3_MEDIA_STAGE_FILE);
+        s_media_upload = (m3_media_upload_t) {0};
+        m3_send_response(M3_OP_MEDIA_BEGIN, frame->sequence, M3_STATUS_IO, 0); return;
+    }
+    s_media_upload = (m3_media_upload_t) {
+        .open = true, .file = file, .write_buffer = write_buffer,
+        .total_bytes = begin.total_bytes, .crc32 = begin.bundle_crc32,
+    };
+    ESP_LOGI(TAG, "M3_MEDIA action=begin bytes=%u crc=%08" PRIx32, begin.total_bytes, begin.bundle_crc32);
+    m3_send_response(M3_OP_MEDIA_BEGIN, frame->sequence, M3_STATUS_OK, 0);
+}
+
+static void m3_handle_media_chunk(const m3_frame_header_t *frame, const uint8_t *payload, bool respond)
+{
+    if (!s_media_upload.open || frame->payload_size < sizeof(m3_chunk_prefix_t)) {
+        if (respond) m3_send_response(M3_OP_MEDIA_CHUNK, frame->sequence, M3_STATUS_BAD_STATE, s_media_upload.received_bytes);
+        return;
+    }
+    m3_chunk_prefix_t prefix; memcpy(&prefix, payload, sizeof(prefix));
+    const uint8_t *chunk = payload + sizeof(prefix);
+    const size_t chunk_size = frame->payload_size - sizeof(prefix);
+    if (prefix.offset != s_media_upload.received_bytes || chunk_size == 0 ||
+        chunk_size > M3_MAX_FRAME_PAYLOAD - sizeof(prefix) ||
+        chunk_size > s_media_upload.total_bytes - s_media_upload.received_bytes ||
+        prefix.chunk_crc32 != m3_crc32(chunk, chunk_size)) {
+        if (respond) m3_send_response(M3_OP_MEDIA_CHUNK, frame->sequence, M3_STATUS_BAD_FRAME, s_media_upload.received_bytes);
+        return;
+    }
+    bool ok = s_media_upload.file != NULL && s_media_upload.write_buffer != NULL;
+    if (ok && s_media_upload.write_buffer_used + chunk_size > M3_MEDIA_WRITE_BUFFER_BYTES) {
+        ok = fwrite(s_media_upload.write_buffer, 1, s_media_upload.write_buffer_used,
+                    s_media_upload.file) == s_media_upload.write_buffer_used;
+        s_media_upload.write_buffer_used = 0;
+    }
+    if (ok) {
+        memcpy(s_media_upload.write_buffer + s_media_upload.write_buffer_used, chunk, chunk_size);
+        s_media_upload.write_buffer_used += chunk_size;
+    }
+    if (!ok) {
+        if (respond) m3_send_response(M3_OP_MEDIA_CHUNK, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes);
+        return;
+    }
+    s_media_upload.received_bytes += chunk_size;
+    if (respond) m3_send_response(M3_OP_MEDIA_CHUNK, frame->sequence, M3_STATUS_OK, s_media_upload.received_bytes);
+}
+
+static void m3_handle_media_commit(const m3_frame_header_t *frame)
+{
+    if (s_media_upload.file != NULL) {
+        bool flushed = s_media_upload.write_buffer != NULL &&
+                       fwrite(s_media_upload.write_buffer, 1, s_media_upload.write_buffer_used,
+                              s_media_upload.file) == s_media_upload.write_buffer_used;
+        flushed = flushed && fflush(s_media_upload.file) == 0 && fsync(fileno(s_media_upload.file)) == 0;
+        fclose(s_media_upload.file);
+        s_media_upload.file = NULL;
+        if (!flushed) {
+            m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes); return;
+        }
+    }
+    free(s_media_upload.write_buffer);
+    s_media_upload.write_buffer = NULL;
+    if (!s_media_upload.open || s_media_upload.received_bytes != s_media_upload.total_bytes ||
+        !m3_validate_mjpeg_file(M3_MEDIA_STAGE_FILE, s_media_upload.total_bytes, s_media_upload.crc32)) {
+        m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_BAD_BUNDLE, s_media_upload.received_bytes); return;
+    }
+    /* FATFS cannot replace an existing name with rename. Delete only after the
+     * complete staged file has passed its CRC and MJPEG boundary checks. */
+    unlink(M3_MEDIA_FILE);
+    if (rename(M3_MEDIA_STAGE_FILE, M3_MEDIA_FILE) != 0) {
+        m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes); return;
+    }
+    const uint32_t uploaded = s_media_upload.total_bytes;
+    s_media_upload = (m3_media_upload_t) {0};
+    ESP_LOGI(TAG, "M3_MEDIA action=commit bytes=%u path=%s", uploaded, M3_MEDIA_FILE);
+    m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_OK, uploaded);
+}
+
 static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *payload)
 {
     if (frame->opcode == M3_OP_HELLO) {
-        // Capability word: protocol v1, resume, checksum, atomic pointers, no MSC.
-        m3_send_response(M3_OP_HELLO, frame->sequence, M3_STATUS_OK, 0x0000001F);
+        // Protocol v1, resume, checksums, atomic bundles, no MSC, media upload.
+        m3_send_response(M3_OP_HELLO, frame->sequence, M3_STATUS_OK, 0x0000003F);
     } else if (frame->opcode == M3_OP_BEGIN) {
         m3_handle_begin(frame, payload);
     } else if (frame->opcode == M3_OP_CHUNK) {
         m3_handle_chunk(frame, payload);
     } else if (frame->opcode == M3_OP_COMMIT) {
         m3_handle_commit(frame);
+    } else if (frame->opcode == M3_OP_MEDIA_BEGIN) {
+        m3_handle_media_begin(frame, payload);
+    } else if (frame->opcode == M3_OP_MEDIA_CHUNK) {
+        m3_handle_media_chunk(frame, payload, true);
+    } else if (frame->opcode == M3_OP_MEDIA_COMMIT) {
+        m3_handle_media_commit(frame);
+    } else if (frame->opcode == M3_OP_MEDIA_ABORT) {
+        if (s_media_upload.file != NULL) fclose(s_media_upload.file);
+        free(s_media_upload.write_buffer);
+        unlink(M3_MEDIA_STAGE_FILE); s_media_upload = (m3_media_upload_t) {0};
+        m3_send_response(M3_OP_MEDIA_ABORT, frame->sequence, M3_STATUS_OK, 0);
     } else if (frame->opcode == M3_OP_ABORT) {
         unlink(M3_STAGE_FILE); unlink(M3_STATE_FILE);
         s_storage.upload_open = false; s_storage.received_bytes = 0;
@@ -630,11 +783,19 @@ static void m3_sync_task(void *argument)
 void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bufsize)
 {
     if (itf != 0 || s_rx_queue == NULL || buffer == NULL || bufsize == 0) return;
-    m3_rx_packet_t packet = {.length = bufsize > M3_RX_PACKET_BYTES ? M3_RX_PACKET_BYTES : bufsize};
+    if (bufsize > M3_RX_PACKET_BYTES) {
+        ESP_LOGE(TAG, "M3_SYNC result=rx_frame_too_large bytes=%u", bufsize);
+        return;
+    }
+    m3_rx_packet_t packet = {.length = bufsize};
     memcpy(packet.bytes, buffer, packet.length);
     if (xQueueSend(s_rx_queue, &packet, 0) != pdTRUE) {
         ESP_LOGW(TAG, "M3_SYNC result=rx_queue_full");
     }
+    /* This TinyUSB fork mirrors callback bytes into its vendor RX FIFO before
+     * invoking us. We consume the callback buffer directly, so drain that
+     * duplicate FIFO or the OUT endpoint stops rearming after 2 KiB. */
+    tud_vendor_n_read_flush(0);
 }
 
 static void m3_usb_event_cb(tinyusb_event_t *event, void *argument)

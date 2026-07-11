@@ -36,3 +36,7 @@ back to an installed `ffmpeg` during development:
 .\tools\m5_convert_media.ps1 -Kind Icon -InputPath .\icon.gif `
   -OutputPath '.\icon-frames\frame-%04d.jpg'
 ```
+
+In the desktop editor, connect the device, then select the monitor-with-arrow
+button in the top toolbar and choose the resulting `.mjpg` file. The transfer
+is checksum-verified before it replaces the screensaver on the device.

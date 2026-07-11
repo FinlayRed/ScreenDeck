@@ -5,6 +5,7 @@ export interface ValidationIssue { path: string; message: string; severity: "err
 export interface CompileSummary { bundleBytes: number; payloadCrc32: number; fingerprint: string; issues: ValidationIssue[] }
 export interface DeviceStatus { connected: boolean; generation: number; capabilities: number; detail: string }
 export interface SyncResult { generation: number; bytesSent: number; resumedAt: number; fingerprint: string }
+export interface ScreensaverResult { bytesSent: number; resumedAt: number }
 
 const native = () => "__TAURI_INTERNALS__" in window;
 
@@ -25,6 +26,7 @@ export const deviceStatus = (): Promise<DeviceStatus> => native()
   : Promise.resolve({ connected: false, generation: 0, capabilities: 0, detail: "Browser preview — open in the Tauri app to connect." });
 
 export const syncProject = (project: Project): Promise<SyncResult> => invoke("sync_project", { project });
+export const uploadScreensaver = (path: string): Promise<ScreensaverResult> => invoke("upload_screensaver", { path });
 export const saveArchive = (path: string, project: Project): Promise<void> => invoke("save_archive", { path, project });
 export const openArchive = (path: string): Promise<Project> => invoke("open_archive", { path });
 export const backupBundle = (path: string, project: Project): Promise<void> => invoke("backup_bundle", { path, project });

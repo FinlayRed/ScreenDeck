@@ -35,11 +35,17 @@ fn sync_project(project: Project) -> Result<device::SyncResult, String> {
     device::sync(&bundle, summary.fingerprint).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn upload_screensaver(path: String) -> Result<device::ScreensaverResult, String> {
+    let media = fs::read(&path).map_err(|error| format!("could not read screensaver: {error}"))?;
+    device::upload_screensaver(&media).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![validate_project, save_archive, open_archive, backup_bundle, device_status, sync_project])
+        .invoke_handler(tauri::generate_handler![validate_project, save_archive, open_archive, backup_bundle, device_status, sync_project, upload_screensaver])
         .run(tauri::generate_context!())
         .expect("failed to run Screendeck editor");
 }

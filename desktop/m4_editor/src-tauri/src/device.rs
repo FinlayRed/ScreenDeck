@@ -10,7 +10,12 @@ const BEGIN: u8 = 2;
 const CHUNK: u8 = 3;
 const COMMIT: u8 = 4;
 const STATUS: u8 = 6;
+const MEDIA_BEGIN: u8 = 8;
+const MEDIA_CHUNK: u8 = 9;
+const MEDIA_COMMIT: u8 = 10;
 const CHUNK_BYTES: usize = 112;
+// Match the project-sync chunk size proven reliable on the physical P4.
+const MEDIA_CHUNK_BYTES: usize = 480;
 const DEVICE_RESPONSE_SETTLE_MS: u64 = 50;
 
 #[derive(Debug, Error)]
@@ -33,6 +38,10 @@ pub struct DeviceStatus { pub connected: bool, pub generation: u32, pub capabili
 #[serde(rename_all = "camelCase")]
 pub struct SyncResult { pub generation: u32, pub bytes_sent: usize, pub resumed_at: u32, pub fingerprint: String }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreensaverResult { pub bytes_sent: usize, pub resumed_at: u32 }
+
 fn status_detail(status: u32) -> &'static str {
     match status { 1 => "bad frame or checksum", 2 => "transfer is not open", 3 => "microSD I/O failure", 4 => "bundle validation failed", 5 => "device is busy", _ => "unknown device error" }
 }
@@ -53,8 +62,8 @@ fn parse_response(bytes: &[u8], opcode: u8, sequence: u32) -> Result<(u32, u32),
     Ok((u32::from_le_bytes(bytes[20..24].try_into().unwrap()), u32::from_le_bytes(bytes[24..28].try_into().unwrap())))
 }
 
-fn checked_exchange(opcode: u8, sequence: u32, payload: &[u8], operation: &'static str) -> Result<u32, DeviceError> {
-    let response = transport::exchange(&frame(opcode, sequence, payload))?;
+fn checked_exchange(session: &mut transport::Session, opcode: u8, sequence: u32, payload: &[u8], operation: &'static str) -> Result<u32, DeviceError> {
+    let response = session.exchange(&frame(opcode, sequence, payload))?;
     let (status, value) = parse_response(&response, opcode, sequence)?;
     if status != 0 { return Err(DeviceError::Rejected { operation, status, detail: status_detail(status) }); }
     // M3 sends replies non-blockingly. Give TinyUSB time to complete the IN
@@ -65,9 +74,10 @@ fn checked_exchange(opcode: u8, sequence: u32, payload: &[u8], operation: &'stat
 
 pub fn status() -> DeviceStatus {
     let result = (|| {
-        let capabilities = checked_exchange(HELLO, 1, &[], "capability query")?;
+        let mut session = transport::Session::open()?;
+        let capabilities = checked_exchange(&mut session, HELLO, 1, &[], "capability query")?;
         if capabilities & 0x1f != 0x1f { return Err(DeviceError::Protocol(format!("unsupported capability word 0x{capabilities:08X}"))); }
-        let generation = checked_exchange(STATUS, 2, &[], "status query")?;
+        let generation = checked_exchange(&mut session, STATUS, 2, &[], "status query")?;
         Ok((capabilities, generation))
     })();
     match result {
@@ -77,13 +87,14 @@ pub fn status() -> DeviceStatus {
 }
 
 pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceError> {
-    let capabilities = checked_exchange(HELLO, 1, &[], "capability query")?;
+    let mut session = transport::Session::open()?;
+    let capabilities = checked_exchange(&mut session, HELLO, 1, &[], "capability query")?;
     if capabilities & 0x1f != 0x1f { return Err(DeviceError::Protocol(format!("device capabilities 0x{capabilities:08X} do not satisfy M4"))); }
-    let initial_generation = checked_exchange(STATUS, 2, &[], "status query")?;
+    let initial_generation = checked_exchange(&mut session, STATUS, 2, &[], "status query")?;
     let payload_crc = u32::from_le_bytes(bundle[12..16].try_into().unwrap());
     let mut begin = Vec::with_capacity(8);
     begin.extend_from_slice(&(bundle.len() as u32).to_le_bytes()); begin.extend_from_slice(&payload_crc.to_le_bytes());
-    let resumed_at = checked_exchange(BEGIN, 3, &begin, "begin upload")?;
+    let resumed_at = checked_exchange(&mut session, BEGIN, 3, &begin, "begin upload")?;
     if resumed_at as usize > bundle.len() { return Err(DeviceError::Protocol(format!("resume offset {resumed_at} exceeds bundle size {}", bundle.len()))); }
     let mut offset = resumed_at as usize;
     let mut sequence = 4u32;
@@ -92,12 +103,14 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
         let chunk = &bundle[offset..end];
         let mut payload = Vec::with_capacity(chunk.len() + 8);
         payload.extend_from_slice(&(offset as u32).to_le_bytes()); payload.extend_from_slice(&crc32(chunk).to_le_bytes()); payload.extend_from_slice(chunk);
-        let acknowledged = match checked_exchange(CHUNK, sequence, &payload, "upload chunk") {
+        let acknowledged = match checked_exchange(&mut session, CHUNK, sequence, &payload, "upload chunk") {
             Ok(value) => value,
             Err(DeviceError::Protocol(message)) if message.contains("timed out") => {
                 thread::sleep(Duration::from_millis(250));
+                drop(session);
+                session = transport::Session::open()?;
                 sequence += 1;
-                let safe_offset = checked_exchange(BEGIN, sequence, &begin, "recover upload acknowledgement")?;
+                let safe_offset = checked_exchange(&mut session, BEGIN, sequence, &begin, "recover upload acknowledgement")?;
                 if safe_offset < offset as u32 || safe_offset as usize > bundle.len() { return Err(DeviceError::Protocol(format!("invalid recovered offset {safe_offset}"))); }
                 offset = safe_offset as usize;
                 sequence += 1;
@@ -108,17 +121,56 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
         if acknowledged as usize != end { return Err(DeviceError::Protocol(format!("device acknowledged byte {acknowledged}; expected {end}"))); }
         offset = end; sequence += 1;
     }
-    let generation = match checked_exchange(COMMIT, sequence, &[], "commit bundle") {
+    let generation = match checked_exchange(&mut session, COMMIT, sequence, &[], "commit bundle") {
         Ok(value) => value,
         Err(DeviceError::Protocol(message)) if message.contains("timed out") => {
             thread::sleep(Duration::from_millis(250));
-            let observed = checked_exchange(STATUS, sequence + 1, &[], "verify commit")?;
+            let observed = checked_exchange(&mut session, STATUS, sequence + 1, &[], "verify commit")?;
             if observed <= initial_generation { return Err(DeviceError::Protocol("commit acknowledgement was lost and the active generation did not advance".into())); }
             observed
         }
         Err(error) => return Err(error),
     };
     Ok(SyncResult { generation, bytes_sent: bundle.len() - resumed_at as usize, resumed_at, fingerprint })
+}
+
+pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError> {
+    if media.len() < 4 || media.len() > 16 * 1024 * 1024 {
+        return Err(DeviceError::Protocol("screensaver must be between 4 bytes and 16 MiB".into()));
+    }
+    if &media[..2] != [0xff, 0xd8] || &media[media.len() - 2..] != [0xff, 0xd9] {
+        return Err(DeviceError::Protocol("screensaver must be a raw MJPEG stream beginning with JPEG SOI and ending with JPEG EOI".into()));
+    }
+    let mut session = transport::Session::open()?;
+    let capabilities = checked_exchange(&mut session, HELLO, 1, &[], "capability query").map_err(|error| DeviceError::Protocol(format!("screensaver capability query: {error}")))?;
+    if capabilities & 0x20 == 0 { return Err(DeviceError::Protocol("device firmware does not support screensaver upload; flash the M5 firmware first".into())); }
+    let mut begin = Vec::with_capacity(8);
+    begin.extend_from_slice(&(media.len() as u32).to_le_bytes()); begin.extend_from_slice(&crc32(media).to_le_bytes());
+    let resumed_at = checked_exchange(&mut session, MEDIA_BEGIN, 2, &begin, "begin screensaver upload").map_err(|error| DeviceError::Protocol(format!("screensaver begin: {error}")))?;
+    if resumed_at as usize > media.len() { return Err(DeviceError::Protocol(format!("resume offset {resumed_at} exceeds media size {}", media.len()))); }
+    let mut offset = resumed_at as usize;
+    let mut sequence = 3u32;
+    while offset < media.len() {
+        let end = (offset + MEDIA_CHUNK_BYTES).min(media.len());
+        let chunk = &media[offset..end];
+        let mut payload = Vec::with_capacity(chunk.len() + 8);
+        payload.extend_from_slice(&(offset as u32).to_le_bytes()); payload.extend_from_slice(&crc32(chunk).to_le_bytes()); payload.extend_from_slice(chunk);
+        let acknowledged = checked_exchange(&mut session, MEDIA_CHUNK, sequence, &payload, "upload screensaver chunk")
+            .map_err(|error| DeviceError::Protocol(format!("screensaver chunk at {offset}: {error}")))?;
+        if acknowledged as usize != end {
+            return Err(DeviceError::Protocol(format!("device acknowledged {acknowledged} screensaver bytes; expected {end}")));
+        }
+        offset = end; sequence += 1;
+    }
+    thread::sleep(Duration::from_secs(3));
+    let received = checked_exchange(&mut session, MEDIA_BEGIN, sequence, &begin, "verify screensaver stream")?;
+    sequence += 1;
+    if received as usize != media.len() {
+        return Err(DeviceError::Protocol(format!("device received {received} screensaver bytes; expected {}", media.len())));
+    }
+    let committed = checked_exchange(&mut session, MEDIA_COMMIT, sequence, &[], "commit screensaver").map_err(|error| DeviceError::Protocol(format!("screensaver commit: {error}")))?;
+    if committed as usize != media.len() { return Err(DeviceError::Protocol(format!("device committed {committed} bytes; expected {}", media.len()))); }
+    Ok(ScreensaverResult { bytes_sent: media.len() - resumed_at as usize, resumed_at })
 }
 
 #[cfg(windows)]
@@ -231,10 +283,9 @@ mod transport {
             Ok(Self { file, usb, input, output })
         }
 
-        unsafe fn exchange(&mut self, frame: &[u8]) -> Result<Vec<u8>, DeviceError> {
+        unsafe fn send(&mut self, frame: &[u8]) -> Result<(), DeviceError> {
             let file = self.file.0;
             let usb = self.usb.0;
-            let input = self.input;
             let output = self.output;
             let write_event = Event(CreateEventW(null_mut(), 0, 0, null()));
             if write_event.0.is_null() { return Err(last_error()); }
@@ -243,6 +294,15 @@ mod transport {
             let write_started = WinUsb_WritePipe(usb, output, frame.as_ptr(), frame.len() as u32, &mut written, &mut write_overlapped as *mut _ as *mut c_void);
             await_io(file, write_started, &mut write_overlapped, &mut written)?;
             if written as usize != frame.len() { return Err(DeviceError::Protocol(format!("short USB write: {written}/{}", frame.len()))); }
+            Ok(())
+        }
+
+        unsafe fn exchange(&mut self, frame: &[u8]) -> Result<Vec<u8>, DeviceError> {
+            self.send(frame)?;
+            let file = self.file.0;
+            let usb = self.usb.0;
+            let input = self.input;
+            let output = self.output;
             let mut response = Vec::with_capacity(28);
             while response.len() < 28 {
                 let mut packet = [0u8; 512]; let mut read = 0u32;
@@ -253,6 +313,8 @@ mod transport {
                 if let Err(error) = await_io(file, read_started, &mut read_overlapped, &mut read) {
                     WinUsb_AbortPipe(usb, input);
                     WinUsb_ResetPipe(usb, input);
+                    WinUsb_AbortPipe(usb, output);
+                    WinUsb_ResetPipe(usb, output);
                     return Err(error);
                 }
                 if read == 0 { return Err(DeviceError::Protocol("empty USB response".into())); }
@@ -262,13 +324,22 @@ mod transport {
         }
     }
 
-    pub fn exchange(frame: &[u8]) -> Result<Vec<u8>, DeviceError> {
-        unsafe {
-            let mut connection = Connection::open()?;
-            connection.exchange(frame)
+    pub struct Session(Connection);
+
+    impl Session {
+        pub fn open() -> Result<Self, DeviceError> { unsafe { Connection::open().map(Self) } }
+        pub fn exchange(&mut self, frame: &[u8]) -> Result<Vec<u8>, DeviceError> {
+            unsafe { self.0.exchange(frame) }
         }
     }
 }
 
 #[cfg(not(windows))]
-mod transport { use super::DeviceError; pub fn exchange(_: &[u8]) -> Result<Vec<u8>, DeviceError> { Err(DeviceError::NotFound) } }
+mod transport {
+    use super::DeviceError;
+    pub struct Session;
+    impl Session {
+        pub fn open() -> Result<Self, DeviceError> { Err(DeviceError::NotFound) }
+        pub fn exchange(&mut self, _: &[u8]) -> Result<Vec<u8>, DeviceError> { Err(DeviceError::NotFound) }
+    }
+}

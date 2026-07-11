@@ -11,6 +11,8 @@ managed_components/
 node_modules/
 dist/
 target/
+target-packaged/
+target-fixed/
 
 # Editor and OS noise
 .vscode/

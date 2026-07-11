@@ -5,7 +5,7 @@
     Download, FilePlus2, FolderOpen, GripVertical, ImagePlus, Keyboard,
     Layers3, MonitorUp, Plus, RefreshCw, Save, Trash2, Upload, Usb, X
   } from "@lucide/svelte";
-  import { backupBundle, deviceStatus, openArchive, saveArchive, syncProject, validateProject } from "./lib/backend";
+  import { backupBundle, deviceStatus, openArchive, saveArchive, syncProject, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
   import type { CompileSummary, DeviceStatus } from "./lib/backend";
   import { cloneProject, HID_KEYS, starterProject } from "./lib/model";
   import type { Asset, MacroStep, Project } from "./lib/model";
@@ -85,6 +85,17 @@
     finally { busy = false; }
   }
 
+  async function uploadScreensaver() {
+    const path = await open({ title: "Upload screensaver", filters: [{ name: "Raw MJPEG screensaver", extensions: ["mjpg", "mjpeg"] }] });
+    if (!path || Array.isArray(path)) return;
+    busy = true;
+    try {
+      const result = await uploadScreensaverToDevice(path);
+      notice = `Screensaver uploaded · ${result.bytesSent.toLocaleString()} bytes${result.resumedAt ? ` · resumed at ${result.resumedAt}` : ""}`;
+    } catch (error) { notice = `Screensaver upload failed: ${error}`; }
+    finally { busy = false; }
+  }
+
   function addPage() {
     profile.pages.push({ id: crypto.randomUUID(), name: `Page ${profile.pages.length + 1}`, buttons: Array.from({ length: 32 }, () => ({ action: "none", accent: "#2a2c33" })) });
     pageIndex = profile.pages.length - 1; changed("Page added");
@@ -155,6 +166,7 @@
       <button class="icon-button" title="Save project" on:click={() => saveProject()}><Save size={17}/></button>
       <button class="icon-button" title="Export compiled backup" on:click={backup}><Archive size={17}/></button>
       <div class="divider"></div>
+      <button class="icon-button" title="Upload screensaver (.mjpg)" disabled={busy || !device.connected} on:click={uploadScreensaver}><MonitorUp size={17}/></button>
       <button class="sync-button" disabled={busy || !device.connected} on:click={sync}><Upload size={16}/>{busy ? "Working…" : "Sync to device"}</button>
     </nav>
   </header>

@@ -22,7 +22,8 @@ The checksum is reflected CRC-32/ISO-HDLC: initial state zero, polynomial
 firmware's `esp_crc32_le(UINT32_MAX, ...)` call.
 
 Request opcodes are `HELLO=1`, `BEGIN=2`, `CHUNK=3`, `COMMIT=4`, `ABORT=5`,
-`STATUS=6`, and `DIAG=7`. Each response uses `opcode | 0x80` and an 8-byte
+`STATUS=6`, `DIAG=7`, `MEDIA_BEGIN=8`, `MEDIA_CHUNK=9`, `MEDIA_COMMIT=10`,
+and `MEDIA_ABORT=11`. Each response uses `opcode | 0x80` and an 8-byte
 payload of `u32 status, u32 value`. The response has the same sequence as its
 request.
 
@@ -38,3 +39,9 @@ and the payload CRC32. Commit moves the verified stage file to an immutable
 numbered bundle, then writes an immutable active pointer. Boot selects the
 highest valid pointer, so an interrupted commit leaves the earlier pointer
 usable.
+
+`MEDIA_BEGIN`, `MEDIA_CHUNK`, and `MEDIA_COMMIT` use the same begin/chunk
+wire layouts but operate on a separate media transfer. The device validates the
+whole raw MJPEG stream (size, CRC-32, JPEG SOI and EOI boundaries) and then
+replaces `/sdcard/screendeck/screensaver.mjpg`. The `HELLO` capability bit
+`0x20` indicates this upload path is available.
