@@ -54,9 +54,9 @@ fn prepare_screensaver(path: &Path) -> Result<Vec<u8>, String> {
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let output = std::env::temp_dir().join(format!("screendeck-{stamp}-{}.mjpeg", std::process::id()));
     let ffmpeg = ffmpeg_path();
-    for quality in ["20", "26", "31"] {
+    for quality in ["5", "10", "15", "20", "26", "31"] {
         let result = Command::new(&ffmpeg)
-            .args(["-hide_banner", "-loglevel", "error", "-y", "-stream_loop", "-1", "-i"])
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
             .arg(path)
             .args([
                 "-an",
@@ -155,6 +155,7 @@ mod tests {
         assert_eq!(&media[..2], &[0xff, 0xd8]);
         assert_eq!(&media[media.len() - 2..], &[0xff, 0xd9]);
     }
+
 
 
 
