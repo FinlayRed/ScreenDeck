@@ -16,6 +16,7 @@ target-fixed/
 target-fast/
 target-batched/
 target-converter/
+target-commit-timeout/
 
 # Editor and OS noise
 .vscode/

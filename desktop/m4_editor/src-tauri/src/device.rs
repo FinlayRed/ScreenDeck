@@ -71,6 +71,15 @@ fn parse_response(bytes: &[u8], opcode: u8, sequence: u32) -> Result<(u32, u32),
 
 fn checked_exchange(session: &mut transport::Session, opcode: u8, sequence: u32, payload: &[u8], operation: &'static str) -> Result<u32, DeviceError> {
     let response = session.exchange(&frame(opcode, sequence, payload))?;
+    checked_response(&response, opcode, sequence, operation)
+}
+
+fn checked_exchange_with_timeout(session: &mut transport::Session, opcode: u8, sequence: u32, payload: &[u8], operation: &'static str, timeout_ms: u32) -> Result<u32, DeviceError> {
+    let response = session.exchange_with_timeout(&frame(opcode, sequence, payload), timeout_ms)?;
+    checked_response(&response, opcode, sequence, operation)
+}
+
+fn checked_response(response: &[u8], opcode: u8, sequence: u32, operation: &'static str) -> Result<u32, DeviceError> {
     let (status, value) = parse_response(&response, opcode, sequence)?;
     if status != 0 { return Err(DeviceError::Rejected { operation, status, detail: status_detail(status) }); }
     // M3 sends replies non-blockingly. Give TinyUSB time to complete the IN
@@ -186,7 +195,7 @@ pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError
     if received as usize != media.len() {
         return Err(DeviceError::Protocol(format!("device received {received} screensaver bytes; expected {}", media.len())));
     }
-    let committed = checked_exchange(&mut session, MEDIA_COMMIT, sequence, &[], "commit screensaver").map_err(|error| DeviceError::Protocol(format!("screensaver commit: {error}")))?;
+    let committed = checked_exchange_with_timeout(&mut session, MEDIA_COMMIT, sequence, &[], "commit screensaver", 30_000).map_err(|error| DeviceError::Protocol(format!("screensaver commit: {error}")))?;
     if committed as usize != media.len() { return Err(DeviceError::Protocol(format!("device committed {committed} bytes; expected {}", media.len()))); }
     Ok(ScreensaverResult { bytes_sent: media.len() - resumed_at as usize, resumed_at })
 }
@@ -248,12 +257,12 @@ mod transport {
     struct Event(Handle); impl Drop for Event { fn drop(&mut self) { unsafe { CloseHandle(self.0); } } }
     fn last_error() -> DeviceError { DeviceError::Windows(unsafe { GetLastError() }) }
 
-    unsafe fn await_io(file: Handle, started: i32, overlapped: &mut Overlapped, transferred: &mut u32) -> Result<(), DeviceError> {
+    unsafe fn await_io(file: Handle, started: i32, overlapped: &mut Overlapped, transferred: &mut u32, timeout_ms: u32) -> Result<(), DeviceError> {
         if started == 0 && GetLastError() != ERROR_IO_PENDING { return Err(last_error()); }
         if started == 0 {
-            if WaitForSingleObject(overlapped.event, IO_TIMEOUT_MS) != WAIT_OBJECT_0 {
+            if WaitForSingleObject(overlapped.event, timeout_ms) != WAIT_OBJECT_0 {
                 CancelIoEx(file, overlapped);
-                return Err(DeviceError::Protocol("USB transfer timed out after 5 seconds".into()));
+                return Err(DeviceError::Protocol(format!("USB transfer timed out after {} seconds", timeout_ms / 1000)));
             }
             if GetOverlappedResult(file, overlapped, transferred, 0) == 0 { return Err(last_error()); }
         }
@@ -310,17 +319,19 @@ mod transport {
             let mut write_overlapped = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event: write_event.0 };
             let mut written = 0u32;
             let write_started = WinUsb_WritePipe(usb, output, frame.as_ptr(), frame.len() as u32, &mut written, &mut write_overlapped as *mut _ as *mut c_void);
-            await_io(file, write_started, &mut write_overlapped, &mut written)?;
+            await_io(file, write_started, &mut write_overlapped, &mut written, IO_TIMEOUT_MS)?;
             if written as usize != frame.len() { return Err(DeviceError::Protocol(format!("short USB write: {written}/{}", frame.len()))); }
             Ok(())
         }
 
-        unsafe fn exchange(&mut self, frame: &[u8]) -> Result<Vec<u8>, DeviceError> {
+        unsafe fn exchange(&mut self, frame: &[u8], timeout_ms: u32) -> Result<Vec<u8>, DeviceError> {
             self.send(frame)?;
             let file = self.file.0;
             let usb = self.usb.0;
             let input = self.input;
             let output = self.output;
+            let mut timeout = timeout_ms;
+            if WinUsb_SetPipePolicy(usb, input, PIPE_TRANSFER_TIMEOUT, 4, &mut timeout) == 0 { return Err(last_error()); }
             let mut response = Vec::with_capacity(28);
             while response.len() < 28 {
                 let mut packet = [0u8; 512]; let mut read = 0u32;
@@ -328,7 +339,7 @@ mod transport {
                 if read_event.0.is_null() { return Err(last_error()); }
                 let mut read_overlapped = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event: read_event.0 };
                 let read_started = WinUsb_ReadPipe(usb, input, packet.as_mut_ptr(), packet.len() as u32, &mut read, &mut read_overlapped as *mut _ as *mut c_void);
-                if let Err(error) = await_io(file, read_started, &mut read_overlapped, &mut read) {
+                if let Err(error) = await_io(file, read_started, &mut read_overlapped, &mut read, timeout_ms) {
                     WinUsb_AbortPipe(usb, input);
                     WinUsb_ResetPipe(usb, input);
                     WinUsb_AbortPipe(usb, output);
@@ -350,7 +361,10 @@ mod transport {
             unsafe { self.0.send(frame) }
         }
         pub fn exchange(&mut self, frame: &[u8]) -> Result<Vec<u8>, DeviceError> {
-            unsafe { self.0.exchange(frame) }
+            unsafe { self.0.exchange(frame, IO_TIMEOUT_MS) }
+        }
+        pub fn exchange_with_timeout(&mut self, frame: &[u8], timeout_ms: u32) -> Result<Vec<u8>, DeviceError> {
+            unsafe { self.0.exchange(frame, timeout_ms) }
         }
     }
 }
@@ -363,5 +377,6 @@ mod transport {
         pub fn open() -> Result<Self, DeviceError> { Err(DeviceError::NotFound) }
         pub fn send(&mut self, _: &[u8]) -> Result<(), DeviceError> { Err(DeviceError::NotFound) }
         pub fn exchange(&mut self, _: &[u8]) -> Result<Vec<u8>, DeviceError> { Err(DeviceError::NotFound) }
+        pub fn exchange_with_timeout(&mut self, _: &[u8], _: u32) -> Result<Vec<u8>, DeviceError> { Err(DeviceError::NotFound) }
     }
 }
