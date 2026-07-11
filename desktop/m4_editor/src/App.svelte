@@ -96,8 +96,7 @@
     });
     if (!path || Array.isArray(path)) return;
     busy = true;
-    const rawMjpeg = /\.(mjpg|mjpeg)$/i.test(path);
-    notice = `${rawMjpeg ? "Uploading" : "Converting and uploading"} ${path.split(/[\\/]/).pop()}…`;
+    notice = `Converting and uploading ${path.split(/[\\/]/).pop()}…`;
     try {
       const result = await uploadScreensaverToDevice(path);
       notice = `Screensaver uploaded · ${result.bytesSent.toLocaleString()} bytes${result.resumedAt ? ` · resumed at ${result.resumedAt}` : ""}`;

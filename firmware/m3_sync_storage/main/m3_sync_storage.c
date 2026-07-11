@@ -20,6 +20,7 @@
 #include "esp_crc.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -155,6 +156,15 @@ static uint8_t s_frame_buffer[M3_RX_FRAME_BYTES];
 static size_t s_frame_length;
 static bool s_usb_mounted;
 static lv_display_t *s_display;
+
+#ifdef M5_MEDIA_ENABLED
+static void m3_restart_after_media_commit(void *argument)
+{
+    (void) argument;
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+}
+#endif
 
 static const uint8_t s_hid_report_descriptor[] = {
     TUD_HID_REPORT_DESC_KEYBOARD(HID_REPORT_ID(M3_HID_REPORT_ID)),
@@ -703,6 +713,11 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
     s_media_upload = (m3_media_upload_t) {0};
     ESP_LOGI(TAG, "M3_MEDIA action=commit bytes=%u path=%s", uploaded, M3_MEDIA_FILE);
     m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_OK, uploaded);
+#ifdef M5_MEDIA_ENABLED
+    BaseType_t restart_ok = xTaskCreate(m3_restart_after_media_commit, "media_restart", 2048,
+                                        NULL, 4, NULL);
+    if (restart_ok != pdPASS) ESP_LOGE(TAG, "M3_MEDIA result=restart_task_failed");
+#endif
 }
 
 static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *payload)

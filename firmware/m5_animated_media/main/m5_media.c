@@ -15,6 +15,7 @@
 #include "driver/jpeg_decode.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
+#include "esp_lcd_mipi_dsi.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -39,6 +40,8 @@ static const char *TAG = "m5";
 #define M5_JPEG_PATH BSP_SD_MOUNT_POINT "/screendeck/screensaver.mjpg"
 #define M5_LCD_WIDTH 1280
 #define M5_LCD_HEIGHT 720
+#define M5_PANEL_WIDTH 720
+#define M5_PANEL_HEIGHT 1280
 #define M5_RGB565_BYTES (M5_LCD_WIDTH * M5_LCD_HEIGHT * 2U)
 #define M5_INDEX_BUFFER_BYTES (16U * 1024U)
 
@@ -61,9 +64,9 @@ typedef struct {
     m5_frame_index_t frames[M5_MAX_FRAMES];
     uint8_t *preload;
     uint8_t *read_buffer;
-    uint8_t *decoded_buffer;
-    size_t decoded_buffer_size;
     jpeg_decoder_handle_t decoder;
+    void *panel_buffers[3];
+    uint8_t panel_buffer_index;
     bool ready;
     bool preloaded;
 } m5_media_t;
@@ -275,19 +278,13 @@ static bool m5_index_mjpeg(void)
             return false;
         }
     }
-    const jpeg_decode_memory_alloc_cfg_t output_alloc_cfg = {
-        .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
-    };
-    s_media.decoded_buffer = jpeg_alloc_decoder_mem(M5_RGB565_BYTES, &output_alloc_cfg,
-                                                     &s_media.decoded_buffer_size);
-    if (s_media.decoded_buffer == NULL || jpeg_new_decoder_engine(&(jpeg_decode_engine_cfg_t) {
+    if (s_media.panel_buffers[0] == NULL ||
+        jpeg_new_decoder_engine(&(jpeg_decode_engine_cfg_t) {
         .intr_priority = 1, .timeout_ms = 100,
     }, &s_media.decoder) != ESP_OK) {
         ESP_LOGW(TAG, "M5_MEDIA result=decoder_unavailable");
-        heap_caps_free(s_media.decoded_buffer);
         heap_caps_free(s_media.read_buffer);
         heap_caps_free(s_media.preload);
-        s_media.decoded_buffer = NULL;
         s_media.read_buffer = NULL;
         s_media.preload = NULL;
         fclose(s_media.file);
@@ -320,7 +317,7 @@ static bool m5_decode_and_draw(uint32_t index)
     if (input == NULL) return false;
     jpeg_decode_picture_info_t info;
     if (jpeg_decoder_get_info(input, input_size, &info) != ESP_OK ||
-        info.width != M5_LCD_WIDTH || info.height != M5_LCD_HEIGHT) {
+        info.width != M5_PANEL_WIDTH || info.height != M5_PANEL_HEIGHT) {
         return false;
     }
     uint32_t output_size = 0;
@@ -329,13 +326,16 @@ static bool m5_decode_and_draw(uint32_t index)
         .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
     };
     if (jpeg_decoder_process(s_media.decoder, &decode_cfg, input, input_size,
-                             s_media.decoded_buffer, s_media.decoded_buffer_size, &output_size) != ESP_OK ||
+                             s_media.panel_buffers[s_media.panel_buffer_index], M5_RGB565_BYTES,
+                             &output_size) != ESP_OK ||
         output_size < M5_RGB565_BYTES) {
         return false;
     }
     if (esp_lv_adapter_lock(1000) == ESP_OK) {
-        const esp_err_t result = esp_lcd_panel_draw_bitmap(s_panel, 0, 0, M5_LCD_WIDTH,
-                                                            M5_LCD_HEIGHT, s_media.decoded_buffer);
+        const esp_err_t result = esp_lcd_panel_draw_bitmap(s_panel, 0, 0, M5_PANEL_WIDTH,
+                                                            M5_PANEL_HEIGHT,
+                                                            s_media.panel_buffers[s_media.panel_buffer_index]);
+        s_media.panel_buffer_index = (s_media.panel_buffer_index + 1U) % 3U;
         esp_lv_adapter_unlock();
         return result == ESP_OK;
     }
@@ -426,6 +426,9 @@ void m5_media_start(lv_display_t *display)
     s_panel = bsp_display_get_panel_handle();
     s_last_activity_us = esp_timer_get_time();
     memset(&s_media, 0, sizeof(s_media));
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(s_panel, 3,
+                    &s_media.panel_buffers[0], &s_media.panel_buffers[1],
+                    &s_media.panel_buffers[2]));
     s_ui_ready = false;
     s_wake_requested = false;
     /* Paint the first page before touching the potentially large media file.

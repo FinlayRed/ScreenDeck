@@ -17,6 +17,7 @@ target-fast/
 target-batched/
 target-converter/
 target-commit-timeout/
+target-native-fps/
 
 # Editor and OS noise
 .vscode/

@@ -51,11 +51,6 @@ async fn upload_screensaver(path: String) -> Result<device::ScreensaverResult, S
 }
 
 fn prepare_screensaver(path: &Path) -> Result<Vec<u8>, String> {
-    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
-    if matches!(extension.as_str(), "mjpg" | "mjpeg") {
-        return fs::read(path).map_err(|error| format!("could not read screensaver: {error}"));
-    }
-
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let output = std::env::temp_dir().join(format!("screendeck-{stamp}-{}.mjpeg", std::process::id()));
     let ffmpeg = ffmpeg_path();
@@ -66,7 +61,7 @@ fn prepare_screensaver(path: &Path) -> Result<Vec<u8>, String> {
             .args([
                 "-an",
                 "-vf",
-                "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,format=yuvj420p",
+                "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,transpose=clock,format=yuvj420p",
                 "-frames:v",
                 "900",
                 "-c:v",
@@ -160,6 +155,8 @@ mod tests {
         assert_eq!(&media[..2], &[0xff, 0xd8]);
         assert_eq!(&media[media.len() - 2..], &[0xff, 0xd9]);
     }
+
+
 
     #[test]
     #[ignore = "requires a physical Screendeck connected to the USB-OTG port"]
