@@ -13,6 +13,8 @@ pub const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
 pub struct Project {
     pub schema_version: u16,
     pub name: String,
+    #[serde(default = "default_screensaver_timeout")]
+    pub screensaver_timeout_seconds: u32,
     pub profiles: Vec<Profile>,
     pub macros: Vec<Macro>,
     pub assets: Vec<Asset>,
@@ -44,7 +46,10 @@ pub struct Button {
     pub action: ActionKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macro_id: Option<String>,
-    pub accent: String,
+}
+
+fn default_screensaver_timeout() -> u32 {
+    15
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -72,11 +77,14 @@ pub struct MacroStep {
     pub key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum StepKind {
+    KeyPress,
     KeyDown,
     KeyUp,
     Delay,
@@ -144,6 +152,10 @@ fn is_keyboard_key(value: &str) -> bool {
         )
 }
 
+fn is_press_key(value: &str) -> bool {
+    is_keyboard_key(value) && !matches!(value, "CTRL" | "SHIFT" | "ALT" | "GUI")
+}
+
 fn is_consumer_key(value: &str) -> bool {
     matches!(
         value,
@@ -161,6 +173,12 @@ pub fn validate(project: &Project) -> Vec<ValidationIssue> {
     }
     if project.name.trim().is_empty() || project.name.len() > 80 {
         issues.push(issue("name", "Project name must contain 1–80 characters."));
+    }
+    if !(5..=3600).contains(&project.screensaver_timeout_seconds) {
+        issues.push(issue(
+            "screensaverTimeoutSeconds",
+            "Screensaver delay must be between 5 seconds and 60 minutes.",
+        ));
     }
     if project.profiles.is_empty() || project.profiles.len() > MAX_PROFILES {
         issues.push(issue(
@@ -275,14 +293,44 @@ pub fn validate(project: &Project) -> Vec<ValidationIssue> {
                     "Delay must be between 1 and 60,000 ms.",
                 ));
             }
-            if matches!(step.kind, StepKind::KeyDown | StepKind::KeyUp)
+            if step.kind == StepKind::KeyPress
+                && step.key.as_deref().is_none_or(|key| !is_press_key(key))
+            {
+                issues.push(issue(path.clone(), "Choose a non-modifier key; use the Ctrl, Shift, Alt, and Win toggles for modifiers."));
+            } else if matches!(step.kind, StepKind::KeyDown | StepKind::KeyUp)
                 && step.key.as_deref().is_none_or(|key| !is_keyboard_key(key))
             {
-                issues.push(issue(path, "Choose a supported keyboard HID key."));
+                issues.push(issue(path.clone(), "Choose a supported keyboard HID key."));
             } else if step.kind == StepKind::Consumer
                 && step.key.as_deref().is_none_or(|key| !is_consumer_key(key))
             {
-                issues.push(issue(path, "Choose a supported consumer-control HID key."));
+                issues.push(issue(
+                    path.clone(),
+                    "Choose a supported consumer-control HID key.",
+                ));
+            }
+            if step.kind == StepKind::KeyPress {
+                if !(1..=1000).contains(&step.duration_ms.unwrap_or(25)) {
+                    issues.push(issue(
+                        path.clone(),
+                        "Key press duration must be between 1 and 1,000 ms.",
+                    ));
+                }
+                if step
+                    .modifiers
+                    .iter()
+                    .any(|value| !matches!(value.as_str(), "CTRL" | "SHIFT" | "ALT" | "GUI"))
+                {
+                    issues.push(issue(
+                        path,
+                        "Choose only Ctrl, Shift, Alt, or Win modifiers.",
+                    ));
+                }
+            } else if !step.modifiers.is_empty() {
+                issues.push(issue(
+                    path,
+                    "Modifiers are only supported by Key press steps.",
+                ));
             }
         }
     }

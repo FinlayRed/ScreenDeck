@@ -1,7 +1,7 @@
-export type StepKind = "key_down" | "key_up" | "delay" | "consumer";
+export type StepKind = "key_press" | "key_down" | "key_up" | "delay" | "consumer";
 export type ActionKind = "macro" | "page_next" | "page_previous" | "profile_next" | "none";
 
-export interface MacroStep { kind: StepKind; key?: string; durationMs?: number }
+export interface MacroStep { kind: StepKind; key?: string; durationMs?: number; modifiers?: string[] }
 export interface Macro { id: string; name: string; steps: MacroStep[] }
 export interface Asset {
   id: string;
@@ -14,18 +14,19 @@ export interface Asset {
   animationDataUrl?: string;
   animationFps?: number;
 }
-export interface Button { iconId?: string; imageFit?: "cover" | "contain"; action: ActionKind; macroId?: string; accent: string }
+export interface Button { iconId?: string; imageFit?: "cover" | "contain"; action: ActionKind; macroId?: string }
 export interface Page { id: string; name: string; buttons: Button[] }
 export interface Profile { id: string; name: string; pages: Page[] }
 export interface Project {
   schemaVersion: 2;
   name: string;
+  screensaverTimeoutSeconds: number;
   profiles: Profile[];
   macros: Macro[];
   assets: Asset[];
 }
 
-const emptyButton = (): Button => ({ action: "none", accent: "#000000" });
+const emptyButton = (): Button => ({ action: "none" });
 const page = (id: string, name: string): Page => ({
   id,
   name,
@@ -46,6 +47,7 @@ export function starterProject(): Project {
   return {
     schemaVersion: 2,
     name: "My Screendeck",
+    screensaverTimeoutSeconds: 15,
     profiles: [{ id: "profile-1", name: "Default", pages: [first, page("page-2", "Media")] }],
     macros,
     assets: []

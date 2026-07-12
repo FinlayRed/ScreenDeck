@@ -17,6 +17,8 @@ npm run tauri dev
 The browser-only Vite preview remains useful for layout work, but file dialogs
 and device synchronization require the Tauri window.
 
+The toolbar supports both directions: **Sync to device** uploads the current project, while **From device** downloads the active compiled profile and reconstructs editable profiles, pages, icons, assignments, and macros. Device bundles do not contain source-only names or original pre-conversion artwork, so imported items receive generated names and retain the device-ready artwork.
+
 ## Release builds
 
 ```powershell

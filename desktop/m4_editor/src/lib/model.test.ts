@@ -13,7 +13,6 @@ describe("starterProject", () => {
         expect(page.buttons.every((button) => button.action === "none")).toBe(true);
         expect(page.buttons.every((button) => button.macroId === undefined)).toBe(true);
         expect(page.buttons.every((button) => button.iconId === undefined)).toBe(true);
-        expect(page.buttons.every((button) => button.accent === "#000000")).toBe(true);
       }
     }
   });
@@ -21,7 +20,7 @@ describe("starterProject", () => {
   it("clones without sharing nested editor state", () => {
     const source = starterProject();
     const copy = cloneProject(source);
-    copy.profiles[0].pages[0].buttons[0].accent = "#ffffff";
-    expect(source.profiles[0].pages[0].buttons[0].accent).not.toBe("#ffffff");
+    copy.profiles[0].pages[0].buttons[0].action = "page_next";
+    expect(source.profiles[0].pages[0].buttons[0].action).toBe("none");
   });
 });

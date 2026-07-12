@@ -38,6 +38,49 @@ fn open_archive(path: String) -> Result<Project, String> {
     }
 }
 
+fn workspace_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    use tauri::Manager;
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("could not locate app data: {error}"))?;
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("could not create app data directory: {error}"))?;
+    Ok(directory.join("workspace.json"))
+}
+
+#[tauri::command]
+fn save_workspace(app: tauri::AppHandle, project: Project) -> Result<(), String> {
+    let bytes = serde_json::to_vec(&project)
+        .map_err(|error| format!("could not serialize workspace: {error}"))?;
+    let path = workspace_path(&app)?;
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, bytes).map_err(|error| format!("could not save workspace: {error}"))?;
+    fs::rename(&temporary, &path)
+        .or_else(|_| {
+            let _ = fs::remove_file(&path);
+            fs::rename(&temporary, &path)
+        })
+        .map_err(|error| format!("could not activate saved workspace: {error}"))
+}
+
+#[tauri::command]
+fn load_workspace(app: tauri::AppHandle) -> Result<Option<Project>, String> {
+    let path = workspace_path(&app)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes =
+        fs::read(path).map_err(|error| format!("could not read saved workspace: {error}"))?;
+    let project: Project = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("saved workspace is invalid: {error}"))?;
+    if model::validate(&project).is_empty() {
+        Ok(Some(project))
+    } else {
+        Err("saved workspace failed validation".into())
+    }
+}
+
 #[tauri::command]
 fn backup_bundle(path: String, project: Project) -> Result<(), String> {
     let bundle = compiler::compile(&project).map_err(|error| error.to_string())?;
@@ -67,6 +110,16 @@ async fn sync_project(project: Project) -> Result<device::SyncResult, String> {
     })
     .await
     .map_err(|error| format!("sync worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn sync_from_device() -> Result<Project, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let bundle = device::download().map_err(|error| error.to_string())?;
+        compiler::decompile(&bundle)
+    })
+    .await
+    .map_err(|error| format!("device download worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -205,10 +258,13 @@ pub fn run() {
             validate_project,
             save_archive,
             open_archive,
+            save_workspace,
+            load_workspace,
             backup_bundle,
             device_status,
             test_screensaver,
             sync_project,
+            sync_from_device,
             upload_screensaver,
             prepare_icon_animation
         ])
@@ -223,9 +279,9 @@ mod tests {
 
     fn project() -> Project {
         serde_json::from_value(json!({
-            "schemaVersion": 2, "name": "Round trip", "assets": [],
+            "schemaVersion": 2, "name": "Round trip", "screensaverTimeoutSeconds": 30, "assets": [],
             "macros": [{"id":"m1","name":"F13","steps":[{"kind":"key_down","key":"F13"},{"kind":"delay","durationMs":25},{"kind":"key_up","key":"F13"}]}],
-            "profiles": [{"id":"p1","name":"Default","pages":[{"id":"g1","name":"Main","buttons":(0..32).map(|i| if i == 0 { json!({"action":"macro","macroId":"m1","accent":"#5566ff"}) } else { json!({"action":"none","accent":"#222222"}) }).collect::<Vec<_>>() }]}]
+            "profiles": [{"id":"p1","name":"Default","pages":[{"id":"g1","name":"Main","buttons":(0..32).map(|i| if i == 0 { json!({"action":"macro","macroId":"m1"}) } else { json!({"action":"none"}) }).collect::<Vec<_>>() }]}]
         })).unwrap()
     }
 
@@ -289,6 +345,38 @@ mod tests {
             25
         );
         assert_eq!(payload[steps + 16], 2);
+    }
+
+    #[test]
+    fn device_bundle_decompiles_to_an_editable_project() {
+        let source = project();
+        let restored = compiler::decompile(&compiler::compile(&source).unwrap()).unwrap();
+        assert_eq!(restored.profiles.len(), 1);
+        assert_eq!(restored.screensaver_timeout_seconds, 30);
+        assert_eq!(restored.profiles[0].pages[0].buttons.len(), 32);
+        assert_eq!(restored.macros[0].steps.len(), 3);
+        assert_eq!(
+            restored.profiles[0].pages[0].buttons[0].macro_id.as_deref(),
+            Some("device-macro-0")
+        );
+        assert!(model::validate(&restored).is_empty());
+    }
+
+    #[test]
+    fn key_press_round_trips_with_modifiers_and_short_duration() {
+        let mut source = project();
+        source.macros[0].steps = vec![model::MacroStep {
+            kind: model::StepKind::KeyPress,
+            key: Some("K".into()),
+            duration_ms: Some(25),
+            modifiers: vec!["CTRL".into(), "SHIFT".into(), "GUI".into()],
+        }];
+        let restored = compiler::decompile(&compiler::compile(&source).unwrap()).unwrap();
+        let step = &restored.macros[0].steps[0];
+        assert_eq!(step.kind, model::StepKind::KeyPress);
+        assert_eq!(step.key.as_deref(), Some("K"));
+        assert_eq!(step.duration_ms, Some(25));
+        assert_eq!(step.modifiers, ["CTRL", "SHIFT", "GUI"]);
     }
 
     #[test]

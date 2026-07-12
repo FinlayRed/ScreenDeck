@@ -14,6 +14,7 @@ export async function validateProject(project: Project): Promise<CompileSummary>
   if (native()) return invoke("validate_project", { project });
   const issues: ValidationIssue[] = [];
   if (!project.name.trim()) issues.push({ path: "name", message: "Project name is required.", severity: "error" });
+  if (project.screensaverTimeoutSeconds < 5 || project.screensaverTimeoutSeconds > 3600) issues.push({ path: "screensaverTimeoutSeconds", message: "Screensaver delay must be between 5 seconds and 60 minutes.", severity: "error" });
   if (!project.profiles.length) issues.push({ path: "profiles", message: "Add at least one profile.", severity: "error" });
   project.profiles.forEach((profile, pi) => profile.pages.forEach((page, pgi) => {
     if (page.buttons.length !== 32) issues.push({ path: `profiles[${pi}].pages[${pgi}]`, message: "A page must contain exactly 32 buttons.", severity: "error" });
@@ -27,9 +28,16 @@ export const deviceStatus = (): Promise<DeviceStatus> => native()
   : Promise.resolve({ connected: false, generation: 0, capabilities: 0, detail: "Browser preview — open in the Tauri app to connect." });
 
 export const syncProject = (project: Project): Promise<SyncResult> => invoke("sync_project", { project });
+export const syncFromDevice = (): Promise<Project> => invoke("sync_from_device");
 export const uploadScreensaver = (path: string): Promise<ScreensaverResult> => invoke("upload_screensaver", { path });
 export const testScreensaver = (): Promise<void> => invoke("test_screensaver");
 export const prepareIconAnimation = (name: string, dataUrl: string): Promise<IconConversion> => invoke("prepare_icon_animation", { name, dataUrl });
 export const saveArchive = (path: string, project: Project): Promise<void> => invoke("save_archive", { path, project });
 export const openArchive = (path: string): Promise<Project> => invoke("open_archive", { path });
 export const backupBundle = (path: string, project: Project): Promise<void> => invoke("backup_bundle", { path, project });
+export const saveWorkspace = (project: Project): Promise<void> => native()
+  ? invoke("save_workspace", { project })
+  : Promise.resolve(localStorage.setItem("screendeck.workspace", JSON.stringify(project)) as undefined);
+export const loadWorkspace = (): Promise<Project | null> => native()
+  ? invoke("load_workspace")
+  : Promise.resolve(JSON.parse(localStorage.getItem("screendeck.workspace") ?? "null"));

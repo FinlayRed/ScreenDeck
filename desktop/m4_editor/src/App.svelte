@@ -5,7 +5,7 @@
     Download, FilePlus2, FolderOpen, GripVertical, ImagePlus, Keyboard,
     Layers3, MonitorUp, Play, Plus, RefreshCw, Save, Trash2, Upload, Usb, X
   } from "@lucide/svelte";
-  import { backupBundle, deviceStatus, openArchive, prepareIconAnimation, saveArchive, syncProject, testScreensaver as testScreensaverOnDevice, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
+  import { backupBundle, deviceStatus, loadWorkspace, openArchive, prepareIconAnimation, saveArchive, saveWorkspace, syncFromDevice, syncProject, testScreensaver as testScreensaverOnDevice, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
   import type { CompileSummary, DeviceStatus } from "./lib/backend";
   import { cloneProject, CONSUMER_KEYS, KEYBOARD_KEYS, starterProject } from "./lib/model";
   import type { Asset, MacroStep, Project } from "./lib/model";
@@ -14,7 +14,6 @@
   let profileIndex = 0;
   let pageIndex = 0;
   let selectedButton = 0;
-  let selectedMacroId = project.macros[0].id;
   let projectPath = "";
   let dirty = false;
   let busy = false;
@@ -22,13 +21,16 @@
   let device: DeviceStatus = { connected: false, generation: 0, capabilities: 0, detail: "Checking for Screendeck…" };
   let summary: CompileSummary = { bundleBytes: 0, payloadCrc32: 0, fingerprint: "", issues: [] };
   let lastSyncedFingerprint = "";
+  let workspaceReady = false;
+  let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
 
   $: profile = project.profiles[profileIndex];
   $: page = profile.pages[pageIndex];
   $: button = page.buttons[selectedButton];
-  $: macro = project.macros.find((item) => item.id === (button.macroId ?? selectedMacroId)) ?? project.macros[0];
+  $: macro = button.macroId ? project.macros.find((item) => item.id === button.macroId) : undefined;
   $: validationTick = JSON.stringify(project);
   $: if (validationTick) refreshValidation();
+  $: if (workspaceReady && validationTick) queueWorkspaceSave();
   $: deviceDiff = !device.connected
     ? "Device unavailable"
     : summary.issues.length
@@ -41,6 +43,25 @@
     project = cloneProject(project);
     dirty = true;
     notice = message;
+  }
+
+  function queueWorkspaceSave() {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(async () => {
+      try { await saveWorkspace(project); }
+      catch (error) { notice = `Automatic save failed: ${error}`; }
+    }, 300);
+  }
+
+  async function restoreWorkspace() {
+    try {
+      const restored = await loadWorkspace();
+      if (restored) {
+        project = restored;
+        notice = "Restored previous workspace";
+      }
+    } catch (error) { notice = `Could not restore workspace: ${error}`; }
+    finally { workspaceReady = true; }
   }
 
   async function refreshValidation() {
@@ -83,7 +104,17 @@
   }
 
   async function sync() {
-    if (summary.issues.some((issue) => issue.severity === "error")) { notice = "Resolve validation errors before syncing"; return; }
+    const normalized = cloneProject(project);
+    for (const item of normalized.macros) for (const step of item.steps) if (step.kind === "key_press") {
+      step.durationMs = Math.min(1000, Math.max(1, Number(step.durationMs) || 25));
+      step.modifiers = [...new Set((step.modifiers ?? []).map((value) => value.toUpperCase()).filter((value) => ["CTRL", "SHIFT", "ALT", "GUI"].includes(value)))];
+      if (!step.key || ["CTRL", "SHIFT", "ALT", "GUI"].includes(step.key)) step.key = "F13";
+    }
+    project = normalized;
+    const syncSummary = await validateProject(project);
+    summary = syncSummary;
+    const errors = syncSummary.issues.filter((issue) => issue.severity === "error");
+    if (errors.length) { notice = `Cannot sync: ${errors.map((issue) => `${issue.path} — ${issue.message}`).join(" · ")}`; return; }
     busy = true;
     notice = "Syncing project to device…";
     try {
@@ -113,6 +144,18 @@
     finally { busy = false; }
   }
 
+  async function importFromDevice() {
+    if (dirty && !confirm("Replace the current unsaved project with the profile stored on the Screendeck?")) return;
+    busy = true; notice = "Syncing profile from device…";
+    try {
+      project = await syncFromDevice();
+      profileIndex = 0; pageIndex = 0; selectedButton = 0;
+      projectPath = ""; dirty = true; await refreshValidation(); lastSyncedFingerprint = summary.fingerprint;
+      notice = `Imported ${project.profiles.length} profile${project.profiles.length === 1 ? "" : "s"}, ${project.assets.length} icon${project.assets.length === 1 ? "" : "s"}, and ${project.macros.length} macro${project.macros.length === 1 ? "" : "s"} from device`;
+    } catch (error) { notice = `Sync from device failed: ${error}`; }
+    finally { busy = false; }
+  }
+
   async function testScreensaver() {
     busy = true;
     notice = "Starting screensaver test…";
@@ -124,22 +167,44 @@
   }
 
   function addPage() {
-    profile.pages.push({ id: crypto.randomUUID(), name: `Page ${profile.pages.length + 1}`, buttons: Array.from({ length: 32 }, () => ({ action: "none", accent: "#2a2c33" })) });
+    profile.pages.push({ id: crypto.randomUUID(), name: `Page ${profile.pages.length + 1}`, buttons: Array.from({ length: 32 }, () => ({ action: "none" })) });
     pageIndex = profile.pages.length - 1; changed("Page added");
   }
 
   function addProfile() {
-    project.profiles.push({ id: crypto.randomUUID(), name: `Profile ${project.profiles.length + 1}`, pages: [{ id: crypto.randomUUID(), name: "Main", buttons: Array.from({ length: 32 }, () => ({ action: "none", accent: "#2a2c33" })) }] });
+    project.profiles.push({ id: crypto.randomUUID(), name: `Profile ${project.profiles.length + 1}`, pages: [{ id: crypto.randomUUID(), name: "Main", buttons: Array.from({ length: 32 }, () => ({ action: "none" })) }] });
     profileIndex = project.profiles.length - 1; pageIndex = 0; changed("Profile added");
   }
 
   function selectProfile(index: number) { profileIndex = index; pageIndex = 0; selectedButton = 0; }
   function selectPage(index: number) { pageIndex = index; selectedButton = 0; }
 
+  function profileMenu(event: MouseEvent, index: number) {
+    event.preventDefault();
+    const target = project.profiles[index];
+    const action = prompt(`Rename or delete “${target.name}”.\n\nEnter a new name, or type DELETE to remove it:`, target.name);
+    if (action === null || action === target.name) return;
+    if (action.trim().toUpperCase() === "DELETE") {
+      if (project.profiles.length === 1) { notice = "A project must keep at least one profile"; return; }
+      if (!confirm(`Delete profile “${target.name}” and all of its pages?`)) return;
+      project.profiles.splice(index, 1);
+      profileIndex = Math.min(profileIndex > index ? profileIndex - 1 : profileIndex, project.profiles.length - 1);
+      pageIndex = 0; selectedButton = 0; changed("Profile deleted"); return;
+    }
+    const name = action.trim();
+    if (!name) { notice = "Profile name cannot be empty"; return; }
+    target.name = name; changed("Profile renamed");
+  }
+
   function updateButton(field: string, value: string) {
-    const target = page.buttons[selectedButton] as unknown as Record<string, string | undefined>;
+    const buttonTarget = page.buttons[selectedButton];
+    const target = buttonTarget as unknown as Record<string, string | undefined>;
     target[field] = value || undefined;
-    if (field === "action" && value !== "macro") target.macroId = undefined;
+    if (field === "action" && value === "macro" && !buttonTarget.macroId) {
+      const id = crypto.randomUUID();
+      project.macros.push({ id, name: `${profile.name} · ${page.name} · Key ${selectedButton + 1}`, steps: [{ kind: "key_press", key: "F13", durationMs: 25, modifiers: [] }] });
+      buttonTarget.macroId = id;
+    } else if (field === "action" && value !== "macro") buttonTarget.macroId = undefined;
     changed();
   }
 
@@ -149,19 +214,21 @@
     (target as unknown as Record<string, string | number | undefined>)[field] = value;
     if (field === "kind") {
       if (value === "delay") { target.key = undefined; target.durationMs ??= 25; }
-      else { target.durationMs = undefined; target.key = value === "consumer" ? "PLAY_PAUSE" : "F13"; }
+      else if (value === "key_press") { target.key = "F13"; target.durationMs = 25; target.modifiers = []; }
+      else { target.durationMs = undefined; target.modifiers = []; target.key = value === "consumer" ? "PLAY_PAUSE" : "F13"; }
     }
     changed();
   }
 
-  function addStep() { macro.steps.push({ kind: "delay", durationMs: 25 }); changed("Macro step added"); }
-  function removeStep(index: number) { macro.steps.splice(index, 1); changed("Macro step removed"); }
+  function addStep() { if (!macro) return; macro.steps.push({ kind: "key_press", key: "F13", durationMs: 25, modifiers: [] }); changed("Key press added"); }
+  function removeStep(index: number) { if (!macro) return; macro.steps.splice(index, 1); changed("Macro step removed"); }
 
-  function addMacro() {
-    const next = project.macros.length + 1;
-    project.macros.push({ id: crypto.randomUUID(), name: `Macro ${next}`, steps: [{ kind: "key_down", key: "F13" }, { kind: "delay", durationMs: 25 }, { kind: "key_up", key: "F13" }] });
-    selectedMacroId = project.macros.at(-1)!.id; changed("Macro added");
+  function toggleModifier(step: MacroStep, modifier: string) {
+    step.modifiers ??= [];
+    step.modifiers = step.modifiers.includes(modifier) ? step.modifiers.filter((item) => item !== modifier) : [...step.modifiers, modifier];
+    changed("Key modifier changed");
   }
+
 
   function iconFor(assetId?: string) { return project.assets.find((asset) => asset.id === assetId)?.dataUrl; }
 
@@ -214,7 +281,17 @@
   function dropIcon(event: DragEvent) { event.preventDefault(); if (event.dataTransfer?.files.length) importFiles(event.dataTransfer.files); }
   function assignAsset(id: string) { page.buttons[selectedButton].iconId = id; page.buttons[selectedButton].imageFit ??= "cover"; changed("Icon assigned"); }
   function clearIcon() { page.buttons[selectedButton].iconId = undefined; page.buttons[selectedButton].imageFit = undefined; changed("Icon removed"); }
+  function removeAsset(id: string) {
+    const asset = project.assets.find((item) => item.id === id);
+    if (!asset || !confirm(`Remove “${asset.name}” from the icon library and every slot using it?`)) return;
+    for (const itemProfile of project.profiles) for (const itemPage of itemProfile.pages) for (const itemButton of itemPage.buttons) {
+      if (itemButton.iconId === id) { itemButton.iconId = undefined; itemButton.imageFit = undefined; }
+    }
+    project.assets = project.assets.filter((item) => item.id !== id);
+    changed("Icon removed from library");
+  }
 
+  restoreWorkspace();
   refreshDevice();
 </script>
 
@@ -232,6 +309,7 @@
       <div class="divider"></div>
       <button class="icon-button" title="Upload screensaver image or video" disabled={busy || !device.connected} on:click={uploadScreensaver}><MonitorUp size={17}/></button>
       <button class="icon-button" title="Test screensaver on device" disabled={busy || !device.connected} on:click={testScreensaver}><Play size={17}/></button>
+      <button class="sync-button sync-from" title="Replace the editor project with the active device profile" disabled={busy || !device.connected} on:click={importFromDevice}><Download size={16}/>From device</button>
       <button class="sync-button" disabled={busy || !device.connected} on:click={sync}><Upload size={16}/>{busy ? "Working…" : "Sync to device"}</button>
     </nav>
   </header>
@@ -240,7 +318,7 @@
     <div class="section-title"><span>Project</span><button title="Add profile" on:click={addProfile}><Plus size={15}/></button></div>
     <div class="tree">
       {#each project.profiles as item, pi}
-        <button class:active={pi === profileIndex} class="tree-profile" on:click={() => selectProfile(pi)}><Layers3 size={15}/><span>{item.name}</span><span class="count">{item.pages.length}</span></button>
+        <button class:active={pi === profileIndex} class="tree-profile" title="Right-click to rename or delete" on:click={() => selectProfile(pi)} on:contextmenu={(event) => profileMenu(event, pi)}><Layers3 size={15}/><span>{item.name}</span><span class="count">{item.pages.length}</span></button>
         {#if pi === profileIndex}
           <div class="pages">
             {#each item.pages as itemPage, pgi}
@@ -252,11 +330,11 @@
       {/each}
     </div>
 
-    <div class="section-title macro-heading"><span>Macros</span><button title="Add macro" on:click={addMacro}><Plus size={15}/></button></div>
-    <div class="macro-list">
-      {#each project.macros as item}
-        <button class:active={item.id === macro?.id} on:click={() => selectedMacroId = item.id}><Keyboard size={14}/><span>{item.name}</span><span class="count">{item.steps.length}</span></button>
-      {/each}
+    <div class="section-title macro-heading"><span>Screensaver</span></div>
+    <div class="screensaver-setting">
+      <label for="screensaver-delay">Start after</label>
+      <div><input id="screensaver-delay" type="number" min="5" max="3600" step="5" bind:value={project.screensaverTimeoutSeconds} on:change={() => changed("Screensaver delay changed")}/><span>seconds</span></div>
+      <p>Choose between 5 seconds and 60 minutes.</p>
     </div>
   </aside>
 
@@ -268,7 +346,7 @@
     <section class="device-preview" aria-label="1280 by 720 Screendeck preview">
       <div class="grid">
         {#each page.buttons as tile, index}
-          <button class:selected={index === selectedButton} class="tile" style:--accent={tile.accent} aria-label={`Button ${index + 1}`} on:click={() => selectedButton = index} on:dragover={(e) => e.preventDefault()} on:drop={dropIcon}>
+          <button class:selected={index === selectedButton} class="tile" aria-label={`Button ${index + 1}`} on:click={() => selectedButton = index} on:dragover={(e) => e.preventDefault()} on:drop={dropIcon}>
             {#if iconFor(tile.iconId)}<img class:contained={tile.imageFit === "contain"} src={iconFor(tile.iconId)} alt="" draggable="false"/>
             {:else if tile.action === "page_previous"}<ChevronLeft size={24}/>
             {:else if tile.action === "page_next"}<ChevronRight size={24}/>
@@ -283,7 +361,7 @@
     <section class="assets-strip">
       <div class="assets-copy"><ImagePlus size={17}/><div><strong>Icon library</strong><span>Drop images onto any key</span></div></div>
       <label class="asset-add"><input type="file" accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple on:change={(event) => { const files = event.currentTarget.files; if (files) importFiles(files); }}/><Plus size={18}/></label>
-      {#each project.assets as asset}<button class="asset" title={`${asset.name}${asset.animationFps ? " · 15 FPS" : ""}`} on:click={() => assignAsset(asset.id)}><img src={asset.dataUrl} alt={asset.name}/></button>{/each}
+      {#each project.assets as asset}<div class="asset-item"><button class="asset" title={`${asset.name}${asset.animationFps ? " · 15 FPS" : ""}`} on:click={() => assignAsset(asset.id)}><img src={asset.dataUrl} alt={asset.name}/></button><button class="asset-delete" title={`Remove ${asset.name} from library`} aria-label={`Remove ${asset.name} from library`} on:click={() => removeAsset(asset.id)}><X size={10}/></button></div>{/each}
       {#if !project.assets.length}<span class="empty-assets">PNG, JPEG or WebP · originals stay in the project archive</span>{/if}
     </section>
   </main>
@@ -291,12 +369,7 @@
   <aside class="inspector">
     <div class="inspector-tabs"><button class="active">Button</button><button>Page</button></div>
     <div class="inspector-scroll">
-      <div class="selection-label"><span>Selected key</span><strong>{selectedButton + 1}</strong></div>
       <label>Action<select value={button.action} on:change={(e) => updateButton("action", e.currentTarget.value)}><option value="none">None</option><option value="macro">Run macro</option><option value="page_next">Next page</option><option value="page_previous">Previous page</option><option value="profile_next">Next profile</option></select></label>
-      {#if button.action === "macro"}
-        <label>Macro<select value={button.macroId ?? macro.id} on:change={(e) => updateButton("macroId", e.currentTarget.value)}>{#each project.macros as item}<option value={item.id}>{item.name}</option>{/each}</select></label>
-      {/if}
-      <label>Accent<div class="color-control"><input type="color" value={button.accent} on:input={(e) => updateButton("accent", e.currentTarget.value)}/><input value={button.accent} on:change={(e) => updateButton("accent", e.currentTarget.value)}/></div></label>
       {#if button.iconId}
         <div class="artwork-controls">
           <label>Artwork display<select value={button.imageFit ?? "cover"} on:change={(e) => updateButton("imageFit", e.currentTarget.value)}><option value="cover">Fill entire key</option><option value="contain">Fit inside key</option></select></label>
@@ -313,10 +386,11 @@
             <div class="step">
               <GripVertical class="grip" size={14}/>
               <span class="step-number">{index + 1}</span>
-              <select value={step.kind} on:change={(e) => updateStep(index, "kind", e.currentTarget.value)}><option value="key_down">Key down</option><option value="key_up">Key up</option><option value="delay">Delay</option><option value="consumer">Media key</option></select>
+              <select value={step.kind} on:change={(e) => updateStep(index, "kind", e.currentTarget.value)}><option value="key_press">Key press</option><option value="key_down">Key down</option><option value="key_up">Key up</option><option value="delay">Delay</option><option value="consumer">Media key</option></select>
               {#if step.kind === "delay"}<div class="duration"><input type="number" min="1" max="60000" value={step.durationMs ?? 25} on:change={(e) => updateStep(index, "durationMs", Number(e.currentTarget.value))}/><span>ms</span></div>
               {:else}<select class="key-picker" value={step.key ?? (step.kind === "consumer" ? "PLAY_PAUSE" : "F13")} on:change={(e) => updateStep(index, "key", e.currentTarget.value)}>{#each step.kind === "consumer" ? CONSUMER_KEYS : KEYBOARD_KEYS as key}<option value={key}>{key.replaceAll("_", " ")}</option>{/each}</select>{/if}
               <button class="step-delete" title="Remove step" on:click={() => removeStep(index)}><X size={13}/></button>
+              {#if step.kind === "key_press"}<div class="step-modifiers"><span>Hold</span>{#each [["CTRL","Ctrl"],["SHIFT","Shift"],["ALT","Alt"],["GUI","Win"]] as modifier}<button class:active={step.modifiers?.includes(modifier[0])} on:click={() => toggleModifier(step, modifier[0])}>{modifier[1]}</button>{/each}<label><input type="number" min="1" max="1000" value={step.durationMs ?? 25} on:change={(e) => updateStep(index, "durationMs", Number(e.currentTarget.value))}/> ms</label></div>{/if}
             </div>
           {/each}
           <button class="add-step" on:click={addStep}><Plus size={14}/> Add step</button>

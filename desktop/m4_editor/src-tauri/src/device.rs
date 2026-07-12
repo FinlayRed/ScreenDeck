@@ -14,6 +14,9 @@ const MEDIA_BEGIN: u8 = 8;
 const MEDIA_CHUNK: u8 = 9;
 const MEDIA_COMMIT: u8 = 10;
 const TEST_SCREENSAVER: u8 = 12;
+const DOWNLOAD_BEGIN: u8 = 13;
+const DOWNLOAD_CHUNK: u8 = 14;
+const DOWNLOAD_CAPABILITY: u32 = 0x100;
 const TEST_SCREENSAVER_CAPABILITY: u32 = 0x80;
 const MEDIA_BATCH_CAPABILITY: u32 = 0x40;
 const FRAME_FLAG_NO_RESPONSE: u16 = 0x0001;
@@ -301,6 +304,68 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
         resumed_at,
         fingerprint,
     })
+}
+
+pub fn download() -> Result<Vec<u8>, DeviceError> {
+    let mut session = transport::Session::open()?;
+    let capabilities = checked_exchange(&mut session, HELLO, 1, &[], "capability query")?;
+    if capabilities & DOWNLOAD_CAPABILITY == 0 {
+        return Err(DeviceError::Protocol("device firmware does not support syncing from the device; flash the latest firmware first".into()));
+    }
+    let total = checked_exchange(&mut session, DOWNLOAD_BEGIN, 2, &[], "begin download")? as usize;
+    if !(16..=16 * 1024 * 1024).contains(&total) {
+        return Err(DeviceError::Protocol(format!(
+            "device reported invalid bundle size {total}"
+        )));
+    }
+    let mut bundle = Vec::with_capacity(total);
+    let mut sequence = 3u32;
+    while bundle.len() < total {
+        let response = session.exchange(&frame(
+            DOWNLOAD_CHUNK,
+            sequence,
+            &(bundle.len() as u32).to_le_bytes(),
+        ))?;
+        let chunk = parse_payload_response(&response, DOWNLOAD_CHUNK, sequence)?;
+        if chunk.is_empty() || bundle.len() + chunk.len() > total {
+            return Err(DeviceError::Protocol(
+                "device returned an invalid download chunk".into(),
+            ));
+        }
+        bundle.extend_from_slice(chunk);
+        sequence += 1;
+    }
+    if u32::from_le_bytes(bundle[0..4].try_into().unwrap()) != 0x3342_4453
+        || u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize != bundle.len()
+        || u32::from_le_bytes(bundle[12..16].try_into().unwrap()) != crc32(&bundle[16..])
+    {
+        return Err(DeviceError::Protocol(
+            "downloaded bundle failed validation".into(),
+        ));
+    }
+    Ok(bundle)
+}
+
+fn parse_payload_response(bytes: &[u8], opcode: u8, sequence: u32) -> Result<&[u8], DeviceError> {
+    if bytes.len() < 20
+        || u32::from_le_bytes(bytes[0..4].try_into().unwrap()) != MAGIC
+        || bytes[4] != VERSION
+        || bytes[5] != opcode | 0x80
+        || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != sequence
+    {
+        return Err(DeviceError::Protocol(
+            "unexpected download response header".into(),
+        ));
+    }
+    let size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    if bytes.len() != 20 + size
+        || u32::from_le_bytes(bytes[16..20].try_into().unwrap()) != crc32(&bytes[20..])
+    {
+        return Err(DeviceError::Protocol(
+            "download response checksum or length mismatch".into(),
+        ));
+    }
+    Ok(&bytes[20..])
 }
 
 pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError> {
@@ -802,8 +867,9 @@ mod transport {
             if WinUsb_SetPipePolicy(usb, input, PIPE_TRANSFER_TIMEOUT, 4, &mut timeout) == 0 {
                 return Err(last_error());
             }
-            let mut response = Vec::with_capacity(28);
-            while response.len() < 28 {
+            let mut response = Vec::with_capacity(1420);
+            let mut expected = 20usize;
+            while response.len() < expected {
                 let mut packet = [0u8; 512];
                 let mut read = 0u32;
                 let read_event = Event(CreateEventW(null_mut(), 0, 0, null()));
@@ -842,8 +908,15 @@ mod transport {
                     return Err(DeviceError::Protocol("empty USB response".into()));
                 }
                 response.extend_from_slice(&packet[..read as usize]);
+                if response.len() >= 20 {
+                    expected =
+                        20 + u32::from_le_bytes(response[12..16].try_into().unwrap()) as usize;
+                    if expected > 1420 {
+                        return Err(DeviceError::Protocol("oversized USB response".into()));
+                    }
+                }
             }
-            response.truncate(28);
+            response.truncate(expected);
             Ok(response)
         }
     }
