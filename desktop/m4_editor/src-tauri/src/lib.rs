@@ -13,6 +13,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+const DEVICE_ICON_PIXELS: u16 = 149;
+const DEVICE_ICON_RADIUS: u16 = 12;
+
 #[tauri::command]
 fn validate_project(project: Project) -> compiler::CompileSummary {
     compiler::summarize(&project)
@@ -104,9 +107,9 @@ async fn test_screensaver() -> Result<(), String> {
 #[tauri::command]
 async fn sync_project(project: Project) -> Result<device::SyncResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let summary = compiler::summarize(&project);
         let bundle = compiler::compile(&project).map_err(|error| error.to_string())?;
-        device::sync(&bundle, summary.fingerprint).map_err(|error| error.to_string())
+        let fingerprint = compiler::fingerprint(&bundle);
+        device::sync(&bundle, fingerprint).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| format!("sync worker failed: {error}"))?
@@ -154,7 +157,7 @@ async fn prepare_icon_animation(name: String, data_url: String) -> Result<IconCo
             .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-threads", "1", "-i"])
             .arg(&input)
             .args(["-map_metadata", "-1", "-fflags", "+bitexact", "-flags:v", "+bitexact", "-an", "-sn", "-dn",
-                "-vf", "fps=15,scale=128:128:force_original_aspect_ratio=decrease,pad=128:128:(ow-iw)/2:(oh-ih)/2:black",
+                "-vf", &format!("fps=15,scale={0}:{0}:force_original_aspect_ratio=decrease,pad={0}:{0}:(ow-iw)/2:(oh-ih)/2:black,format=rgb24,geq=r='if(gte(min(X,W-1-X),{1})+gte(min(Y,H-1-Y),{1})+lte(pow({1}-min(X,W-1-X),2)+pow({1}-min(Y,H-1-Y),2),{2}),r(X,Y),32)':g='if(gte(min(X,W-1-X),{1})+gte(min(Y,H-1-Y),{1})+lte(pow({1}-min(X,W-1-X),2)+pow({1}-min(Y,H-1-Y),2),{2}),g(X,Y),33)':b='if(gte(min(X,W-1-X),{1})+gte(min(Y,H-1-Y),{1})+lte(pow({1}-min(X,W-1-X),2)+pow({1}-min(Y,H-1-Y),2),{2}),b(X,Y),38)',format=yuvj420p", DEVICE_ICON_PIXELS, DEVICE_ICON_RADIUS, DEVICE_ICON_RADIUS * DEVICE_ICON_RADIUS),
                 "-frames:v", "120", "-c:v", "mjpeg", "-q:v", "5", "-pix_fmt", "yuvj420p", "-f", "mjpeg"])
             .arg(&output).output().map_err(|error| format!("could not start FFmpeg: {error}"))?;
         let _ = fs::remove_file(&input);
@@ -182,7 +185,7 @@ fn prepare_screensaver(path: &Path) -> Result<Vec<u8>, String> {
     let output =
         std::env::temp_dir().join(format!("screendeck-{stamp}-{}.mjpeg", std::process::id()));
     let ffmpeg = ffmpeg_path();
-    for quality in ["5", "10", "15", "20", "26", "31"] {
+    for quality in ["10", "20", "31"] {
         let result = Command::new(&ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
             .arg(path)

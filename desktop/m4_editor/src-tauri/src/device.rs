@@ -20,8 +20,8 @@ const DOWNLOAD_CAPABILITY: u32 = 0x100;
 const TEST_SCREENSAVER_CAPABILITY: u32 = 0x80;
 const MEDIA_BATCH_CAPABILITY: u32 = 0x40;
 const FRAME_FLAG_NO_RESPONSE: u16 = 0x0001;
-const CHUNK_BYTES: usize = 112;
-// Match the project-sync chunk size proven reliable on the physical P4.
+const CHUNK_BYTES: usize = 1400 - 8; // SDC3 payload limit minus chunk prefix
+                                     // Match the project-sync chunk size proven reliable on the physical P4.
 const MEDIA_CHUNK_BYTES: usize = 1400 - 8; // SDC3 payload limit minus chunk prefix
 const MEDIA_BATCH_CHUNKS: usize = 8;
 const DEVICE_RESPONSE_SETTLE_MS: u64 = 1;
@@ -158,7 +158,7 @@ fn checked_response(
     sequence: u32,
     operation: &'static str,
 ) -> Result<u32, DeviceError> {
-    let (status, value) = parse_response(&response, opcode, sequence)?;
+    let (status, value) = parse_response(response, opcode, sequence)?;
     if status != 0 {
         return Err(DeviceError::Rejected {
             operation,
@@ -374,7 +374,7 @@ pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError
             "screensaver must be between 4 bytes and 16 MiB".into(),
         ));
     }
-    if &media[..2] != [0xff, 0xd8] || &media[media.len() - 2..] != [0xff, 0xd9] {
+    if media[..2] != [0xff, 0xd8] || media[media.len() - 2..] != [0xff, 0xd9] {
         return Err(DeviceError::Protocol("screensaver must be a raw MJPEG stream beginning with JPEG SOI and ending with JPEG EOI".into()));
     }
     let mut session = transport::Session::open()?;

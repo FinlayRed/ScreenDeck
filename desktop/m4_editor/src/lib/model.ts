@@ -34,22 +34,13 @@ const page = (id: string, name: string): Page => ({
 });
 
 export function starterProject(): Project {
-  const macros: Macro[] = Array.from({ length: 12 }, (_, i) => ({
-    id: `macro-${i + 1}`,
-    name: `Function F${i + 13}`,
-    steps: [
-      { kind: "key_down", key: `F${i + 13}` },
-      { kind: "delay", durationMs: 25 },
-      { kind: "key_up", key: `F${i + 13}` }
-    ]
-  }));
   const first = page("page-1", "Main");
   return {
     schemaVersion: 2,
     name: "My Screendeck",
     screensaverTimeoutSeconds: 15,
     profiles: [{ id: "profile-1", name: "Default", pages: [first, page("page-2", "Media")] }],
-    macros,
+    macros: [],
     assets: []
   };
 }
@@ -63,8 +54,6 @@ export const KEYBOARD_KEYS = [
 export const CONSUMER_KEYS = [
   "VOLUME_UP", "VOLUME_DOWN", "MUTE", "PLAY_PAUSE", "NEXT_TRACK", "PREVIOUS_TRACK"
 ];
-export const HID_KEYS = [...KEYBOARD_KEYS, ...CONSUMER_KEYS];
-
 export function cloneProject(project: Project): Project {
   return structuredClone(project);
 }

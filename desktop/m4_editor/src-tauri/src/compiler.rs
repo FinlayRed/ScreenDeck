@@ -122,6 +122,10 @@ pub fn compile(project: &Project) -> Result<Vec<u8>, CompileError> {
                 .join("; "),
         ));
     }
+    compile_validated(project)
+}
+
+fn compile_validated(project: &Project) -> Result<Vec<u8>, CompileError> {
     let page_count: usize = project
         .profiles
         .iter()
@@ -344,16 +348,17 @@ pub fn compile(project: &Project) -> Result<Vec<u8>, CompileError> {
 
 pub fn summarize(project: &Project) -> CompileSummary {
     let issues = validate(project);
-    let (bundle_bytes, payload_crc32, fingerprint) = match compile(project) {
-        Ok(bundle) => {
-            let hash = Sha256::digest(&bundle);
-            (
+    let (bundle_bytes, payload_crc32, fingerprint) = if issues.is_empty() {
+        match compile_validated(project) {
+            Ok(bundle) => (
                 bundle.len(),
                 u32::from_le_bytes(bundle[12..16].try_into().unwrap()),
-                format!("{:x}", hash)[..12].to_owned(),
-            )
+                fingerprint(&bundle),
+            ),
+            Err(_) => (0, 0, String::new()),
         }
-        Err(_) => (0, 0, String::new()),
+    } else {
+        (0, 0, String::new())
     };
     CompileSummary {
         bundle_bytes,
@@ -361,6 +366,11 @@ pub fn summarize(project: &Project) -> CompileSummary {
         fingerprint,
         issues,
     }
+}
+
+pub fn fingerprint(bundle: &[u8]) -> String {
+    let hash = Sha256::digest(bundle);
+    format!("{:x}", hash)[..12].to_owned()
 }
 
 fn u16_at(data: &[u8], offset: usize) -> Result<u16, String> {

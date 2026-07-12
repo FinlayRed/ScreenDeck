@@ -1,4 +1,4 @@
-use crate::model::Project;
+use crate::model::{Asset, Project};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::{
     fs::File,
@@ -36,14 +36,33 @@ fn safe_name(value: &str) -> String {
 pub fn save(path: &Path, project: &Project) -> Result<(), ArchiveError> {
     let file = File::create(path)?;
     let mut zip = ZipWriter::new(file);
-    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let mut source = project.clone();
-    for asset in &mut source.assets {
-        asset.data_url.clear();
-        asset.source_data_url.clear();
-        asset.animation_data_url.clear();
-    }
-    zip.start_file("project.json", options)?;
+    let json_options =
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let media_options =
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let source = Project {
+        schema_version: project.schema_version,
+        name: project.name.clone(),
+        screensaver_timeout_seconds: project.screensaver_timeout_seconds,
+        profiles: project.profiles.clone(),
+        macros: project.macros.clone(),
+        assets: project
+            .assets
+            .iter()
+            .map(|asset| Asset {
+                id: asset.id.clone(),
+                name: asset.name.clone(),
+                media_type: asset.media_type.clone(),
+                data_url: String::new(),
+                source_name: asset.source_name.clone(),
+                source_media_type: asset.source_media_type.clone(),
+                source_data_url: String::new(),
+                animation_data_url: String::new(),
+                animation_fps: asset.animation_fps,
+            })
+            .collect(),
+    };
+    zip.start_file("project.json", json_options)?;
     zip.write_all(&serde_json::to_vec_pretty(&source)?)?;
     for asset in &project.assets {
         let (_, encoded) = asset
@@ -59,7 +78,7 @@ pub fn save(path: &Path, project: &Project) -> Result<(), ArchiveError> {
                 safe_name(&asset.id),
                 safe_name(&asset.name)
             ),
-            options,
+            media_options,
         )?;
         zip.write_all(&bytes)?;
         if !asset.source_data_url.is_empty() {
@@ -76,7 +95,7 @@ pub fn save(path: &Path, project: &Project) -> Result<(), ArchiveError> {
                     safe_name(&asset.id),
                     safe_name(&asset.source_name)
                 ),
-                options,
+                media_options,
             )?;
             zip.write_all(&original)?;
         }
@@ -90,7 +109,7 @@ pub fn save(path: &Path, project: &Project) -> Result<(), ArchiveError> {
                 .map_err(|_| ArchiveError::Asset(asset.name.clone()))?;
             zip.start_file(
                 format!("assets/{}/device/animation.mjpg", safe_name(&asset.id)),
-                options,
+                media_options,
             )?;
             zip.write_all(&animation)?;
         }

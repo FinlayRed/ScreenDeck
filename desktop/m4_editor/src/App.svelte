@@ -1,13 +1,29 @@
 <script lang="ts">
   import { open, save } from "@tauri-apps/plugin-dialog";
-  import {
-    AlertCircle, Archive, ChevronLeft, ChevronRight, CirclePlus, Copy, Cpu,
-    Download, FilePlus2, FolderOpen, GripVertical, ImagePlus, Keyboard,
-    Layers3, MonitorUp, Play, Plus, RefreshCw, Save, Trash2, Upload, Usb, X
-  } from "@lucide/svelte";
+  import Archive from "@lucide/svelte/icons/archive";
+  import ChevronLeft from "@lucide/svelte/icons/chevron-left";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import CirclePlus from "@lucide/svelte/icons/circle-plus";
+  import Cpu from "@lucide/svelte/icons/cpu";
+  import Download from "@lucide/svelte/icons/download";
+  import FilePlus2 from "@lucide/svelte/icons/file-plus-2";
+  import FolderOpen from "@lucide/svelte/icons/folder-open";
+  import GripVertical from "@lucide/svelte/icons/grip-vertical";
+  import ImagePlus from "@lucide/svelte/icons/image-plus";
+  import Keyboard from "@lucide/svelte/icons/keyboard";
+  import Layers3 from "@lucide/svelte/icons/layers-3";
+  import MonitorUp from "@lucide/svelte/icons/monitor-up";
+  import Play from "@lucide/svelte/icons/play";
+  import Plus from "@lucide/svelte/icons/plus";
+  import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+  import Save from "@lucide/svelte/icons/save";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
+  import Upload from "@lucide/svelte/icons/upload";
+  import Usb from "@lucide/svelte/icons/usb";
+  import X from "@lucide/svelte/icons/x";
   import { backupBundle, deviceStatus, loadWorkspace, openArchive, prepareIconAnimation, saveArchive, saveWorkspace, syncFromDevice, syncProject, testScreensaver as testScreensaverOnDevice, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
   import type { CompileSummary, DeviceStatus } from "./lib/backend";
-  import { cloneProject, CONSUMER_KEYS, KEYBOARD_KEYS, starterProject } from "./lib/model";
+  import { CONSUMER_KEYS, KEYBOARD_KEYS, starterProject } from "./lib/model";
   import type { Asset, MacroStep, Project } from "./lib/model";
 
   let project: Project = starterProject();
@@ -23,14 +39,17 @@
   let lastSyncedFingerprint = "";
   let workspaceReady = false;
   let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let validationTimer: ReturnType<typeof setTimeout> | undefined;
+  let projectRevision = 0;
+  let validatedRevision = -1;
 
   $: profile = project.profiles[profileIndex];
   $: page = profile.pages[pageIndex];
   $: button = page.buttons[selectedButton];
   $: macro = button.macroId ? project.macros.find((item) => item.id === button.macroId) : undefined;
-  $: validationTick = JSON.stringify(project);
-  $: if (validationTick) refreshValidation();
-  $: if (workspaceReady && validationTick) queueWorkspaceSave();
+  $: assetsById = new Map(project.assets.map((asset) => [asset.id, asset]));
+  $: queueValidation(projectRevision);
+  $: if (workspaceReady) queueWorkspaceSave(projectRevision);
   $: deviceDiff = !device.connected
     ? "Device unavailable"
     : summary.issues.length
@@ -40,17 +59,24 @@
         : `Pending/unknown · local ${summary.fingerprint || "unbuilt"} · device generation ${device.generation}`;
 
   function changed(message = "Unsaved changes") {
-    project = cloneProject(project);
+    project = { ...project };
+    projectRevision += 1;
     dirty = true;
     notice = message;
   }
 
-  function queueWorkspaceSave() {
+  function queueWorkspaceSave(revision: number) {
     clearTimeout(autosaveTimer);
     autosaveTimer = setTimeout(async () => {
+      if (revision !== projectRevision) return;
       try { await saveWorkspace(project); }
       catch (error) { notice = `Automatic save failed: ${error}`; }
-    }, 300);
+    }, 500);
+  }
+
+  function queueValidation(revision: number) {
+    clearTimeout(validationTimer);
+    validationTimer = setTimeout(() => refreshValidation(revision), 150);
   }
 
   async function restoreWorkspace() {
@@ -58,14 +84,19 @@
       const restored = await loadWorkspace();
       if (restored) {
         project = restored;
+        projectRevision += 1;
         notice = "Restored previous workspace";
       }
     } catch (error) { notice = `Could not restore workspace: ${error}`; }
     finally { workspaceReady = true; }
   }
 
-  async function refreshValidation() {
-    summary = await validateProject(project);
+  async function refreshValidation(revision = projectRevision) {
+    const result = await validateProject(project);
+    if (revision === projectRevision) {
+      summary = result;
+      validatedRevision = revision;
+    }
   }
 
   async function refreshDevice() {
@@ -74,14 +105,14 @@
   }
 
   async function newProject() {
-    project = starterProject(); profileIndex = 0; pageIndex = 0; selectedButton = 0; projectPath = ""; dirty = false; lastSyncedFingerprint = ""; notice = "New project";
+    project = starterProject(); projectRevision += 1; profileIndex = 0; pageIndex = 0; selectedButton = 0; projectPath = ""; dirty = false; lastSyncedFingerprint = ""; notice = "New project";
   }
 
   async function openProject() {
     const path = await open({ title: "Open Screendeck project", filters: [{ name: "Screendeck project", extensions: ["sdeck"] }] });
     if (!path || Array.isArray(path)) return;
     busy = true;
-    try { project = await openArchive(path); projectPath = path; profileIndex = 0; pageIndex = 0; selectedButton = 0; dirty = false; lastSyncedFingerprint = ""; notice = `Opened ${path.split(/[\\/]/).pop()}`; }
+    try { project = await openArchive(path); projectRevision += 1; projectPath = path; profileIndex = 0; pageIndex = 0; selectedButton = 0; dirty = false; lastSyncedFingerprint = ""; notice = `Opened ${path.split(/[\\/]/).pop()}`; }
     catch (error) { notice = `Could not open project: ${error}`; }
     finally { busy = false; }
   }
@@ -104,16 +135,9 @@
   }
 
   async function sync() {
-    const normalized = cloneProject(project);
-    for (const item of normalized.macros) for (const step of item.steps) if (step.kind === "key_press") {
-      step.durationMs = Math.min(1000, Math.max(1, Number(step.durationMs) || 25));
-      step.modifiers = [...new Set((step.modifiers ?? []).map((value) => value.toUpperCase()).filter((value) => ["CTRL", "SHIFT", "ALT", "GUI"].includes(value)))];
-      if (!step.key || ["CTRL", "SHIFT", "ALT", "GUI"].includes(step.key)) step.key = "F13";
-    }
-    project = normalized;
-    const syncSummary = await validateProject(project);
-    summary = syncSummary;
-    const errors = syncSummary.issues.filter((issue) => issue.severity === "error");
+    const errors = validatedRevision === projectRevision
+      ? summary.issues.filter((issue) => issue.severity === "error")
+      : [];
     if (errors.length) { notice = `Cannot sync: ${errors.map((issue) => `${issue.path} — ${issue.message}`).join(" · ")}`; return; }
     busy = true;
     notice = "Syncing project to device…";
@@ -149,6 +173,7 @@
     busy = true; notice = "Syncing profile from device…";
     try {
       project = await syncFromDevice();
+      projectRevision += 1;
       profileIndex = 0; pageIndex = 0; selectedButton = 0;
       projectPath = ""; dirty = true; await refreshValidation(); lastSyncedFingerprint = summary.fingerprint;
       notice = `Imported ${project.profiles.length} profile${project.profiles.length === 1 ? "" : "s"}, ${project.assets.length} icon${project.assets.length === 1 ? "" : "s"}, and ${project.macros.length} macro${project.macros.length === 1 ? "" : "s"} from device`;
@@ -179,6 +204,14 @@
   function selectProfile(index: number) { profileIndex = index; pageIndex = 0; selectedButton = 0; }
   function selectPage(index: number) { pageIndex = index; selectedButton = 0; }
 
+  function removeMacroIfUnreferenced(id?: string) {
+    if (!id) return;
+    const referenced = project.profiles.some((itemProfile) => itemProfile.pages.some((itemPage) =>
+      itemPage.buttons.some((itemButton) => itemButton.macroId === id)
+    ));
+    if (!referenced) project.macros = project.macros.filter((item) => item.id !== id);
+  }
+
   function profileMenu(event: MouseEvent, index: number) {
     event.preventDefault();
     const target = project.profiles[index];
@@ -187,7 +220,9 @@
     if (action.trim().toUpperCase() === "DELETE") {
       if (project.profiles.length === 1) { notice = "A project must keep at least one profile"; return; }
       if (!confirm(`Delete profile “${target.name}” and all of its pages?`)) return;
+      const removedMacroIds = target.pages.flatMap((itemPage) => itemPage.buttons.map((itemButton) => itemButton.macroId).filter((id): id is string => Boolean(id)));
       project.profiles.splice(index, 1);
+      for (const id of removedMacroIds) removeMacroIfUnreferenced(id);
       profileIndex = Math.min(profileIndex > index ? profileIndex - 1 : profileIndex, project.profiles.length - 1);
       pageIndex = 0; selectedButton = 0; changed("Profile deleted"); return;
     }
@@ -198,13 +233,17 @@
 
   function updateButton(field: string, value: string) {
     const buttonTarget = page.buttons[selectedButton];
+    const previousMacroId = buttonTarget.macroId;
     const target = buttonTarget as unknown as Record<string, string | undefined>;
     target[field] = value || undefined;
     if (field === "action" && value === "macro" && !buttonTarget.macroId) {
       const id = crypto.randomUUID();
       project.macros.push({ id, name: `${profile.name} · ${page.name} · Key ${selectedButton + 1}`, steps: [{ kind: "key_press", key: "F13", durationMs: 25, modifiers: [] }] });
       buttonTarget.macroId = id;
-    } else if (field === "action" && value !== "macro") buttonTarget.macroId = undefined;
+    } else if (field === "action" && value !== "macro") {
+      buttonTarget.macroId = undefined;
+      removeMacroIfUnreferenced(previousMacroId);
+    }
     changed();
   }
 
@@ -230,7 +269,7 @@
   }
 
 
-  function iconFor(assetId?: string) { return project.assets.find((asset) => asset.id === assetId)?.dataUrl; }
+  function iconFor(assetId?: string) { return assetId ? assetsById.get(assetId)?.dataUrl : undefined; }
 
   async function importFiles(files: FileList | File[]) {
     for (const file of Array.from(files)) {
@@ -346,8 +385,9 @@
     <section class="device-preview" aria-label="1280 by 720 Screendeck preview">
       <div class="grid">
         {#each page.buttons as tile, index}
+          {@const icon = iconFor(tile.iconId)}
           <button class:selected={index === selectedButton} class="tile" aria-label={`Button ${index + 1}`} on:click={() => selectedButton = index} on:dragover={(e) => e.preventDefault()} on:drop={dropIcon}>
-            {#if iconFor(tile.iconId)}<img class:contained={tile.imageFit === "contain"} src={iconFor(tile.iconId)} alt="" draggable="false"/>
+            {#if icon}<img class:contained={tile.imageFit === "contain"} src={icon} alt="" draggable="false"/>
             {:else if tile.action === "page_previous"}<ChevronLeft size={24}/>
             {:else if tile.action === "page_next"}<ChevronRight size={24}/>
             {:else if tile.action === "profile_next"}<Layers3 size={22}/>
@@ -367,7 +407,7 @@
   </main>
 
   <aside class="inspector">
-    <div class="inspector-tabs"><button class="active">Button</button><button>Page</button></div>
+    <div class="inspector-tabs"><button class="active">Button</button></div>
     <div class="inspector-scroll">
       <label>Action<select value={button.action} on:change={(e) => updateButton("action", e.currentTarget.value)}><option value="none">None</option><option value="macro">Run macro</option><option value="page_next">Next page</option><option value="page_previous">Previous page</option><option value="profile_next">Next profile</option></select></label>
       {#if button.iconId}
@@ -380,7 +420,7 @@
 
       {#if button.action === "macro" && macro}
         <div class="rule"></div>
-        <div class="macro-title"><div><span>Macro sequence</span><strong>{macro.name}</strong></div><button title="Duplicate"><Copy size={14}/></button></div>
+        <div class="macro-title"><div><span>Macro sequence</span><strong>{macro.name}</strong></div></div>
         <div class="steps">
           {#each macro.steps as step, index}
             <div class="step">
