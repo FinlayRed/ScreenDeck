@@ -144,10 +144,14 @@
   async function importFiles(files: FileList | File[]) {
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/")) continue;
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file);
-      });
-      const asset: Asset = { id: crypto.randomUUID(), name: file.name, mediaType: file.type, dataUrl };
+      const bitmap = await createImageBitmap(file);
+      const scale = Math.min(1, 256 / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      canvas.getContext("2d")!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      bitmap.close();
+      const asset: Asset = { id: crypto.randomUUID(), name: file.name.replace(/\.[^.]+$/, "") + ".png", mediaType: "image/png", dataUrl: canvas.toDataURL("image/png") };
       project.assets.push(asset);
       page.buttons[selectedButton].iconId = asset.id;
       page.buttons[selectedButton].imageFit = "cover";

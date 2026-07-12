@@ -17,6 +17,7 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_log.h"
+#include "esp_lv_decoder.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -44,6 +45,8 @@ static const char *TAG = "m5";
 #define M5_PANEL_HEIGHT 1280
 #define M5_RGB565_BYTES (M5_LCD_WIDTH * M5_LCD_HEIGHT * 2U)
 #define M5_INDEX_BUFFER_BYTES (16U * 1024U)
+#define M5_UI_MAGIC 0x4955354DUL
+#define M5_SDB3_MAGIC 0x33424453UL
 
 typedef enum {
     M5_STATE_ACTIVE,
@@ -71,16 +74,43 @@ typedef struct {
     bool preloaded;
 } m5_media_t;
 
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version, header_bytes, profile_count, page_count, asset_count, buttons_per_page;
+    uint32_t profiles_offset, pages_offset, assets_offset, blob_offset;
+} m5_ui_header_t;
+
+typedef struct __attribute__((packed)) { uint16_t first_page, page_count; uint32_t reserved; } m5_ui_profile_t;
+typedef struct __attribute__((packed)) { uint32_t accent; uint16_t asset_index; uint8_t action, fit; } m5_ui_button_t;
+typedef struct __attribute__((packed)) { uint32_t offset, length; uint8_t type, reserved[3]; } m5_ui_asset_t;
+
+typedef struct {
+    uint8_t *payload;
+    size_t payload_size;
+    const m5_ui_header_t *header;
+    const m5_ui_profile_t *profiles;
+    const m5_ui_button_t *buttons;
+    const m5_ui_asset_t *assets;
+    lv_image_dsc_t *images;
+    bool ready;
+} m5_ui_bundle_t;
+
 static lv_display_t *s_display;
 static esp_lcd_panel_handle_t s_panel;
 static lv_obj_t *s_icons[M5_BUTTONS];
 static lv_obj_t *s_saver_input;
 static m5_media_t s_media;
+static m5_ui_bundle_t s_ui_bundle;
+static esp_lv_decoder_handle_t s_icon_decoder;
+static uint16_t s_current_profile;
+static uint16_t s_current_page;
 static volatile m5_state_t s_state = M5_STATE_ACTIVE;
 static volatile int64_t s_last_activity_us;
 static volatile bool s_ui_ready;
 static volatile bool s_wake_requested;
+static volatile bool s_page_change_requested;
 static uint8_t s_index_buffer[M5_INDEX_BUFFER_BYTES];
+extern const char *m3_active_bundle_path(void);
 
 static const char *const s_symbols[M5_BUTTONS] = {
     LV_SYMBOL_PLAY, LV_SYMBOL_STOP, LV_SYMBOL_SETTINGS, LV_SYMBOL_LOOP,
@@ -111,6 +141,74 @@ static void m5_touch_activity(void)
 
 static void m5_render_active_ui(void);
 
+static bool m5_range_valid(size_t offset, size_t count, size_t item_size, size_t total)
+{
+    return offset <= total && item_size != 0 && count <= (total - offset) / item_size;
+}
+
+static bool m5_load_ui_bundle(void)
+{
+    const char *path = m3_active_bundle_path();
+    if (path == NULL) return false;
+    FILE *file = fopen(path, "rb");
+    uint8_t sdb_header[16];
+    if (file == NULL || fread(sdb_header, 1, sizeof(sdb_header), file) != sizeof(sdb_header)) {
+        if (file) fclose(file);
+        return false;
+    }
+    uint32_t magic, total_bytes;
+    memcpy(&magic, sdb_header, 4); memcpy(&total_bytes, sdb_header + 8, 4);
+    if (magic != M5_SDB3_MAGIC || total_bytes < 16 + sizeof(m5_ui_header_t) || total_bytes > 16U * 1024U * 1024U) {
+        fclose(file); return false;
+    }
+    const size_t payload_size = total_bytes - 16U;
+    uint8_t *payload = heap_caps_malloc(payload_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (payload == NULL || fread(payload, 1, payload_size, file) != payload_size) {
+        heap_caps_free(payload); fclose(file); return false;
+    }
+    fclose(file);
+    const m5_ui_header_t *header = (const m5_ui_header_t *) payload;
+    if (header->magic != M5_UI_MAGIC || header->version != 1 || header->header_bytes != sizeof(*header) ||
+        header->profile_count == 0 || header->page_count == 0 || header->buttons_per_page != M5_BUTTONS ||
+        !m5_range_valid(header->profiles_offset, header->profile_count, sizeof(m5_ui_profile_t), payload_size) ||
+        !m5_range_valid(header->pages_offset, (size_t) header->page_count * M5_BUTTONS, sizeof(m5_ui_button_t), payload_size) ||
+        !m5_range_valid(header->assets_offset, header->asset_count, sizeof(m5_ui_asset_t), payload_size) ||
+        header->blob_offset > payload_size) {
+        heap_caps_free(payload); return false;
+    }
+    const m5_ui_profile_t *profiles = (const m5_ui_profile_t *) (payload + header->profiles_offset);
+    const m5_ui_button_t *buttons = (const m5_ui_button_t *) (payload + header->pages_offset);
+    const m5_ui_asset_t *assets = (const m5_ui_asset_t *) (payload + header->assets_offset);
+    for (uint16_t i = 0; i < header->profile_count; ++i) {
+        if (profiles[i].page_count == 0 || profiles[i].first_page + profiles[i].page_count > header->page_count) {
+            heap_caps_free(payload); return false;
+        }
+    }
+    lv_image_dsc_t *images = calloc(header->asset_count, sizeof(lv_image_dsc_t));
+    if (header->asset_count != 0 && images == NULL) { heap_caps_free(payload); return false; }
+    for (uint16_t i = 0; i < header->asset_count; ++i) {
+        if (!m5_range_valid(assets[i].offset, assets[i].length, 1, payload_size) || assets[i].offset < header->blob_offset) {
+            free(images); heap_caps_free(payload); return false;
+        }
+        images[i].data = payload + assets[i].offset;
+        images[i].data_size = assets[i].length;
+    }
+    for (size_t i = 0; i < (size_t) header->page_count * M5_BUTTONS; ++i) {
+        if (buttons[i].asset_index != UINT16_MAX && buttons[i].asset_index >= header->asset_count) {
+            free(images); heap_caps_free(payload); return false;
+        }
+    }
+    s_ui_bundle = (m5_ui_bundle_t) {
+        .payload = payload, .payload_size = payload_size, .header = header,
+        .profiles = profiles, .buttons = buttons, .assets = assets, .images = images, .ready = true,
+    };
+    s_current_profile = 0;
+    s_current_page = profiles[0].first_page;
+    ESP_LOGI(TAG, "M5_UI bundle=loaded profiles=%u pages=%u assets=%u bytes=%u",
+             header->profile_count, header->page_count, header->asset_count, (unsigned) payload_size);
+    return true;
+}
+
 static void m5_input_event_cb(lv_event_t *event)
 {
     const lv_event_code_t code = lv_event_get_code(event);
@@ -124,6 +222,29 @@ static void m5_input_event_cb(lv_event_t *event)
          * returned from input dispatch; this also consumes the wake press. */
         s_state = M5_STATE_WAKING;
         s_wake_requested = true;
+    }
+}
+
+static void m5_tile_event_cb(lv_event_t *event)
+{
+    m5_input_event_cb(event);
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED || s_state != M5_STATE_ACTIVE || !s_ui_bundle.ready) return;
+    const uint32_t button_index = (uint32_t) (uintptr_t) lv_event_get_user_data(event);
+    if (button_index >= M5_BUTTONS) return;
+    const m5_ui_button_t *button = &s_ui_bundle.buttons[(size_t) s_current_page * M5_BUTTONS + button_index];
+    const m5_ui_profile_t *profile = &s_ui_bundle.profiles[s_current_profile];
+    if (button->action == 2) {
+        const uint16_t last = profile->first_page + profile->page_count - 1;
+        s_current_page = s_current_page >= last ? profile->first_page : s_current_page + 1;
+        s_page_change_requested = true;
+    } else if (button->action == 3) {
+        s_current_page = s_current_page <= profile->first_page
+            ? profile->first_page + profile->page_count - 1 : s_current_page - 1;
+        s_page_change_requested = true;
+    } else if (button->action == 4) {
+        s_current_profile = (s_current_profile + 1) % s_ui_bundle.header->profile_count;
+        s_current_page = s_ui_bundle.profiles[s_current_profile].first_page;
+        s_page_change_requested = true;
     }
 }
 
@@ -183,16 +304,27 @@ static void m5_render_active_ui(void)
                            top + row * (tile_size + M5_GAP_PX));
             lv_obj_set_style_radius(tile, 12, 0);
             lv_obj_set_style_border_width(tile, 0, 0);
-            lv_obj_set_style_bg_color(tile, lv_color_hex(s_colors[index]), 0);
+            const m5_ui_button_t *definition = s_ui_bundle.ready
+                ? &s_ui_bundle.buttons[(size_t) s_current_page * M5_BUTTONS + index] : NULL;
+            lv_obj_set_style_bg_color(tile, lv_color_hex(definition ? definition->accent : s_colors[index]), 0);
             lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
             lv_obj_set_style_bg_color(tile, lv_color_hex(0xFFFFFF), LV_STATE_PRESSED);
             lv_obj_set_style_bg_opa(tile, LV_OPA_30, LV_STATE_PRESSED);
-            lv_obj_add_event_cb(tile, m5_input_event_cb, LV_EVENT_ALL, NULL);
-            lv_obj_t *icon = lv_label_create(tile);
-            lv_label_set_text(icon, s_symbols[index]);
-            lv_obj_set_style_text_color(icon, lv_color_hex(0xFFFFFF), 0);
-            lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);
-            lv_obj_center(icon);
+            lv_obj_add_event_cb(tile, m5_tile_event_cb, LV_EVENT_ALL, (void *) (uintptr_t) index);
+            lv_obj_t *icon;
+            if (definition && definition->asset_index != UINT16_MAX) {
+                icon = lv_image_create(tile);
+                lv_obj_set_size(icon, tile_size, tile_size);
+                lv_image_set_src(icon, &s_ui_bundle.images[definition->asset_index]);
+                lv_image_set_inner_align(icon, definition->fit ? LV_IMAGE_ALIGN_CONTAIN : LV_IMAGE_ALIGN_COVER);
+                lv_obj_center(icon);
+            } else {
+                icon = lv_label_create(tile);
+                lv_label_set_text(icon, s_symbols[index]);
+                lv_obj_set_style_text_color(icon, lv_color_hex(0xFFFFFF), 0);
+                lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);
+                lv_obj_center(icon);
+            }
             s_icons[index] = icon;
         }
     }
@@ -345,6 +477,12 @@ static bool m5_decode_and_draw(uint32_t index)
 static void m5_media_task(void *argument)
 {
     (void) argument;
+    const bool bundle_ready = m5_load_ui_bundle();
+    if (bundle_ready && esp_lv_adapter_lock(1000) == ESP_OK) {
+        m5_render_active_ui();
+        esp_lv_adapter_refresh_now(s_display);
+        esp_lv_adapter_unlock();
+    }
     const bool media_ready = m5_index_mjpeg();
     if (!media_ready) {
         ESP_LOGI(TAG, "M5_MEDIA source=none frames=0 fps=30");
@@ -382,6 +520,12 @@ static void m5_media_task(void *argument)
             continue;
         }
         if (s_state == M5_STATE_ACTIVE) {
+            if (s_page_change_requested && esp_lv_adapter_lock(1000) == ESP_OK) {
+                m5_render_active_ui();
+                esp_lv_adapter_unlock();
+                s_page_change_requested = false;
+                continue;
+            }
             if (s_media.ready && now - s_last_activity_us >= (int64_t) M5_SCREENSAVER_IDLE_MS * 1000) {
                 if (esp_lv_adapter_lock(1000) == ESP_OK) {
                     m5_enter_saver_ui();
@@ -431,6 +575,8 @@ void m5_media_start(lv_display_t *display)
                     &s_media.panel_buffers[2]));
     s_ui_ready = false;
     s_wake_requested = false;
+    s_page_change_requested = false;
+    ESP_ERROR_CHECK(esp_lv_decoder_init(&s_icon_decoder));
     /* Paint the first page before touching the potentially large media file.
      * The worker indexes it in the background after the usable UI is visible. */
     if (esp_lv_adapter_lock(1000) == ESP_OK) {

@@ -156,9 +156,15 @@ static uint8_t s_frame_buffer[M3_RX_FRAME_BYTES];
 static size_t s_frame_length;
 static bool s_usb_mounted;
 static lv_display_t *s_display;
+static char s_active_bundle_path[128];
+
+const char *m3_active_bundle_path(void)
+{
+    return s_active_bundle_path[0] != '\0' ? s_active_bundle_path : NULL;
+}
 
 #ifdef M5_MEDIA_ENABLED
-static void m3_restart_after_media_commit(void *argument)
+static void m3_restart_after_commit(void *argument)
 {
     (void) argument;
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -414,6 +420,7 @@ static void m3_find_active_pointer(void)
 {
     s_storage.active_bundle_valid = false;
     s_storage.active_generation = 0;
+    s_active_bundle_path[0] = '\0';
     DIR *directory = opendir(M3_ROOT);
     if (directory == NULL) return;
     struct dirent *entry;
@@ -429,6 +436,7 @@ static void m3_find_active_pointer(void)
         if (stat(bundle_path, &bundle) == 0 && bundle.st_size > 0) {
             s_storage.active_generation = pointer.generation;
             s_storage.active_bundle_valid = true;
+            snprintf(s_active_bundle_path, sizeof(s_active_bundle_path), "%s", bundle_path);
         }
     }
     closedir(directory);
@@ -586,10 +594,16 @@ static void m3_handle_commit(const m3_frame_header_t *frame)
     unlink(M3_STATE_FILE);
     s_storage.active_generation = generation;
     s_storage.active_bundle_valid = true;
+    snprintf(s_active_bundle_path, sizeof(s_active_bundle_path), "%s", bundle_path);
     s_storage.upload_open = false;
     s_storage.received_bytes = 0;
     ESP_LOGI(TAG, "M3_SYNC action=commit generation=%u bundle=%s", generation, bundle_name);
     m3_send_response(M3_OP_COMMIT, frame->sequence, M3_STATUS_OK, generation);
+#ifdef M5_MEDIA_ENABLED
+    BaseType_t restart_ok = xTaskCreate(m3_restart_after_commit, "bundle_restart", 2048,
+                                        NULL, 4, NULL);
+    if (restart_ok != pdPASS) ESP_LOGE(TAG, "M3_SYNC result=restart_task_failed");
+#endif
 }
 
 static bool m3_validate_mjpeg_file(const char *path, uint32_t expected_bytes, uint32_t expected_crc)
@@ -714,7 +728,7 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
     ESP_LOGI(TAG, "M3_MEDIA action=commit bytes=%u path=%s", uploaded, M3_MEDIA_FILE);
     m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_OK, uploaded);
 #ifdef M5_MEDIA_ENABLED
-    BaseType_t restart_ok = xTaskCreate(m3_restart_after_media_commit, "media_restart", 2048,
+    BaseType_t restart_ok = xTaskCreate(m3_restart_after_commit, "media_restart", 2048,
                                         NULL, 4, NULL);
     if (restart_ok != pdPASS) ESP_LOGE(TAG, "M3_MEDIA result=restart_task_failed");
 #endif

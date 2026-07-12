@@ -135,6 +135,7 @@ mod tests {
         assert_eq!(&bundle[0..4], &0x3342_4453u32.to_le_bytes());
         assert_eq!(u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize, bundle.len());
         assert_eq!(u32::from_le_bytes(bundle[12..16].try_into().unwrap()), compiler::crc32(&bundle[16..]));
+        assert_eq!(&bundle[16..20], &0x4955_354Du32.to_le_bytes());
     }
 
     #[test]
@@ -165,12 +166,24 @@ mod tests {
         let before = device::status();
         assert!(before.connected, "{}", before.detail);
         assert_eq!(before.capabilities & 0x1f, 0x1f);
-        let sample = project();
+        let mut sample = project();
+        let icon = std::fs::read("icons/128x128.png").unwrap();
+        sample.assets.push(model::Asset {
+            id: "physical-icon".into(), name: "Physical icon.png".into(), media_type: "image/png".into(),
+            data_url: format!("data:image/png;base64,{}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, icon)),
+        });
+        sample.profiles[0].pages[0].buttons[0].icon_id = Some("physical-icon".into());
         let summary = compiler::summarize(&sample);
         let bundle = compiler::compile(&sample).unwrap();
         let result = device::sync(&bundle, summary.fingerprint).unwrap();
         assert!(result.generation > 0);
-        let after = device::status();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let mut after = device::status();
+        for _ in 0..30 {
+            if after.connected { break; }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            after = device::status();
+        }
         assert!(after.connected, "{}", after.detail);
         assert_eq!(after.generation, result.generation);
     }
