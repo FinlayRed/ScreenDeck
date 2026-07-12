@@ -20,11 +20,19 @@ pub struct Project {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Profile { pub id: String, pub name: String, pub pages: Vec<Page> }
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+    pub pages: Vec<Page>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Page { pub id: String, pub name: String, pub buttons: Vec<Button> }
+pub struct Page {
+    pub id: String,
+    pub name: String,
+    pub buttons: Vec<Button>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,10 +49,20 @@ pub struct Button {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum ActionKind { Macro, PageNext, PagePrevious, ProfileNext, None }
+pub enum ActionKind {
+    Macro,
+    PageNext,
+    PagePrevious,
+    ProfileNext,
+    None,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Macro { pub id: String, pub name: String, pub steps: Vec<MacroStep> }
+pub struct Macro {
+    pub id: String,
+    pub name: String,
+    pub steps: Vec<MacroStep>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,52 +76,214 @@ pub struct MacroStep {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum StepKind { KeyDown, KeyUp, Delay, Consumer }
+pub enum StepKind {
+    KeyDown,
+    KeyUp,
+    Delay,
+    Consumer,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Asset { pub id: String, pub name: String, pub media_type: String, #[serde(default)] pub data_url: String }
+pub struct Asset {
+    pub id: String,
+    pub name: String,
+    pub media_type: String,
+    #[serde(default)]
+    pub data_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_media_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_data_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub animation_data_url: String,
+    #[serde(default)]
+    pub animation_fps: u8,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ValidationIssue { pub path: String, pub message: String, pub severity: &'static str }
+pub struct ValidationIssue {
+    pub path: String,
+    pub message: String,
+    pub severity: &'static str,
+}
 
 fn issue(path: impl Into<String>, message: impl Into<String>) -> ValidationIssue {
-    ValidationIssue { path: path.into(), message: message.into(), severity: "error" }
+    ValidationIssue {
+        path: path.into(),
+        message: message.into(),
+        severity: "error",
+    }
+}
+
+fn is_keyboard_key(value: &str) -> bool {
+    (value.len() == 1 && value.as_bytes()[0].is_ascii_uppercase())
+        || value
+            .strip_prefix('F')
+            .and_then(|number| number.parse::<u8>().ok())
+            .is_some_and(|number| (13..=24).contains(&number))
+        || matches!(
+            value,
+            "ENTER"
+                | "ESCAPE"
+                | "TAB"
+                | "SPACE"
+                | "BACKSPACE"
+                | "DELETE"
+                | "LEFT"
+                | "RIGHT"
+                | "UP"
+                | "DOWN"
+                | "CTRL"
+                | "SHIFT"
+                | "ALT"
+                | "GUI"
+        )
+}
+
+fn is_consumer_key(value: &str) -> bool {
+    matches!(
+        value,
+        "VOLUME_UP" | "VOLUME_DOWN" | "MUTE" | "PLAY_PAUSE" | "NEXT_TRACK" | "PREVIOUS_TRACK"
+    )
 }
 
 pub fn validate(project: &Project) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
-    if project.schema_version != 1 { issues.push(issue("schemaVersion", "Only project schema version 1 is supported.")); }
-    if project.name.trim().is_empty() || project.name.len() > 80 { issues.push(issue("name", "Project name must contain 1–80 characters.")); }
-    if project.profiles.is_empty() || project.profiles.len() > MAX_PROFILES { issues.push(issue("profiles", format!("A project needs 1–{MAX_PROFILES} profiles."))); }
-    if project.macros.len() > MAX_MACROS { issues.push(issue("macros", format!("At most {MAX_MACROS} macros are supported."))); }
+    if project.schema_version != 2 {
+        issues.push(issue(
+            "schemaVersion",
+            "Only project schema version 2 is supported.",
+        ));
+    }
+    if project.name.trim().is_empty() || project.name.len() > 80 {
+        issues.push(issue("name", "Project name must contain 1–80 characters."));
+    }
+    if project.profiles.is_empty() || project.profiles.len() > MAX_PROFILES {
+        issues.push(issue(
+            "profiles",
+            format!("A project needs 1–{MAX_PROFILES} profiles."),
+        ));
+    }
+    if project.macros.len() > MAX_MACROS {
+        issues.push(issue(
+            "macros",
+            format!("At most {MAX_MACROS} macros are supported."),
+        ));
+    }
 
     let macro_ids: HashSet<_> = project.macros.iter().map(|item| item.id.as_str()).collect();
     let asset_ids: HashSet<_> = project.assets.iter().map(|item| item.id.as_str()).collect();
-    if macro_ids.len() != project.macros.len() { issues.push(issue("macros", "Macro IDs must be unique.")); }
-    if asset_ids.len() != project.assets.len() { issues.push(issue("assets", "Asset IDs must be unique.")); }
+    if macro_ids.len() != project.macros.len() {
+        issues.push(issue("macros", "Macro IDs must be unique."));
+    }
+    if asset_ids.len() != project.assets.len() {
+        issues.push(issue("assets", "Asset IDs must be unique."));
+    }
+    for (index, asset) in project.assets.iter().enumerate() {
+        if asset.data_url.is_empty() {
+            issues.push(issue(
+                format!("assets[{index}].dataUrl"),
+                "A device-ready image is required.",
+            ));
+        }
+        let source_fields = [
+            &asset.source_name,
+            &asset.source_media_type,
+            &asset.source_data_url,
+        ];
+        if source_fields.iter().any(|value| !value.is_empty())
+            && source_fields.iter().any(|value| value.is_empty())
+        {
+            issues.push(issue(
+                format!("assets[{index}].source"),
+                "Original asset name, media type and data must be stored together.",
+            ));
+        }
+        if !asset.animation_data_url.is_empty() && asset.animation_fps != 15 {
+            issues.push(issue(
+                format!("assets[{index}].animationFps"),
+                "Animated icons must use the deterministic 15 FPS preset.",
+            ));
+        }
+    }
 
     for (pi, profile) in project.profiles.iter().enumerate() {
         if profile.pages.is_empty() || profile.pages.len() > MAX_PAGES_PER_PROFILE {
-            issues.push(issue(format!("profiles[{pi}].pages"), format!("A profile needs 1–{MAX_PAGES_PER_PROFILE} pages.")));
+            issues.push(issue(
+                format!("profiles[{pi}].pages"),
+                format!("A profile needs 1–{MAX_PAGES_PER_PROFILE} pages."),
+            ));
         }
         for (pgi, page) in profile.pages.iter().enumerate() {
-            if page.buttons.len() != BUTTONS_PER_PAGE { issues.push(issue(format!("profiles[{pi}].pages[{pgi}].buttons"), "A page must contain exactly 32 buttons.")); }
+            if page.buttons.len() != BUTTONS_PER_PAGE {
+                issues.push(issue(
+                    format!("profiles[{pi}].pages[{pgi}].buttons"),
+                    "A page must contain exactly 32 buttons.",
+                ));
+            }
             for (bi, button) in page.buttons.iter().enumerate() {
                 let path = format!("profiles[{pi}].pages[{pgi}].buttons[{bi}]");
-                if button.action == ActionKind::Macro && button.macro_id.as_deref().is_none_or(|id| !macro_ids.contains(id)) { issues.push(issue(path.clone(), "The button references a missing macro.")); }
-                if button.icon_id.as_deref().is_some_and(|id| !asset_ids.contains(id)) { issues.push(issue(path, "The button references a missing icon.")); }
-                if button.image_fit.as_deref().is_some_and(|fit| fit != "cover" && fit != "contain") { issues.push(issue(format!("profiles[{pi}].pages[{pgi}].buttons[{bi}].imageFit"), "Artwork display must be cover or contain.")); }
+                if button.action == ActionKind::Macro
+                    && button
+                        .macro_id
+                        .as_deref()
+                        .is_none_or(|id| !macro_ids.contains(id))
+                {
+                    issues.push(issue(
+                        path.clone(),
+                        "The button references a missing macro.",
+                    ));
+                }
+                if button
+                    .icon_id
+                    .as_deref()
+                    .is_some_and(|id| !asset_ids.contains(id))
+                {
+                    issues.push(issue(path, "The button references a missing icon."));
+                }
+                if button
+                    .image_fit
+                    .as_deref()
+                    .is_some_and(|fit| fit != "cover" && fit != "contain")
+                {
+                    issues.push(issue(
+                        format!("profiles[{pi}].pages[{pgi}].buttons[{bi}].imageFit"),
+                        "Artwork display must be cover or contain.",
+                    ));
+                }
             }
         }
     }
     for (mi, item) in project.macros.iter().enumerate() {
-        if item.steps.is_empty() || item.steps.len() > MAX_STEPS { issues.push(issue(format!("macros[{mi}].steps"), format!("A macro needs 1–{MAX_STEPS} steps."))); }
+        if item.steps.is_empty() || item.steps.len() > MAX_STEPS {
+            issues.push(issue(
+                format!("macros[{mi}].steps"),
+                format!("A macro needs 1–{MAX_STEPS} steps."),
+            ));
+        }
         for (si, step) in item.steps.iter().enumerate() {
             let path = format!("macros[{mi}].steps[{si}]");
-            if step.kind == StepKind::Delay && !(1..=60_000).contains(&step.duration_ms.unwrap_or(0)) { issues.push(issue(path.clone(), "Delay must be between 1 and 60,000 ms.")); }
-            if step.kind != StepKind::Delay && step.key.as_deref().is_none_or(str::is_empty) { issues.push(issue(path, "Choose a HID key.")); }
+            if step.kind == StepKind::Delay
+                && !(1..=60_000).contains(&step.duration_ms.unwrap_or(0))
+            {
+                issues.push(issue(
+                    path.clone(),
+                    "Delay must be between 1 and 60,000 ms.",
+                ));
+            }
+            if matches!(step.kind, StepKind::KeyDown | StepKind::KeyUp)
+                && step.key.as_deref().is_none_or(|key| !is_keyboard_key(key))
+            {
+                issues.push(issue(path, "Choose a supported keyboard HID key."));
+            } else if step.kind == StepKind::Consumer
+                && step.key.as_deref().is_none_or(|key| !is_consumer_key(key))
+            {
+                issues.push(issue(path, "Choose a supported consumer-control HID key."));
+            }
         }
     }
     issues

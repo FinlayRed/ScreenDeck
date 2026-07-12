@@ -6,6 +6,7 @@ export interface CompileSummary { bundleBytes: number; payloadCrc32: number; fin
 export interface DeviceStatus { connected: boolean; generation: number; capabilities: number; detail: string }
 export interface SyncResult { generation: number; bytesSent: number; resumedAt: number; fingerprint: string }
 export interface ScreensaverResult { bytesSent: number; resumedAt: number }
+export interface IconConversion { posterDataUrl: string; animationDataUrl: string; frameCount: number }
 
 const native = () => "__TAURI_INTERNALS__" in window;
 
@@ -27,6 +28,8 @@ export const deviceStatus = (): Promise<DeviceStatus> => native()
 
 export const syncProject = (project: Project): Promise<SyncResult> => invoke("sync_project", { project });
 export const uploadScreensaver = (path: string): Promise<ScreensaverResult> => invoke("upload_screensaver", { path });
+export const testScreensaver = (): Promise<void> => invoke("test_screensaver");
+export const prepareIconAnimation = (name: string, dataUrl: string): Promise<IconConversion> => invoke("prepare_icon_animation", { name, dataUrl });
 export const saveArchive = (path: string, project: Project): Promise<void> => invoke("save_archive", { path, project });
 export const openArchive = (path: string): Promise<Project> => invoke("open_archive", { path });
 export const backupBundle = (path: string, project: Project): Promise<void> => invoke("backup_bundle", { path, project });

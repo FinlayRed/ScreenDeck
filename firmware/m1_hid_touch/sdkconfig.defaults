@@ -12,5 +12,9 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_FREERTOS_HZ=1000
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
-# M1 deliberately exposes just one standard boot-keyboard HID interface.
+# M1 uses one HID interface with keyboard, consumer and mouse report IDs, plus
+# a vendor interface carrying Microsoft OS 2.0 descriptors for WinUSB.
 CONFIG_TINYUSB_HID_COUNT=1
+CONFIG_TINYUSB_VENDOR_COUNT=1
+CONFIG_TINYUSB_VENDOR_RX_BUFSIZE=2048
+CONFIG_TINYUSB_VENDOR_TX_BUFSIZE=2048

@@ -772,6 +772,15 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# Screendeck M0 benchmark
+#
+CONFIG_M0_TEAR_TRIPLE_PARTIAL=y
+# CONFIG_M0_TEAR_DOUBLE_DIRECT is not set
+# CONFIG_M0_TEAR_DOUBLE_FULL is not set
+CONFIG_M0_COMBINED_FRAMES=90
+# end of Screendeck M0 benchmark
+
+#
 # Compiler options
 #
 # CONFIG_COMPILER_OPTIMIZATION_DEBUG is not set

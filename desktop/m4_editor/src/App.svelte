@@ -3,11 +3,11 @@
   import {
     AlertCircle, Archive, ChevronLeft, ChevronRight, CirclePlus, Copy, Cpu,
     Download, FilePlus2, FolderOpen, GripVertical, ImagePlus, Keyboard,
-    Layers3, MonitorUp, Plus, RefreshCw, Save, Trash2, Upload, Usb, X
+    Layers3, MonitorUp, Play, Plus, RefreshCw, Save, Trash2, Upload, Usb, X
   } from "@lucide/svelte";
-  import { backupBundle, deviceStatus, openArchive, saveArchive, syncProject, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
+  import { backupBundle, deviceStatus, openArchive, prepareIconAnimation, saveArchive, syncProject, testScreensaver as testScreensaverOnDevice, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
   import type { CompileSummary, DeviceStatus } from "./lib/backend";
-  import { cloneProject, HID_KEYS, starterProject } from "./lib/model";
+  import { cloneProject, CONSUMER_KEYS, KEYBOARD_KEYS, starterProject } from "./lib/model";
   import type { Asset, MacroStep, Project } from "./lib/model";
 
   let project: Project = starterProject();
@@ -21,6 +21,7 @@
   let notice = "Ready";
   let device: DeviceStatus = { connected: false, generation: 0, capabilities: 0, detail: "Checking for Screendeck…" };
   let summary: CompileSummary = { bundleBytes: 0, payloadCrc32: 0, fingerprint: "", issues: [] };
+  let lastSyncedFingerprint = "";
 
   $: profile = project.profiles[profileIndex];
   $: page = profile.pages[pageIndex];
@@ -28,6 +29,13 @@
   $: macro = project.macros.find((item) => item.id === (button.macroId ?? selectedMacroId)) ?? project.macros[0];
   $: validationTick = JSON.stringify(project);
   $: if (validationTick) refreshValidation();
+  $: deviceDiff = !device.connected
+    ? "Device unavailable"
+    : summary.issues.length
+      ? "Local project invalid"
+      : lastSyncedFingerprint && lastSyncedFingerprint === summary.fingerprint
+        ? `Device matches ${summary.fingerprint}`
+        : `Pending/unknown · local ${summary.fingerprint || "unbuilt"} · device generation ${device.generation}`;
 
   function changed(message = "Unsaved changes") {
     project = cloneProject(project);
@@ -45,14 +53,14 @@
   }
 
   async function newProject() {
-    project = starterProject(); profileIndex = 0; pageIndex = 0; selectedButton = 0; projectPath = ""; dirty = false; notice = "New project";
+    project = starterProject(); profileIndex = 0; pageIndex = 0; selectedButton = 0; projectPath = ""; dirty = false; lastSyncedFingerprint = ""; notice = "New project";
   }
 
   async function openProject() {
     const path = await open({ title: "Open Screendeck project", filters: [{ name: "Screendeck project", extensions: ["sdeck"] }] });
     if (!path || Array.isArray(path)) return;
     busy = true;
-    try { project = await openArchive(path); projectPath = path; profileIndex = 0; pageIndex = 0; selectedButton = 0; dirty = false; notice = `Opened ${path.split(/[\\/]/).pop()}`; }
+    try { project = await openArchive(path); projectPath = path; profileIndex = 0; pageIndex = 0; selectedButton = 0; dirty = false; lastSyncedFingerprint = ""; notice = `Opened ${path.split(/[\\/]/).pop()}`; }
     catch (error) { notice = `Could not open project: ${error}`; }
     finally { busy = false; }
   }
@@ -80,6 +88,7 @@
     notice = "Syncing project to device…";
     try {
       const result = await syncProject(project);
+      lastSyncedFingerprint = result.fingerprint;
       notice = `Synced ${result.bytesSent.toLocaleString()} bytes · generation ${result.generation}${result.resumedAt ? ` · resumed at ${result.resumedAt}` : ""}`;
       await refreshDevice();
     } catch (error) { notice = `Sync failed: ${error}`; }
@@ -101,6 +110,16 @@
       const result = await uploadScreensaverToDevice(path);
       notice = `Screensaver uploaded · ${result.bytesSent.toLocaleString()} bytes${result.resumedAt ? ` · resumed at ${result.resumedAt}` : ""}`;
     } catch (error) { notice = `Screensaver upload failed: ${error}`; }
+    finally { busy = false; }
+  }
+
+  async function testScreensaver() {
+    busy = true;
+    notice = "Starting screensaver test…";
+    try {
+      await testScreensaverOnDevice();
+      notice = "Screensaver test started · touch the device to return";
+    } catch (error) { notice = `Screensaver test failed: ${error}`; }
     finally { busy = false; }
   }
 
@@ -126,7 +145,12 @@
 
   function updateStep(index: number, field: keyof MacroStep, value: string | number) {
     if (!macro) return;
-    (macro.steps[index] as unknown as Record<string, string | number | undefined>)[field] = value;
+    const target = macro.steps[index];
+    (target as unknown as Record<string, string | number | undefined>)[field] = value;
+    if (field === "kind") {
+      if (value === "delay") { target.key = undefined; target.durationMs ??= 25; }
+      else { target.durationMs = undefined; target.key = value === "consumer" ? "PLAY_PAUSE" : "F13"; }
+    }
     changed();
   }
 
@@ -143,15 +167,43 @@
 
   async function importFiles(files: FileList | File[]) {
     for (const file of Array.from(files)) {
-      if (!file.type.startsWith("image/")) continue;
-      const bitmap = await createImageBitmap(file);
-      const scale = Math.min(1, 256 / Math.max(bitmap.width, bitmap.height));
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-      canvas.getContext("2d")!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-      bitmap.close();
-      const asset: Asset = { id: crypto.randomUUID(), name: file.name.replace(/\.[^.]+$/, "") + ".png", mediaType: "image/png", dataUrl: canvas.toDataURL("image/png") };
+      if (!file.type.startsWith("image/") && !file.type.startsWith("video/")) continue;
+      const sourceDataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      const animated = file.type === "image/gif" || file.type === "image/webp" || file.type.startsWith("video/");
+      let dataUrl: string;
+      let animationDataUrl = "";
+      let animationFps = 0;
+      if (animated) {
+        const converted = await prepareIconAnimation(file.name, sourceDataUrl);
+        dataUrl = converted.posterDataUrl;
+        animationDataUrl = converted.animationDataUrl;
+        animationFps = converted.frameCount > 1 ? 15 : 0;
+      } else {
+        const bitmap = await createImageBitmap(file);
+        const scale = Math.min(1, 256 / Math.max(bitmap.width, bitmap.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+        canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+        canvas.getContext("2d")!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        bitmap.close();
+        dataUrl = canvas.toDataURL("image/png");
+      }
+      const asset: Asset = {
+        id: crypto.randomUUID(),
+        name: file.name.replace(/\.[^.]+$/, "") + ".png",
+        mediaType: animated ? "image/jpeg" : "image/png",
+        dataUrl,
+        sourceName: file.name,
+        sourceMediaType: file.type || "application/octet-stream",
+        sourceDataUrl,
+        animationDataUrl,
+        animationFps
+      };
       project.assets.push(asset);
       page.buttons[selectedButton].iconId = asset.id;
       page.buttons[selectedButton].imageFit = "cover";
@@ -179,6 +231,7 @@
       <button class="icon-button" title="Export compiled backup" on:click={backup}><Archive size={17}/></button>
       <div class="divider"></div>
       <button class="icon-button" title="Upload screensaver image or video" disabled={busy || !device.connected} on:click={uploadScreensaver}><MonitorUp size={17}/></button>
+      <button class="icon-button" title="Test screensaver on device" disabled={busy || !device.connected} on:click={testScreensaver}><Play size={17}/></button>
       <button class="sync-button" disabled={busy || !device.connected} on:click={sync}><Upload size={16}/>{busy ? "Working…" : "Sync to device"}</button>
     </nav>
   </header>
@@ -229,8 +282,8 @@
 
     <section class="assets-strip">
       <div class="assets-copy"><ImagePlus size={17}/><div><strong>Icon library</strong><span>Drop images onto any key</span></div></div>
-      <label class="asset-add"><input type="file" accept="image/png,image/jpeg,image/webp" multiple on:change={(event) => { const files = event.currentTarget.files; if (files) importFiles(files); }}/><Plus size={18}/></label>
-      {#each project.assets as asset}<button class="asset" title={asset.name} on:click={() => assignAsset(asset.id)}><img src={asset.dataUrl} alt={asset.name}/></button>{/each}
+      <label class="asset-add"><input type="file" accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple on:change={(event) => { const files = event.currentTarget.files; if (files) importFiles(files); }}/><Plus size={18}/></label>
+      {#each project.assets as asset}<button class="asset" title={`${asset.name}${asset.animationFps ? " · 15 FPS" : ""}`} on:click={() => assignAsset(asset.id)}><img src={asset.dataUrl} alt={asset.name}/></button>{/each}
       {#if !project.assets.length}<span class="empty-assets">PNG, JPEG or WebP · originals stay in the project archive</span>{/if}
     </section>
   </main>
@@ -262,7 +315,7 @@
               <span class="step-number">{index + 1}</span>
               <select value={step.kind} on:change={(e) => updateStep(index, "kind", e.currentTarget.value)}><option value="key_down">Key down</option><option value="key_up">Key up</option><option value="delay">Delay</option><option value="consumer">Media key</option></select>
               {#if step.kind === "delay"}<div class="duration"><input type="number" min="1" max="60000" value={step.durationMs ?? 25} on:change={(e) => updateStep(index, "durationMs", Number(e.currentTarget.value))}/><span>ms</span></div>
-              {:else}<select class="key-picker" value={step.key ?? "F13"} on:change={(e) => updateStep(index, "key", e.currentTarget.value)}>{#each HID_KEYS as key}<option value={key}>{key.replaceAll("_", " ")}</option>{/each}</select>{/if}
+              {:else}<select class="key-picker" value={step.key ?? (step.kind === "consumer" ? "PLAY_PAUSE" : "F13")} on:change={(e) => updateStep(index, "key", e.currentTarget.value)}>{#each step.kind === "consumer" ? CONSUMER_KEYS : KEYBOARD_KEYS as key}<option value={key}>{key.replaceAll("_", " ")}</option>{/each}</select>{/if}
               <button class="step-delete" title="Remove step" on:click={() => removeStep(index)}><X size={13}/></button>
             </div>
           {/each}
@@ -275,6 +328,6 @@
   <footer class="statusbar">
     <button class:connected={device.connected} class="device-pill" on:click={refreshDevice}><span class="status-dot"></span><Usb size={14}/>{device.connected ? `Screendeck · generation ${device.generation}` : "No device"}<RefreshCw size={12}/></button>
     <div class="status-message" class:error={notice.includes("failed") || notice.includes("Resolve")}><span>{notice}</span></div>
-    <div class="build-stats"><span>{summary.bundleBytes.toLocaleString()} bytes</span><span>{summary.issues.length ? `${summary.issues.length} issue${summary.issues.length === 1 ? "" : "s"}` : "Valid project"}</span><Cpu size={13}/><span>{navigator.userAgent.includes("ARM64") ? "ARM64" : "x64"}</span></div>
+    <div class="build-stats" title={deviceDiff}><span>{summary.bundleBytes.toLocaleString()} bytes</span><span>{deviceDiff}</span><Cpu size={13}/><span>{navigator.userAgent.includes("ARM64") ? "ARM64" : "x64"}</span></div>
   </footer>
 </div>

@@ -1,16 +1,16 @@
 # M1 findings — touch-to-HID vertical slice
 
-Status: **hardware bring-up complete; Windows HID acceptance pending OTG cable** (2026-07-11)
+Status: **composite firmware implemented and build-verified; refreshed physical acceptance pending attached board** (2026-07-12)
 
 ## Scope
 
 M1 proves the direct device path from the already-verified GT911 touch panel to
-Windows' built-in USB keyboard driver. It is intentionally not the macro engine
-or desktop synchronisation protocol.
+Windows' built-in USB HID stack and a driverless WinUSB probe interface. It is
+intentionally not the macro engine or desktop synchronisation protocol.
 
 | Area | M1 decision |
 | --- | --- |
-| USB interface | One standard USB HID boot keyboard; no custom Windows driver |
+| USB interfaces | One HID collection with keyboard, consumer and mouse report IDs, plus a WinUSB vendor interface; no custom Windows driver |
 | Keys | F13–F24 (`0x68`–`0x73`), with a 25 ms press/release pulse |
 | Touch trigger | LVGL `CLICKED` (release) event |
 | Grid | 8×4, 32 square 149 px diagnostic tiles centred in 1280×720 |
@@ -72,11 +72,44 @@ physical touch validation still applies; neither warning blocked M1 startup.
 
 ## Remaining acceptance evidence
 
-- [x] Firmware builds with ESP-IDF 5.5.4 and the pinned `esp_tinyusb` component.
-- [x] Firmware flashes and reaches `M1_COMPLETE` on COM8.
-- [x] Dedicated USB OTG and debug UART are connected simultaneously.
-- [x] Windows enumerates `USB\\VID_303A&PID_4004\\M1-TOUCH-HID` as a standard
+- [x] Refreshed composite firmware builds with ESP-IDF 5.5.4 and pinned
+      `esp_tinyusb` 2.2.1. Image: 706,256 bytes (`0xAC6D0`), 33% app-partition
+      headroom.
+- [x] Historical keyboard-only firmware flashed and reached `M1_COMPLETE` on COM8.
+- [x] Historical test connected dedicated USB OTG and debug UART simultaneously.
+- [x] Historical PID `4004` image enumerated as a standard
       HID keyboard.
-- [x] Tapping tiles logs `M1_TOUCH`, `M1_HID action=press`, and
+- [x] Historical physical test logged `M1_TOUCH`, `M1_HID action=press`, and
       `M1_HID action=release`.
+- [x] Refreshed VID `303A`, PID `4010` image flashed through the P4 ROM USB-OTG
+      downloader on COM9; bootloader, partition table and application writes
+      were hash-verified. COM9 disappearing during the post-flash hard reset was
+      expected because the application re-enumerates as a composite device.
+- [x] Windows x64 enumerates the refreshed composite parent plus keyboard,
+      consumer-control and mouse HID collections. Interface 1 appears healthy as
+      `M1 WinUSB probe` with service `WINUSB`; all six reported nodes are `OK`.
 - [ ] F13–F24 are observed by [the AutoHotkey v2 probe](tools/m1_f13_f24_probe.ahk).
+      The probe now writes a persistent CSV and reports 12/12 coverage. This PC
+      currently has AutoHotkey 1.1 only, so v2 remains required before running it.
+- [ ] Capture `touch_to_submit_us` for representative and rapid taps. This is
+      device-side release-callback to TinyUSB report submission and must remain
+      at or below 10,000 us with zero queue drops. It is not host-arrival latency.
+- [ ] Measure press-to-visible feedback at the panel against the 20 ms target
+      with an external high-speed capture or instrumentation that includes the
+      GT911 interrupt and display scanout; LVGL callback timestamps alone cannot
+      establish photons-on-screen latency.
+- [ ] Repeat enumeration, F13–F24 capture, and timing acceptance on native
+      Windows ARM64. No ARM64 Windows host is available in this workspace.
+
+## 2026-07-12 implementation correction
+
+- Added Microsoft OS 2.0 BOS descriptors for driverless WinUSB binding and a
+  stable interface GUID, alongside keyboard, consumer and mouse HID reports.
+- Added monotonically numbered touch events, release timestamps, queue-drop
+  accounting, and `touch_to_submit_us` measurements. Configured report cadence
+  is no longer presented as measured latency.
+- Updated the AHK v2 probe to use valid v2 loop syntax, persist every observation
+  to `tools/m1_f13_f24_results.csv`, and display missing-key coverage.
+- Clean ESP-IDF 5.5.4 build completed in `.m1_verify`. The image was subsequently
+  flashed and its complete x64 composite USB/WinUSB enumeration was verified.
+  Touch-to-key and latency gates still require taps plus an AHK v2 capture.

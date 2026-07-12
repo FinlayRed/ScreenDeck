@@ -54,6 +54,8 @@ static const char *TAG = "m3";
 #define M3_RESPONSE_WAIT_MS 250
 #define M3_FRAME_FLAG_NO_RESPONSE 0x0001U
 #define M3_HID_REPORT_ID 1
+#define M3_CONSUMER_REPORT_ID 2
+#define M3_MOUSE_REPORT_ID 3
 #define M3_WINUSB_VENDOR_REQUEST 0x21
 #define M3_MS_OS_20_DESCRIPTOR_LENGTH 0xB2
 
@@ -69,6 +71,7 @@ typedef enum {
     M3_OP_MEDIA_CHUNK = 9,
     M3_OP_MEDIA_COMMIT = 10,
     M3_OP_MEDIA_ABORT = 11,
+    M3_OP_TEST_SCREENSAVER = 12,
 } m3_opcode_t;
 
 typedef enum {
@@ -78,6 +81,7 @@ typedef enum {
     M3_STATUS_IO = 3,
     M3_STATUS_BAD_BUNDLE = 4,
     M3_STATUS_BUSY = 5,
+    M3_STATUS_MEDIA_UNAVAILABLE = 6,
 } m3_status_t;
 
 typedef struct __attribute__((packed)) {
@@ -174,6 +178,8 @@ static void m3_restart_after_commit(void *argument)
 
 static const uint8_t s_hid_report_descriptor[] = {
     TUD_HID_REPORT_DESC_KEYBOARD(HID_REPORT_ID(M3_HID_REPORT_ID)),
+    TUD_HID_REPORT_DESC_CONSUMER(HID_REPORT_ID(M3_CONSUMER_REPORT_ID)),
+    TUD_HID_REPORT_DESC_MOUSE(HID_REPORT_ID(M3_MOUSE_REPORT_ID)),
 };
 
 static const char *s_string_descriptors[] = {
@@ -218,7 +224,7 @@ static const tusb_desc_device_qualifier_t s_device_qualifier = {
 static const uint8_t s_full_speed_configuration_descriptor[] = {
     TUD_CONFIG_DESCRIPTOR(1, 2, 0, M3_TUSB_TOTAL_LEN,
                           TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
-    TUD_HID_DESCRIPTOR(0, 4, HID_ITF_PROTOCOL_KEYBOARD,
+    TUD_HID_DESCRIPTOR(0, 4, HID_ITF_PROTOCOL_NONE,
                        sizeof(s_hid_report_descriptor), 0x81, 16, 10),
     TUD_VENDOR_DESCRIPTOR(1, 5, 0x02, 0x82, 64),
 };
@@ -227,7 +233,7 @@ static const uint8_t s_full_speed_configuration_descriptor[] = {
 static const uint8_t s_high_speed_configuration_descriptor[] = {
     TUD_CONFIG_DESCRIPTOR(1, 2, 0, M3_TUSB_TOTAL_LEN,
                           TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
-    TUD_HID_DESCRIPTOR(0, 4, HID_ITF_PROTOCOL_KEYBOARD,
+    TUD_HID_DESCRIPTOR(0, 4, HID_ITF_PROTOCOL_NONE,
                        sizeof(s_hid_report_descriptor), 0x81, 16, 10),
     TUD_VENDOR_DESCRIPTOR(1, 5, 0x02, 0x82, 512),
 };
@@ -739,7 +745,7 @@ static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *pay
     if (frame->opcode == M3_OP_HELLO) {
         // Protocol v1, resume, checksums, atomic bundles, no MSC, media upload,
         // and batched media chunks (silent intermediate frames).
-        m3_send_response(M3_OP_HELLO, frame->sequence, M3_STATUS_OK, 0x0000007F);
+        m3_send_response(M3_OP_HELLO, frame->sequence, M3_STATUS_OK, 0x000000FF);
     } else if (frame->opcode == M3_OP_BEGIN) {
         m3_handle_begin(frame, payload);
     } else if (frame->opcode == M3_OP_CHUNK) {
@@ -758,6 +764,13 @@ static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *pay
         free(s_media_upload.write_buffer);
         unlink(M3_MEDIA_STAGE_FILE); s_media_upload = (m3_media_upload_t) {0};
         m3_send_response(M3_OP_MEDIA_ABORT, frame->sequence, M3_STATUS_OK, 0);
+#ifdef M5_MEDIA_ENABLED
+    } else if (frame->opcode == M3_OP_TEST_SCREENSAVER) {
+        const uint32_t media_error = m5_media_trigger_screensaver();
+        m3_send_response(M3_OP_TEST_SCREENSAVER, frame->sequence,
+                         media_error == 0 ? M3_STATUS_OK : M3_STATUS_MEDIA_UNAVAILABLE,
+                         media_error);
+#endif
     } else if (frame->opcode == M3_OP_ABORT) {
         unlink(M3_STAGE_FILE); unlink(M3_STATE_FILE);
         s_storage.upload_open = false; s_storage.received_bytes = 0;
@@ -839,6 +852,9 @@ static void m3_usb_event_cb(tinyusb_event_t *event, void *argument)
         ESP_LOGI(TAG, "M3_USB state=mounted interfaces=keyboard,vendor_sync");
     } else if (event->id == TINYUSB_EVENT_DETACHED) {
         s_usb_mounted = false;
+#ifdef M5_MEDIA_ENABLED
+        m5_hid_release_all("usb_detached");
+#endif
         ESP_LOGW(TAG, "M3_USB state=unmounted transfer_resume=%u", s_storage.upload_open);
     }
 }
@@ -900,6 +916,10 @@ void app_main(void)
         m5_media_start(s_display);
 #endif
     }
+#ifdef M5_MEDIA_ENABLED
+    ESP_LOGI(TAG, "M3_COMPLETE sd_ready=%u active_bundle=%u hid_output=macro_runtime msc=disabled",
+#else
     ESP_LOGI(TAG, "M3_COMPLETE sd_ready=%u active_bundle=%u hid_output=disabled msc=disabled",
+#endif
              storage_ok, s_storage.active_bundle_valid);
 }

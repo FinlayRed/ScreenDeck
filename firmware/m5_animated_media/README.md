@@ -4,12 +4,15 @@ M5 keeps the M3 SDC3 WinUSB/keyboard transport and microSD ownership, then
 adds a device-local media runtime:
 
 - The active `SDB3` project bundle is loaded from microSD and validated before
-  use. Its compact `M5UI` payload supplies profiles, pages, button actions,
-  accent colours, and embedded PNG/JPEG icon assets.
+  use. Its schema-v2 `M5UI` payload supplies profiles, pages, macros, button
+  actions, accent colours, static posters, and bounded MJPEG icon streams.
 - Synced icon assets are decoded from PSRAM and rendered with the configured
   contain/cover fit. Page-next, page-previous, and profile-next actions rebuild
   the visible page without rebooting.
-- 32 visible-page tiles animate at a bounded 15 FPS scheduler cadence.
+- Up to 32 visible-page tiles animate at a bounded 15 FPS scheduler cadence;
+  animation work yields briefly after touch activity to preserve feedback.
+- Button macros execute on a separate task with keyboard and consumer-control
+  HID reports. Disconnect and restart paths centrally release HID state.
 - `/sdcard/screendeck/screensaver.mjpg` is indexed as individual JPEG frames.
 - 1280×720 RGB565 frames use the ESP32-P4 hardware JPEG decoder.
 - Short media is preloaded into PSRAM when the runtime budget allows it;
@@ -31,8 +34,8 @@ M5_COMPLETE animation_fps=15 saver_ready=1
 
 The screensaver file is intentionally a raw MJPEG stream (concatenated SOI/EOI
 JPEG frames), so the host can produce it deterministically without a container.
-The desktop editor normalizes imported button artwork to a bounded PNG before
-compiling it into the project bundle.
+The desktop editor retains the source, creates a bounded poster, and converts
+GIF, animated WebP, and video icons into deterministic 128x128 15 FPS MJPEG.
 
 ## Deterministic conversion
 

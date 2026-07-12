@@ -1,0 +1,27 @@
+menu "Screendeck M0 benchmark"
+
+choice M0_TEAR_MODE
+    prompt "MIPI-DSI/LVGL tear-avoid mode under test"
+    default M0_TEAR_TRIPLE_PARTIAL
+    help
+        Select one mode per firmware image. Run the same bounded DISPLAY and
+        COMBINED cases for each candidate and compare their machine-readable
+        output; changing modes safely requires display reinitialisation.
+
+config M0_TEAR_TRIPLE_PARTIAL
+    bool "Triple partial (vendor default)"
+
+config M0_TEAR_DOUBLE_DIRECT
+    bool "Double direct"
+
+config M0_TEAR_DOUBLE_FULL
+    bool "Double full"
+
+endchoice
+
+config M0_COMBINED_FRAMES
+    int "Combined workload frames"
+    range 30 300
+    default 90
+
+endmenu
