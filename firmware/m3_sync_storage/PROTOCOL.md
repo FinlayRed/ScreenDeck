@@ -1,5 +1,7 @@
 # Screendeck USB sync protocol (SDC3 v1)
 
+Capability bit `0x100` advertises active-bundle download. `DOWNLOAD_BEGIN` (opcode 13) returns the active bundle size. `DOWNLOAD_CHUNK` (opcode 14) accepts a little-endian `u32` offset and returns up to 1400 raw bundle bytes in a checksummed SDC3 frame, allowing the editor to recover profiles, icons, assignments, and macros.
+
 The M3 device exposes one WinUSB bulk function with interface GUID
 `{F38C253C-7E95-4F15-A9FD-7BBC31E4F0C4}`. It is a composite USB device with a
 separate HID keyboard function; it never exposes the microSD card as mass

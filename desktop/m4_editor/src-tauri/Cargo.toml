@@ -1,6 +1,6 @@
 [package]
 name = "screendeck-editor"
-version = "0.4.0"
+version = "0.6.0"
 description = "Screendeck Windows macro editor"
 authors = ["Screendeck"]
 edition = "2021"

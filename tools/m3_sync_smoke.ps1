@@ -116,7 +116,7 @@ $sequence = 1
 $devicePath = [Screendeck.M3WinUsb]::DevicePath()
 Write-Verbose "M3 WinUSB path: $devicePath"
 $caps = Invoke-M3 1 $sequence; $sequence++
-if ($caps -ne 0x1F) { throw "Unexpected M3 capability word: 0x$($caps.ToString('X8'))" }
+if (($caps -band 0x1F) -ne 0x1F) { throw "Unexpected M3 capability word: 0x$($caps.ToString('X8'))" }
 $before = Invoke-M3 6 $sequence; $sequence++
 Write-Host "M3 HELLO ok capabilities=0x$($caps.ToString('X8')); generation=$before"
 if ($CommitTestBundle -and $ResumeTest) { throw 'Choose either -CommitTestBundle or -ResumeTest.' }

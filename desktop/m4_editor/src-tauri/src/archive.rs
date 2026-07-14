@@ -44,6 +44,9 @@ pub fn save(path: &Path, project: &Project) -> Result<(), ArchiveError> {
         schema_version: project.schema_version,
         name: project.name.clone(),
         screensaver_timeout_seconds: project.screensaver_timeout_seconds,
+        brightness_percent: project.brightness_percent,
+        orientation: project.orientation.clone(),
+        screensaver_enabled: project.screensaver_enabled,
         profiles: project.profiles.clone(),
         macros: project.macros.clone(),
         assets: project

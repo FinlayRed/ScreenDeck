@@ -27,9 +27,9 @@ if ($Kind -eq 'Screensaver') {
     & $ffmpeg @common '-vf' 'fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black' `
         '-c:v' 'mjpeg' '-q:v' '5' '-pix_fmt' 'yuvj420p' '-f' 'mjpeg' $OutputPath
 } else {
-    # Device-ready animation frames: numbered 128x128 baseline JPEGs at 15 FPS.
+    # Device-ready animation frames: native 149x149 baseline JPEGs at 15 FPS.
     # OutputPath is a printf pattern, for example icon-%04d.jpg.
-    & $ffmpeg @common '-vf' 'fps=15,scale=128:128:force_original_aspect_ratio=decrease,pad=128:128:(ow-iw)/2:(oh-ih)/2:black' `
+    & $ffmpeg @common '-vf' "fps=15,scale=149:149:force_original_aspect_ratio=decrease,pad=149:149:(ow-iw)/2:(oh-ih)/2:black,format=rgb24,geq=r='if(gte(min(X,W-1-X),12)+gte(min(Y,H-1-Y),12)+lte(pow(12-min(X,W-1-X),2)+pow(12-min(Y,H-1-Y),2),144),r(X,Y),32)':g='if(gte(min(X,W-1-X),12)+gte(min(Y,H-1-Y),12)+lte(pow(12-min(X,W-1-X),2)+pow(12-min(Y,H-1-Y),2),144),g(X,Y),33)':b='if(gte(min(X,W-1-X),12)+gte(min(Y,H-1-Y),12)+lte(pow(12-min(X,W-1-X),2)+pow(12-min(Y,H-1-Y),2),144),b(X,Y),38)',format=yuvj420p" `
         '-c:v' 'mjpeg' '-q:v' '5' '-pix_fmt' 'yuvj420p' '-start_number' '0' $OutputPath
 }
 if ($LASTEXITCODE -ne 0) { throw "FFmpeg conversion failed with exit code $LASTEXITCODE" }

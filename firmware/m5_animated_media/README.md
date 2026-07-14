@@ -35,7 +35,12 @@ M5_COMPLETE animation_fps=15 saver_ready=1
 The screensaver file is intentionally a raw MJPEG stream (concatenated SOI/EOI
 JPEG frames), so the host can produce it deterministically without a container.
 The desktop editor retains the source, creates a bounded poster, and converts
-GIF, animated WebP, and video icons into deterministic 128x128 15 FPS MJPEG.
+GIF, animated WebP, and video icons into deterministic native-size 149x149
+15 FPS MJPEG with 12 px rounded corners baked against the tile background.
+This keeps animated images on the accelerated zero-clip-radius render path.
+The runtime displays up to eight animations at 15 FPS, nine to
+sixteen at 10 FPS, and larger animated pages at 7 FPS while skipping source
+frames to preserve playback speed.
 
 ## Deterministic conversion
 

@@ -15,6 +15,12 @@ pub struct Project {
     pub name: String,
     #[serde(default = "default_screensaver_timeout")]
     pub screensaver_timeout_seconds: u32,
+    #[serde(default = "default_brightness")]
+    pub brightness_percent: u8,
+    #[serde(default = "default_orientation")]
+    pub orientation: String,
+    #[serde(default = "default_true")]
+    pub screensaver_enabled: bool,
     pub profiles: Vec<Profile>,
     pub macros: Vec<Macro>,
     pub assets: Vec<Asset>,
@@ -46,11 +52,36 @@ pub struct Button {
     pub action: ActionKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macro_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radial: Option<RadialMenu>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RadialMenu {
+    pub size: u8,
+    pub items: Vec<RadialItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RadialItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_fit: Option<String>,
+    #[serde(default = "default_radial_action")]
+    pub action: ActionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macro_id: Option<String>,
 }
 
 fn default_screensaver_timeout() -> u32 {
     15
 }
+fn default_brightness() -> u8 { 80 }
+fn default_orientation() -> String { "landscape".into() }
+fn default_true() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -61,6 +92,8 @@ pub enum ActionKind {
     ProfileNext,
     None,
 }
+
+fn default_radial_action() -> ActionKind { ActionKind::Macro }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Macro {
@@ -163,12 +196,19 @@ fn is_consumer_key(value: &str) -> bool {
     )
 }
 
+pub fn migrate(project: &mut Project) {
+    if project.schema_version == 2 {
+        project.schema_version = 3;
+        if project.orientation.is_empty() { project.orientation = "landscape".into(); }
+    }
+}
+
 pub fn validate(project: &Project) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
-    if project.schema_version != 2 {
+    if project.schema_version != 3 {
         issues.push(issue(
             "schemaVersion",
-            "Only project schema version 2 is supported.",
+            "Only project schema version 3 is supported.",
         ));
     }
     if project.name.trim().is_empty() || project.name.len() > 80 {
@@ -179,6 +219,12 @@ pub fn validate(project: &Project) -> Vec<ValidationIssue> {
             "screensaverTimeoutSeconds",
             "Screensaver delay must be between 5 seconds and 60 minutes.",
         ));
+    }
+    if project.brightness_percent > 100 {
+        issues.push(issue("brightnessPercent", "Brightness must be between 0% and 100%."));
+    }
+    if !matches!(project.orientation.as_str(), "landscape" | "landscape_flipped") {
+        issues.push(issue("orientation", "Orientation must be landscape or landscape flipped."));
     }
     if project.profiles.is_empty() || project.profiles.len() > MAX_PROFILES {
         issues.push(issue(
@@ -261,7 +307,23 @@ pub fn validate(project: &Project) -> Vec<ValidationIssue> {
                     .as_deref()
                     .is_some_and(|id| !asset_ids.contains(id))
                 {
-                    issues.push(issue(path, "The button references a missing icon."));
+                    issues.push(issue(path.clone(), "The button references a missing icon."));
+                }
+                if let Some(radial) = &button.radial {
+                    if !matches!(radial.size, 4 | 6 | 8) || radial.items.len() != radial.size as usize {
+                        issues.push(issue(format!("{path}.radial"), "A radial menu must contain exactly 4, 6, or 8 items."));
+                    }
+                    for (ri, item) in radial.items.iter().enumerate() {
+                        if item.action == ActionKind::Macro && item.macro_id.as_deref().is_none_or(|id| !macro_ids.contains(id)) {
+                            issues.push(issue(format!("{path}.radial.items[{ri}].macroId"), "The radial item references a missing macro."));
+                        }
+                        if item.icon_id.as_deref().is_some_and(|id| !asset_ids.contains(id)) {
+                            issues.push(issue(format!("{path}.radial.items[{ri}].iconId"), "The radial item references a missing icon."));
+                        }
+                        if item.image_fit.as_deref().is_some_and(|fit| fit != "cover" && fit != "contain") {
+                            issues.push(issue(format!("{path}.radial.items[{ri}].imageFit"), "Artwork display must be cover or contain."));
+                        }
+                    }
                 }
                 if button
                     .image_fit
@@ -277,10 +339,10 @@ pub fn validate(project: &Project) -> Vec<ValidationIssue> {
         }
     }
     for (mi, item) in project.macros.iter().enumerate() {
-        if item.steps.is_empty() || item.steps.len() > MAX_STEPS {
+        if item.steps.len() > MAX_STEPS {
             issues.push(issue(
                 format!("macros[{mi}].steps"),
-                format!("A macro needs 1–{MAX_STEPS} steps."),
+                format!("A macro can contain at most {MAX_STEPS} steps."),
             ));
         }
         for (si, step) in item.steps.iter().enumerate() {

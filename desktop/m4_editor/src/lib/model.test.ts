@@ -4,7 +4,8 @@ import { cloneProject, starterProject } from "./model";
 describe("starterProject", () => {
   it("creates an editable 8×4 page with bounded macros", () => {
     const project = starterProject();
-    expect(project.schemaVersion).toBe(2);
+    expect(project.schemaVersion).toBe(3);
+    expect(project.brightnessPercent).toBe(80);
     expect(project.profiles[0].pages[0].buttons).toHaveLength(32);
     expect(project.macros).toHaveLength(0);
     for (const profile of project.profiles) {

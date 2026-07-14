@@ -14,13 +14,19 @@ export interface Asset {
   animationDataUrl?: string;
   animationFps?: number;
 }
-export interface Button { iconId?: string; imageFit?: "cover" | "contain"; action: ActionKind; macroId?: string }
+export type RadialSize = 4 | 6 | 8;
+export interface RadialItem { iconId?: string; imageFit?: "cover" | "contain"; action: ActionKind; macroId?: string }
+export interface RadialMenu { size: RadialSize; items: RadialItem[] }
+export interface Button { iconId?: string; imageFit?: "cover" | "contain"; action: ActionKind; macroId?: string; radial?: RadialMenu }
 export interface Page { id: string; name: string; buttons: Button[] }
 export interface Profile { id: string; name: string; pages: Page[] }
 export interface Project {
-  schemaVersion: 2;
+  schemaVersion: 3;
   name: string;
   screensaverTimeoutSeconds: number;
+  brightnessPercent: number;
+  orientation: "landscape" | "landscape_flipped";
+  screensaverEnabled: boolean;
   profiles: Profile[];
   macros: Macro[];
   assets: Asset[];
@@ -36,9 +42,12 @@ const page = (id: string, name: string): Page => ({
 export function starterProject(): Project {
   const first = page("page-1", "Main");
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     name: "My Screendeck",
     screensaverTimeoutSeconds: 15,
+    brightnessPercent: 80,
+    orientation: "landscape",
+    screensaverEnabled: true,
     profiles: [{ id: "profile-1", name: "Default", pages: [first, page("page-2", "Media")] }],
     macros: [],
     assets: []

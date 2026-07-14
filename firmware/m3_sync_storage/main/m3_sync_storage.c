@@ -72,6 +72,8 @@ typedef enum {
     M3_OP_MEDIA_COMMIT = 10,
     M3_OP_MEDIA_ABORT = 11,
     M3_OP_TEST_SCREENSAVER = 12,
+    M3_OP_DOWNLOAD_BEGIN = 13,
+    M3_OP_DOWNLOAD_CHUNK = 14,
 } m3_opcode_t;
 
 typedef enum {
@@ -161,6 +163,8 @@ static size_t s_frame_length;
 static bool s_usb_mounted;
 static lv_display_t *s_display;
 static char s_active_bundle_path[128];
+static FILE *s_download_file;
+static uint32_t s_download_offset;
 
 const char *m3_active_bundle_path(void)
 {
@@ -505,6 +509,55 @@ static void m3_send_response(uint8_t opcode, uint32_t sequence, m3_status_t stat
     }
 }
 
+static void m3_send_payload(uint8_t opcode, uint32_t sequence, const void *payload, uint32_t payload_size)
+{
+    m3_frame_header_t header = {
+        .magic = M3_PROTOCOL_MAGIC, .version = M3_PROTOCOL_VERSION,
+        .opcode = opcode | 0x80, .sequence = sequence, .payload_size = payload_size,
+        .payload_crc32 = m3_crc32(payload, payload_size),
+    };
+    const uint32_t total = sizeof(header) + payload_size;
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(M3_RESPONSE_WAIT_MS);
+    while (s_usb_mounted && tud_vendor_n_write_available(0) < total && xTaskGetTickCount() < deadline) vTaskDelay(1);
+    if (!s_usb_mounted || tud_vendor_n_write_available(0) < total ||
+        tud_vendor_n_write(0, &header, sizeof(header)) != sizeof(header) ||
+        tud_vendor_n_write(0, payload, payload_size) != payload_size) {
+        ESP_LOGE(TAG, "M3_SYNC result=download_response_failed sequence=%u", sequence);
+        return;
+    }
+    tud_vendor_n_write_flush(0);
+}
+
+static void m3_handle_download_chunk(const m3_frame_header_t *frame, const uint8_t *payload)
+{
+    if (!s_storage.active_bundle_valid || s_download_file == NULL || frame->payload_size != sizeof(uint32_t)) {
+        m3_send_response(M3_OP_DOWNLOAD_CHUNK, frame->sequence, M3_STATUS_BAD_STATE, 0); return;
+    }
+    uint32_t offset;
+    memcpy(&offset, payload, sizeof(offset));
+    if (offset != s_download_offset && fseek(s_download_file, (long) offset, SEEK_SET) != 0) {
+        m3_send_response(M3_OP_DOWNLOAD_CHUNK, frame->sequence, M3_STATUS_IO, offset); return;
+    }
+    uint8_t chunk[M3_MAX_FRAME_PAYLOAD];
+    const size_t count = fread(chunk, 1, sizeof(chunk), s_download_file);
+    s_download_offset = offset + count;
+    m3_send_payload(M3_OP_DOWNLOAD_CHUNK, frame->sequence, chunk, count);
+}
+
+static void m3_handle_download_begin(const m3_frame_header_t *frame)
+{
+    if (s_download_file != NULL) fclose(s_download_file);
+    s_download_file = NULL;
+    s_download_offset = 0;
+    struct stat info;
+    if (!s_storage.active_bundle_valid || stat(s_active_bundle_path, &info) != 0 ||
+        (s_download_file = fopen(s_active_bundle_path, "rb")) == NULL) {
+        m3_send_response(M3_OP_DOWNLOAD_BEGIN, frame->sequence, M3_STATUS_BAD_STATE, 0);
+        return;
+    }
+    m3_send_response(M3_OP_DOWNLOAD_BEGIN, frame->sequence, M3_STATUS_OK, (uint32_t) info.st_size);
+}
+
 static void m3_handle_begin(const m3_frame_header_t *frame, const uint8_t *payload)
 {
     if (!s_storage.mounted || frame->payload_size != sizeof(m3_begin_t)) {
@@ -745,7 +798,7 @@ static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *pay
     if (frame->opcode == M3_OP_HELLO) {
         // Protocol v1, resume, checksums, atomic bundles, no MSC, media upload,
         // and batched media chunks (silent intermediate frames).
-        m3_send_response(M3_OP_HELLO, frame->sequence, M3_STATUS_OK, 0x000000FF);
+        m3_send_response(M3_OP_HELLO, frame->sequence, M3_STATUS_OK, 0x000001FF);
     } else if (frame->opcode == M3_OP_BEGIN) {
         m3_handle_begin(frame, payload);
     } else if (frame->opcode == M3_OP_CHUNK) {
@@ -759,6 +812,10 @@ static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *pay
                               (frame->reserved & M3_FRAME_FLAG_NO_RESPONSE) == 0);
     } else if (frame->opcode == M3_OP_MEDIA_COMMIT) {
         m3_handle_media_commit(frame);
+    } else if (frame->opcode == M3_OP_DOWNLOAD_BEGIN) {
+        m3_handle_download_begin(frame);
+    } else if (frame->opcode == M3_OP_DOWNLOAD_CHUNK) {
+        m3_handle_download_chunk(frame, payload);
     } else if (frame->opcode == M3_OP_MEDIA_ABORT) {
         if (s_media_upload.file != NULL) fclose(s_media_upload.file);
         free(s_media_upload.write_buffer);
@@ -849,9 +906,15 @@ static void m3_usb_event_cb(tinyusb_event_t *event, void *argument)
     (void) argument;
     if (event->id == TINYUSB_EVENT_ATTACHED) {
         s_usb_mounted = true;
+#ifdef M5_MEDIA_ENABLED
+        m5_hid_release_all("usb_attached");
+#endif
         ESP_LOGI(TAG, "M3_USB state=mounted interfaces=keyboard,vendor_sync");
     } else if (event->id == TINYUSB_EVENT_DETACHED) {
         s_usb_mounted = false;
+        if (s_download_file != NULL) fclose(s_download_file);
+        s_download_file = NULL;
+        s_download_offset = 0;
 #ifdef M5_MEDIA_ENABLED
         m5_hid_release_all("usb_detached");
 #endif

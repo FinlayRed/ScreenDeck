@@ -28,7 +28,8 @@ fn save_archive(path: String, project: Project) -> Result<(), String> {
 
 #[tauri::command]
 fn open_archive(path: String) -> Result<Project, String> {
-    let project = archive::open(Path::new(&path)).map_err(|error| error.to_string())?;
+    let mut project = archive::open(Path::new(&path)).map_err(|error| error.to_string())?;
+    model::migrate(&mut project);
     let issues = model::validate(&project);
     if issues.is_empty() {
         Ok(project)
@@ -75,8 +76,9 @@ fn load_workspace(app: tauri::AppHandle) -> Result<Option<Project>, String> {
     }
     let bytes =
         fs::read(path).map_err(|error| format!("could not read saved workspace: {error}"))?;
-    let project: Project = serde_json::from_slice(&bytes)
+    let mut project: Project = serde_json::from_slice(&bytes)
         .map_err(|error| format!("saved workspace is invalid: {error}"))?;
+    model::migrate(&mut project);
     if model::validate(&project).is_empty() {
         Ok(Some(project))
     } else {
@@ -282,7 +284,7 @@ mod tests {
 
     fn project() -> Project {
         serde_json::from_value(json!({
-            "schemaVersion": 2, "name": "Round trip", "screensaverTimeoutSeconds": 30, "assets": [],
+            "schemaVersion": 3, "name": "Round trip", "screensaverTimeoutSeconds": 30, "brightnessPercent": 80, "orientation": "landscape", "screensaverEnabled": true, "assets": [],
             "macros": [{"id":"m1","name":"F13","steps":[{"kind":"key_down","key":"F13"},{"kind":"delay","durationMs":25},{"kind":"key_up","key":"F13"}]}],
             "profiles": [{"id":"p1","name":"Default","pages":[{"id":"g1","name":"Main","buttons":(0..32).map(|i| if i == 0 { json!({"action":"macro","macroId":"m1"}) } else { json!({"action":"none"}) }).collect::<Vec<_>>() }]}]
         })).unwrap()
@@ -313,7 +315,7 @@ mod tests {
             compiler::crc32(&bundle[16..])
         );
         assert_eq!(&bundle[16..20], &0x4955_354Du32.to_le_bytes());
-        assert_eq!(u16::from_le_bytes(bundle[20..22].try_into().unwrap()), 2);
+        assert_eq!(u16::from_le_bytes(bundle[20..22].try_into().unwrap()), 3);
     }
 
     #[test]
@@ -366,6 +368,36 @@ mod tests {
     }
 
     #[test]
+    fn radial_menu_and_settings_round_trip() {
+        let mut source = project();
+        source.brightness_percent = 0;
+        source.orientation = "landscape_flipped".into();
+        source.screensaver_enabled = false;
+        source.profiles[0].pages[0].buttons[0].radial = Some(model::RadialMenu {
+            size: 4,
+            items: vec![
+                model::RadialItem { icon_id: None, image_fit: Some("cover".into()), action: model::ActionKind::Macro, macro_id: Some("m1".into()) },
+                model::RadialItem { icon_id: None, image_fit: Some("contain".into()), action: model::ActionKind::PageNext, macro_id: None },
+                model::RadialItem { icon_id: None, image_fit: None, action: model::ActionKind::PagePrevious, macro_id: None },
+                model::RadialItem { icon_id: None, image_fit: Some("cover".into()), action: model::ActionKind::ProfileNext, macro_id: None },
+            ],
+        });
+        let restored = compiler::decompile(&compiler::compile(&source).unwrap()).unwrap();
+        assert_eq!(restored.brightness_percent, 0);
+        assert_eq!(restored.orientation, "landscape_flipped");
+        assert!(!restored.screensaver_enabled);
+        let items = &restored.profiles[0].pages[0].buttons[0].radial.as_ref().unwrap().items;
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0].action, model::ActionKind::Macro);
+        assert_eq!(items[1].action, model::ActionKind::PageNext);
+        assert_eq!(items[2].action, model::ActionKind::PagePrevious);
+        assert_eq!(items[3].action, model::ActionKind::ProfileNext);
+        assert_eq!(items[0].image_fit.as_deref(), Some("cover"));
+        assert_eq!(items[1].image_fit.as_deref(), Some("contain"));
+        assert_eq!(items[2].image_fit.as_deref(), Some("contain"));
+    }
+
+    #[test]
     fn key_press_round_trips_with_modifiers_and_short_duration() {
         let mut source = project();
         source.macros[0].steps = vec![model::MacroStep {
@@ -380,6 +412,16 @@ mod tests {
         assert_eq!(step.key.as_deref(), Some("K"));
         assert_eq!(step.duration_ms, Some(25));
         assert_eq!(step.modifiers, ["CTRL", "SHIFT", "GUI"]);
+    }
+
+    #[test]
+    fn blank_macro_round_trips_as_an_editable_sequence() {
+        let mut source = project();
+        source.macros[0].steps.clear();
+        assert!(model::validate(&source).is_empty());
+        let restored = compiler::decompile(&compiler::compile(&source).unwrap()).unwrap();
+        assert!(restored.macros[0].steps.is_empty());
+        assert!(model::validate(&restored).is_empty());
     }
 
     #[test]
