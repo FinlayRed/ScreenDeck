@@ -64,12 +64,9 @@
 .tile { background: #202126; }
 .step-modifiers { grid-column: 3 / 6; display: flex; align-items: center; gap: 4px; padding: 2px 0 1px; }
 .step-modifiers > span { color: #6f7480; font-size: 9px; margin-right: 2px; }
-.step-modifiers button { height: 23px; padding: 0 7px; border: 1px solid #343741; border-radius: 4px; background: #18191e; color: #858a96; font-size: 9px; cursor: pointer; }
+.step-modifiers button { min-width: 32px; height: 28px; padding: 0 7px; border: 1px solid #454a56; border-radius: 4px; background: #18191e; color: #a8adb8; font-size: 11px; cursor: pointer; }
 .step-modifiers button.active { border-color: #6674ff; background: #34395d; color: #eef0ff; }
 .step-modifiers label { margin: 0 0 0 auto; display: flex; flex-direction: row; align-items: center; gap: 3px; color: #737884; font-size: 9px; text-transform: none; letter-spacing: 0; }
-.step-modifiers input { width: 48px; height: 23px; padding: 0 4px; }
+.step-modifiers input { width: 52px; height: 28px; padding: 0 4px; }
 .asset-item { position: relative; width: 43px; height: 43px; flex: none; }
 .asset-item .asset { width: 100%; height: 100%; }
-.asset-delete { position: absolute; top: -5px; right: -5px; width: 18px; height: 18px; padding: 0; display: grid; place-items: center; border: 1px solid #4a3034; border-radius: 50%; background: #25171a; color: #d58a91; opacity: 0; cursor: pointer; transition: opacity .12s, background .12s; }
-.asset-item:hover .asset-delete, .asset-delete:focus-visible { opacity: 1; }
-.asset-delete:hover { background: #6e2e36; color: white; }

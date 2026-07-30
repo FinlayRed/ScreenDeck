@@ -140,6 +140,7 @@
   box-shadow: 0 26px 80px #000b, inset 0 1px #ffffff0b;
   animation: dialog-in 150ms cubic-bezier(.2, .8, .2, 1);
 }
+.dialog-form { display: contents; }
 
 @keyframes dialog-in {
   from { opacity: 0; transform: translateY(7px) scale(.98); }
@@ -163,7 +164,7 @@
 .dialog-copy h2 { margin: 5px 0 5px; color: #ececf0; font-size: 16px; font-weight: 650; letter-spacing: -.015em; }
 .dialog-copy p { margin: 0 0 18px; color: #858a96; font-size: 11px; line-height: 1.5; }
 
-.app-dialog > label {
+.app-dialog label {
   grid-column: 1 / -1;
   margin-bottom: 7px;
   color: #8c909c;
@@ -173,7 +174,7 @@
   text-transform: uppercase;
 }
 
-.app-dialog > input {
+.app-dialog input {
   grid-column: 1 / -1;
   height: 38px;
   padding: 0 11px;
@@ -186,7 +187,7 @@
   box-shadow: inset 0 1px 3px #0005;
 }
 
-.app-dialog > input:focus { border-color: #6572e5; box-shadow: 0 0 0 3px #6572ff1c, inset 0 1px 3px #0005; }
+.app-dialog input:focus { border-color: #6572e5; box-shadow: 0 0 0 3px #6572ff1c, inset 0 1px 3px #0005; }
 
 .dialog-actions {
   grid-column: 1 / -1;
@@ -213,6 +214,8 @@
 .dialog-actions .delete-confirm { background: #9d424b; color: #fff; box-shadow: 0 5px 16px #64252b45; }
 .dialog-actions .delete-confirm:hover { background: #b24c56; }
 .delete-dialog .dialog-actions { margin-top: 3px; }
+.dialog-actions.three-actions { flex-wrap: wrap; }
+.dialog-actions .discard { color: #efa1a8; border-color: #623a40; }
 
 @media (prefers-reduced-motion: reduce) {
   .context-menu, .dialog-backdrop, .app-dialog { animation: none; }
