@@ -26,7 +26,7 @@ Useful serial markers:
 
 ```text
 M5_START
-M5_MEDIA source=none|psram|sd frames=N fps=30
+M5_MEDIA source=none|psram|sd frames=N fps=60
 M5_STATE from=active to=playing|from=playing to=active
 M5_FRAME index=N dropped=0|1
 M5_COMPLETE animation_fps=15 saver_ready=1

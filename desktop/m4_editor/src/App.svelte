@@ -42,6 +42,7 @@
   let lastSyncedFingerprint = "";
   let workspaceReady = false;
   let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastWorkspaceAssets: Asset[] | undefined;
   let validationTimer: ReturnType<typeof setTimeout> | undefined;
   let projectRevision = 0;
   let validatedRevision = -1;
@@ -73,6 +74,7 @@
 
   function changed(message = "Unsaved changes") {
     project = { ...project };
+    summary = { ...summary, payloadCrc32: 0, fingerprint: "" };
     projectRevision += 1;
     dirty = true;
     notice = message;
@@ -82,9 +84,24 @@
     clearTimeout(autosaveTimer);
     autosaveTimer = setTimeout(async () => {
       if (revision !== projectRevision) return;
-      try { await saveWorkspace(project); }
+      const preserveAssetData = lastWorkspaceAssets === project.assets;
+      const workspaceProject = preserveAssetData
+        ? {
+            ...project,
+            assets: project.assets.map((asset) => ({
+              ...asset,
+              dataUrl: "",
+              sourceDataUrl: "",
+              animationDataUrl: "",
+            })),
+          }
+        : project;
+      try {
+        await saveWorkspace(workspaceProject, preserveAssetData);
+        lastWorkspaceAssets = project.assets;
+      }
       catch (error) { notice = `Automatic save failed: ${error}`; }
-    }, 500);
+    }, 1500);
   }
 
   function queueValidation(revision: number) {
@@ -157,6 +174,7 @@
     try {
       const result = await syncProject(project);
       lastSyncedFingerprint = result.fingerprint;
+      summary = { ...summary, fingerprint: result.fingerprint };
       notice = `Synced ${result.bytesSent.toLocaleString()} bytes · generation ${result.generation}${result.resumedAt ? ` · resumed at ${result.resumedAt}` : ""}`;
       await refreshDevice();
     } catch (error) { notice = `Sync failed: ${error}`; }
@@ -454,7 +472,7 @@
         animationDataUrl,
         animationFps
       };
-      project.assets.push(asset);
+      project.assets = [...project.assets, asset];
       page.buttons[selectedButton].iconId = asset.id;
       page.buttons[selectedButton].imageFit = "cover";
     }

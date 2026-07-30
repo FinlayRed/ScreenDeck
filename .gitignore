@@ -39,3 +39,6 @@ firmware/m5_animated_media/build_m5_complete/
 
 firmware/m6_radial_ux/build
 firmware/m6_radial_ux/build_current
+
+.tools/
+enclosure/

@@ -35,9 +35,21 @@ export const prepareIconAnimation = (name: string, dataUrl: string): Promise<Ico
 export const saveArchive = (path: string, project: Project): Promise<void> => invoke("save_archive", { path, project });
 export const openArchive = (path: string): Promise<Project> => invoke("open_archive", { path });
 export const backupBundle = (path: string, project: Project): Promise<void> => invoke("backup_bundle", { path, project });
-export const saveWorkspace = (project: Project): Promise<void> => native()
-  ? invoke("save_workspace", { project })
-  : Promise.resolve(localStorage.setItem("screendeck.workspace", JSON.stringify(project)) as undefined);
+export const saveWorkspace = (project: Project, preserveAssetData = false): Promise<void> => native()
+  ? invoke("save_workspace", { project, preserveAssetData })
+  : Promise.resolve((() => {
+      if (preserveAssetData) {
+        const saved = JSON.parse(localStorage.getItem("screendeck.workspace") ?? "null") as Project | null;
+        const assets = new Map(saved?.assets.map((asset) => [asset.id, asset]));
+        project.assets = project.assets.map((asset) => ({
+          ...asset,
+          dataUrl: assets.get(asset.id)?.dataUrl ?? asset.dataUrl,
+          sourceDataUrl: assets.get(asset.id)?.sourceDataUrl ?? asset.sourceDataUrl,
+          animationDataUrl: assets.get(asset.id)?.animationDataUrl ?? asset.animationDataUrl,
+        }));
+      }
+      localStorage.setItem("screendeck.workspace", JSON.stringify(project));
+    })());
 export const loadWorkspace = (): Promise<Project | null> => native()
   ? invoke("load_workspace")
   : Promise.resolve(JSON.parse(localStorage.getItem("screendeck.workspace") ?? "null"));

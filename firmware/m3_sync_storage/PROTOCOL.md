@@ -14,7 +14,7 @@ Every little-endian frame is a packed 20-byte header followed by its payload:
 | 0 | `u32 magic` = `0x33434453` (`SDC3`) |
 | 4 | `u8 version` = `1` |
 | 5 | `u8 opcode` |
-| 6 | `u16 flags` (`0x0001` suppresses the response for a media chunk) |
+| 6 | `u16 flags` (`0x0001` suppresses the response for a bundle or media chunk) |
 | 8 | `u32 sequence` |
 | 12 | `u32 payload_bytes` (at most 1400) |
 | 16 | `u32 payload_crc32` |
@@ -35,17 +35,27 @@ resume. `CHUNK` contains `u32 offset, u32 chunk_crc32, bytes[]`; chunks are
 strictly in order. `COMMIT` only succeeds after the complete bundle passes
 both size and payload checks.
 
+Capability bit `0x200` allows the host to batch consecutive `CHUNK` frames by
+setting flag `0x0001` on intermediate chunks and leaving it clear on the final
+chunk. The device keeps the stage file open and checkpoints it, its filesystem
+metadata, and the resume record before acknowledging the final chunk. The
+response acknowledges the cumulative durable offset; hosts must use one
+request/response per chunk when `0x200` is absent.
+
 A bundle begins with the packed 16-byte `SDB3` header: magic `0x33424453`,
 schema version `1`, header size `16`, total bundle bytes including the header,
 and the payload CRC32. Commit moves the verified stage file to an immutable
 numbered bundle, then writes an immutable active pointer. Boot selects the
 highest valid pointer, so an interrupted commit leaves the earlier pointer
-usable.
+usable. Boot verifies the complete bundle CRC, falls back to the next valid
+generation if necessary, and retains the newest two valid generations while
+removing older files so startup work remains bounded.
 
 `MEDIA_BEGIN`, `MEDIA_CHUNK`, and `MEDIA_COMMIT` use the same begin/chunk
 wire layouts but operate on a separate media transfer. The device validates the
 whole raw MJPEG stream (size, CRC-32, JPEG SOI and EOI boundaries) and then
-replaces `/sdcard/screendeck/screensaver.mjpg`. The `HELLO` capability bit
+atomically activates `/sdcard/screendeck/screensaver.mjpg`, retaining the
+previous file as a recovery backup. The `HELLO` capability bit
 `0x20` indicates this upload path is available. Capability bit `0x40` allows
 the host to batch consecutive `MEDIA_CHUNK` frames by setting flag `0x0001`
 on intermediate chunks and leaving it clear on the final chunk. The final

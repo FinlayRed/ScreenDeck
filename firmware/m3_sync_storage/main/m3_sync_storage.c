@@ -48,8 +48,10 @@ static const char *TAG = "m3";
 #define M3_STATE_FILE M3_ROOT "/upload.state"
 #define M3_MEDIA_STAGE_FILE M3_ROOT "/screensaver.upload"
 #define M3_MEDIA_FILE M3_ROOT "/screensaver.mjpg"
+#define M3_MEDIA_BACKUP_FILE M3_ROOT "/screensaver.previous"
 #define M3_MAX_BUNDLE_BYTES (16U * 1024U * 1024U)
 #define M3_MAX_MEDIA_BYTES (16U * 1024U * 1024U)
+#define M3_BUNDLE_WRITE_BUFFER_BYTES (64U * 1024U)
 #define M3_MEDIA_WRITE_BUFFER_BYTES (64U * 1024U)
 #define M3_RESPONSE_WAIT_MS 250
 #define M3_FRAME_FLAG_NO_RESPONSE 0x0001U
@@ -142,7 +144,12 @@ typedef struct {
     uint32_t total_bytes;
     uint32_t bundle_crc32;
     uint32_t received_bytes;
+    uint32_t durable_bytes;
     uint32_t active_generation;
+    uint32_t previous_generation;
+    FILE *upload_file;
+    uint8_t *upload_buffer;
+    size_t upload_buffer_used;
 } m3_storage_state_t;
 
 typedef struct {
@@ -377,6 +384,53 @@ static bool m3_upload_state_write(void)
     return m3_write_exact(M3_STATE_FILE, &record, sizeof(record));
 }
 
+static void m3_bundle_upload_close(void)
+{
+    if (s_storage.upload_file != NULL) fclose(s_storage.upload_file);
+    free(s_storage.upload_buffer);
+    s_storage.upload_file = NULL;
+    s_storage.upload_buffer = NULL;
+    s_storage.upload_buffer_used = 0;
+}
+
+static bool m3_bundle_upload_open(bool resume)
+{
+    if (s_storage.upload_file != NULL && s_storage.upload_buffer != NULL) return true;
+    FILE *file = fopen(M3_STAGE_FILE, resume ? "ab" : "wb");
+    uint8_t *buffer = malloc(M3_BUNDLE_WRITE_BUFFER_BYTES);
+    if (file == NULL || buffer == NULL) {
+        if (file != NULL) fclose(file);
+        free(buffer);
+        return false;
+    }
+    s_storage.upload_file = file;
+    s_storage.upload_buffer = buffer;
+    s_storage.upload_buffer_used = 0;
+    return true;
+}
+
+static bool m3_bundle_upload_flush_buffer(void)
+{
+    if (s_storage.upload_file == NULL || s_storage.upload_buffer == NULL) return false;
+    if (s_storage.upload_buffer_used != 0 &&
+        fwrite(s_storage.upload_buffer, 1, s_storage.upload_buffer_used,
+               s_storage.upload_file) != s_storage.upload_buffer_used) {
+        return false;
+    }
+    s_storage.upload_buffer_used = 0;
+    return true;
+}
+
+static bool m3_bundle_upload_checkpoint(void)
+{
+    if (!m3_bundle_upload_flush_buffer() || fflush(s_storage.upload_file) != 0 ||
+        fsync(fileno(s_storage.upload_file)) != 0 || !m3_upload_state_write()) {
+        return false;
+    }
+    s_storage.durable_bytes = s_storage.received_bytes;
+    return true;
+}
+
 static bool m3_upload_state_load(void)
 {
     m3_upload_state_t record = {0};
@@ -395,6 +449,7 @@ static bool m3_upload_state_load(void)
     s_storage.total_bytes = record.total_bytes;
     s_storage.bundle_crc32 = record.bundle_crc32;
     s_storage.received_bytes = record.received_bytes;
+    s_storage.durable_bytes = record.received_bytes;
     return true;
 }
 
@@ -426,30 +481,110 @@ static bool m3_read_pointer(const char *path, m3_pointer_t *pointer)
            memchr(pointer->bundle_name, '\0', sizeof(pointer->bundle_name)) != NULL;
 }
 
+static bool m3_parse_generation(const char *name, const char *prefix,
+                                const char *suffix, uint32_t *generation)
+{
+    const size_t prefix_length = strlen(prefix);
+    if (strncmp(name, prefix, prefix_length) != 0) return false;
+    char *end = NULL;
+    const unsigned long value = strtoul(name + prefix_length, &end, 10);
+    if (end == name + prefix_length || strcmp(end, suffix) != 0 || value > UINT32_MAX) return false;
+    *generation = (uint32_t) value;
+    return true;
+}
+
+static bool m3_find_pointer_below(uint32_t limit, m3_pointer_t *selected,
+                                  char *selected_path, size_t selected_path_size)
+{
+    bool found = false;
+    uint32_t best = 0;
+    DIR *directory = opendir(M3_ROOT);
+    if (directory == NULL) return false;
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        uint32_t filename_generation;
+        if (!m3_parse_generation(entry->d_name, "active-", ".ptr", &filename_generation)) continue;
+        char pointer_path[384];
+        snprintf(pointer_path, sizeof(pointer_path), "%s/%s", M3_ROOT, entry->d_name);
+        m3_pointer_t pointer = {0};
+        if (!m3_read_pointer(pointer_path, &pointer) || pointer.generation != filename_generation ||
+            pointer.generation >= limit || (found && pointer.generation <= best)) continue;
+        *selected = pointer;
+        snprintf(selected_path, selected_path_size, "%s", pointer_path);
+        best = pointer.generation;
+        found = true;
+    }
+    closedir(directory);
+    return found;
+}
+
+static void m3_cleanup_generations(void)
+{
+    DIR *directory = opendir(M3_ROOT);
+    if (directory != NULL) {
+        struct dirent *entry;
+        while ((entry = readdir(directory)) != NULL) {
+            uint32_t generation;
+            if (!m3_parse_generation(entry->d_name, "active-", ".ptr", &generation) ||
+                generation == s_storage.active_generation ||
+                generation == s_storage.previous_generation) continue;
+            char path[384];
+            snprintf(path, sizeof(path), "%s/%s", M3_ROOT, entry->d_name);
+            unlink(path);
+        }
+        closedir(directory);
+    }
+    directory = opendir(M3_BUNDLES_DIR);
+    if (directory != NULL) {
+        struct dirent *entry;
+        while ((entry = readdir(directory)) != NULL) {
+            uint32_t generation;
+            if (!m3_parse_generation(entry->d_name, "bundle-", ".sdb", &generation) ||
+                generation == s_storage.active_generation ||
+                generation == s_storage.previous_generation) continue;
+            char path[384];
+            snprintf(path, sizeof(path), "%s/%s", M3_BUNDLES_DIR, entry->d_name);
+            unlink(path);
+        }
+        closedir(directory);
+    }
+}
+
 static void m3_find_active_pointer(void)
 {
     s_storage.active_bundle_valid = false;
     s_storage.active_generation = 0;
+    s_storage.previous_generation = 0;
     s_active_bundle_path[0] = '\0';
-    DIR *directory = opendir(M3_ROOT);
-    if (directory == NULL) return;
-    struct dirent *entry;
-    while ((entry = readdir(directory)) != NULL) {
-        if (strncmp(entry->d_name, "active-", 7) != 0 || strstr(entry->d_name, ".ptr") == NULL) continue;
-        char pointer_path[384];
-        snprintf(pointer_path, sizeof(pointer_path), "%s/%s", M3_ROOT, entry->d_name);
+    uint32_t limit = UINT32_MAX;
+    uint8_t valid_count = 0;
+    for (;;) {
         m3_pointer_t pointer = {0};
-        if (!m3_read_pointer(pointer_path, &pointer) || pointer.generation <= s_storage.active_generation) continue;
+        char pointer_path[384];
+        if (!m3_find_pointer_below(limit, &pointer, pointer_path, sizeof(pointer_path))) break;
+        limit = pointer.generation;
         char bundle_path[128];
         snprintf(bundle_path, sizeof(bundle_path), "%s/%s", M3_BUNDLES_DIR, pointer.bundle_name);
         struct stat bundle;
-        if (stat(bundle_path, &bundle) == 0 && bundle.st_size > 0) {
+        const bool valid = stat(bundle_path, &bundle) == 0 &&
+                           bundle.st_size >= (off_t) sizeof(m3_bundle_header_t) &&
+                           bundle.st_size <= M3_MAX_BUNDLE_BYTES &&
+                           m3_validate_bundle_file(bundle_path, (uint32_t) bundle.st_size,
+                                                   pointer.bundle_crc32);
+        if (valid && valid_count == 0) {
             s_storage.active_generation = pointer.generation;
             s_storage.active_bundle_valid = true;
             snprintf(s_active_bundle_path, sizeof(s_active_bundle_path), "%s", bundle_path);
+            ++valid_count;
+        } else if (valid) {
+            s_storage.previous_generation = pointer.generation;
+            break;
+        } else {
+            ESP_LOGW(TAG, "M3_SD result=invalid_generation generation=%u", pointer.generation);
+            unlink(pointer_path);
         }
     }
-    closedir(directory);
+    m3_cleanup_generations();
 }
 
 static bool m3_storage_init(void)
@@ -462,6 +597,11 @@ static bool m3_storage_init(void)
     if (!s_storage.mounted) {
         ESP_LOGE(TAG, "M3_SD result=directory_init_failed");
         return false;
+    }
+    struct stat media;
+    if (stat(M3_MEDIA_FILE, &media) != 0 && stat(M3_MEDIA_BACKUP_FILE, &media) == 0 &&
+        rename(M3_MEDIA_BACKUP_FILE, M3_MEDIA_FILE) == 0) {
+        ESP_LOGW(TAG, "M3_MEDIA action=recover_previous");
     }
     m3_find_active_pointer();
     if (!m3_upload_state_load()) {
@@ -572,16 +712,24 @@ static void m3_handle_begin(const m3_frame_header_t *frame, const uint8_t *paylo
     }
     if (s_storage.upload_open && s_storage.total_bytes == begin.total_bytes &&
         s_storage.bundle_crc32 == begin.bundle_crc32) {
+        if (!m3_bundle_upload_open(true)) {
+            m3_send_response(M3_OP_BEGIN, frame->sequence, M3_STATUS_IO, s_storage.durable_bytes);
+            return;
+        }
         m3_send_response(M3_OP_BEGIN, frame->sequence, M3_STATUS_OK, s_storage.received_bytes);
         return;
     }
+    m3_bundle_upload_close();
     unlink(M3_STAGE_FILE);
     unlink(M3_STATE_FILE);
     s_storage.upload_open = true;
     s_storage.total_bytes = begin.total_bytes;
     s_storage.bundle_crc32 = begin.bundle_crc32;
     s_storage.received_bytes = 0;
-    if (!m3_upload_state_write()) {
+    s_storage.durable_bytes = 0;
+    if (!m3_bundle_upload_open(false) || !m3_upload_state_write()) {
+        m3_bundle_upload_close();
+        s_storage.upload_open = false;
         m3_send_response(M3_OP_BEGIN, frame->sequence, M3_STATUS_IO, 0);
         return;
     }
@@ -589,10 +737,10 @@ static void m3_handle_begin(const m3_frame_header_t *frame, const uint8_t *paylo
     m3_send_response(M3_OP_BEGIN, frame->sequence, M3_STATUS_OK, 0);
 }
 
-static void m3_handle_chunk(const m3_frame_header_t *frame, const uint8_t *payload)
+static void m3_handle_chunk(const m3_frame_header_t *frame, const uint8_t *payload, bool respond)
 {
     if (!s_storage.upload_open || frame->payload_size < sizeof(m3_chunk_prefix_t)) {
-        m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_BAD_STATE, s_storage.received_bytes);
+        if (respond) m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_BAD_STATE, s_storage.durable_bytes);
         return;
     }
     m3_chunk_prefix_t prefix;
@@ -603,28 +751,36 @@ static void m3_handle_chunk(const m3_frame_header_t *frame, const uint8_t *paylo
         chunk_size > M3_MAX_FRAME_PAYLOAD - sizeof(prefix) ||
         chunk_size > s_storage.total_bytes - s_storage.received_bytes ||
         prefix.chunk_crc32 != m3_crc32(chunk, chunk_size)) {
-        m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_BAD_FRAME, s_storage.received_bytes);
+        if (respond) m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_BAD_FRAME, s_storage.durable_bytes);
         return;
     }
-    FILE *file = fopen(M3_STAGE_FILE, "ab");
-    const bool ok = file != NULL && fwrite(chunk, 1, chunk_size, file) == chunk_size &&
-                    fflush(file) == 0 && fsync(fileno(file)) == 0;
-    if (file) fclose(file);
+    bool ok = m3_bundle_upload_open(true);
+    if (ok && s_storage.upload_buffer_used + chunk_size > M3_BUNDLE_WRITE_BUFFER_BYTES) {
+        ok = m3_bundle_upload_flush_buffer();
+    }
+    if (ok) {
+        memcpy(s_storage.upload_buffer + s_storage.upload_buffer_used, chunk, chunk_size);
+        s_storage.upload_buffer_used += chunk_size;
+    }
     if (!ok) {
-        m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_IO, s_storage.received_bytes);
+        if (respond) m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_IO, s_storage.durable_bytes);
         return;
     }
     s_storage.received_bytes += chunk_size;
-    if (!m3_upload_state_write()) {
-        m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_IO, s_storage.received_bytes);
+    if (respond && !m3_bundle_upload_checkpoint()) {
+        m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_IO, s_storage.durable_bytes);
         return;
     }
-    m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_OK, s_storage.received_bytes);
+    if (respond) m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_OK, s_storage.durable_bytes);
 }
 
 static void m3_handle_commit(const m3_frame_header_t *frame)
 {
-    if (!s_storage.upload_open || s_storage.received_bytes != s_storage.total_bytes ||
+    const bool checkpointed = s_storage.upload_open &&
+                              s_storage.received_bytes == s_storage.total_bytes &&
+                              m3_bundle_upload_checkpoint();
+    m3_bundle_upload_close();
+    if (!checkpointed ||
         !m3_validate_bundle_file(M3_STAGE_FILE, s_storage.total_bytes, s_storage.bundle_crc32)) {
         m3_send_response(M3_OP_COMMIT, frame->sequence, M3_STATUS_BAD_BUNDLE, s_storage.received_bytes);
         return;
@@ -651,11 +807,14 @@ static void m3_handle_commit(const m3_frame_header_t *frame)
         return;
     }
     unlink(M3_STATE_FILE);
+    s_storage.previous_generation = s_storage.active_generation;
     s_storage.active_generation = generation;
     s_storage.active_bundle_valid = true;
     snprintf(s_active_bundle_path, sizeof(s_active_bundle_path), "%s", bundle_path);
     s_storage.upload_open = false;
     s_storage.received_bytes = 0;
+    s_storage.durable_bytes = 0;
+    m3_cleanup_generations();
     ESP_LOGI(TAG, "M3_SYNC action=commit generation=%u bundle=%s", generation, bundle_name);
     m3_send_response(M3_OP_COMMIT, frame->sequence, M3_STATUS_OK, generation);
 #ifdef M5_MEDIA_ENABLED
@@ -776,10 +935,16 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
         !m3_validate_mjpeg_file(M3_MEDIA_STAGE_FILE, s_media_upload.total_bytes, s_media_upload.crc32)) {
         m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_BAD_BUNDLE, s_media_upload.received_bytes); return;
     }
-    /* FATFS cannot replace an existing name with rename. Delete only after the
-     * complete staged file has passed its CRC and MJPEG boundary checks. */
-    unlink(M3_MEDIA_FILE);
+    /* FATFS cannot replace an existing name with rename. Preserve the last
+     * known-good file under a recovery name before activating the new one. */
+    unlink(M3_MEDIA_BACKUP_FILE);
+    struct stat previous_media;
+    const bool had_previous = stat(M3_MEDIA_FILE, &previous_media) == 0;
+    if (had_previous && rename(M3_MEDIA_FILE, M3_MEDIA_BACKUP_FILE) != 0) {
+        m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes); return;
+    }
     if (rename(M3_MEDIA_STAGE_FILE, M3_MEDIA_FILE) != 0) {
+        if (had_previous) rename(M3_MEDIA_BACKUP_FILE, M3_MEDIA_FILE);
         m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes); return;
     }
     const uint32_t uploaded = s_media_upload.total_bytes;
@@ -797,12 +962,13 @@ static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *pay
 {
     if (frame->opcode == M3_OP_HELLO) {
         // Protocol v1, resume, checksums, atomic bundles, no MSC, media upload,
-        // and batched media chunks (silent intermediate frames).
-        m3_send_response(M3_OP_HELLO, frame->sequence, M3_STATUS_OK, 0x000001FF);
+        // and batched media/bundle chunks (silent intermediate frames).
+        m3_send_response(M3_OP_HELLO, frame->sequence, M3_STATUS_OK, 0x000003FF);
     } else if (frame->opcode == M3_OP_BEGIN) {
         m3_handle_begin(frame, payload);
     } else if (frame->opcode == M3_OP_CHUNK) {
-        m3_handle_chunk(frame, payload);
+        m3_handle_chunk(frame, payload,
+                        (frame->reserved & M3_FRAME_FLAG_NO_RESPONSE) == 0);
     } else if (frame->opcode == M3_OP_COMMIT) {
         m3_handle_commit(frame);
     } else if (frame->opcode == M3_OP_MEDIA_BEGIN) {
@@ -829,8 +995,9 @@ static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *pay
                          media_error);
 #endif
     } else if (frame->opcode == M3_OP_ABORT) {
+        m3_bundle_upload_close();
         unlink(M3_STAGE_FILE); unlink(M3_STATE_FILE);
-        s_storage.upload_open = false; s_storage.received_bytes = 0;
+        s_storage.upload_open = false; s_storage.received_bytes = 0; s_storage.durable_bytes = 0;
         m3_send_response(M3_OP_ABORT, frame->sequence, M3_STATUS_OK, 0);
     } else if (frame->opcode == M3_OP_STATUS || frame->opcode == M3_OP_DIAG) {
         m3_send_response(frame->opcode, frame->sequence, M3_STATUS_OK,

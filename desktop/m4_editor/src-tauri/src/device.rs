@@ -19,12 +19,13 @@ const DOWNLOAD_CHUNK: u8 = 14;
 const DOWNLOAD_CAPABILITY: u32 = 0x100;
 const TEST_SCREENSAVER_CAPABILITY: u32 = 0x80;
 const MEDIA_BATCH_CAPABILITY: u32 = 0x40;
+const BUNDLE_BATCH_CAPABILITY: u32 = 0x200;
 const FRAME_FLAG_NO_RESPONSE: u16 = 0x0001;
 const CHUNK_BYTES: usize = 1400 - 8; // SDC3 payload limit minus chunk prefix
                                      // Match the project-sync chunk size proven reliable on the physical P4.
 const MEDIA_CHUNK_BYTES: usize = 1400 - 8; // SDC3 payload limit minus chunk prefix
 const MEDIA_BATCH_CHUNKS: usize = 8;
-const DEVICE_RESPONSE_SETTLE_MS: u64 = 1;
+const BUNDLE_BATCH_CHUNKS: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum DeviceError {
@@ -84,6 +85,7 @@ fn status_detail(status: u32, value: u32) -> String {
             7 => "device could not allocate the screensaver read buffer".into(),
             8 => "display frame buffers are unavailable".into(),
             9 => "hardware JPEG decoder could not be initialized".into(),
+            10 => "the first screensaver frame is not 720x1280".into(),
             _ => format!("screensaver indexing failed with diagnostic code {value}"),
         },
         _ => "unknown device error".into(),
@@ -166,9 +168,6 @@ fn checked_response(
             detail: status_detail(status, value),
         });
     }
-    // M3 sends replies non-blockingly. Give TinyUSB time to complete the IN
-    // transfer before the next OUT frame so its response buffer is available.
-    thread::sleep(Duration::from_millis(DEVICE_RESPONSE_SETTLE_MS));
     Ok(value)
 }
 
@@ -242,14 +241,36 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
     let mut offset = resumed_at as usize;
     let mut sequence = 4u32;
     while offset < bundle.len() {
-        let end = (offset + CHUNK_BYTES).min(bundle.len());
-        let chunk = &bundle[offset..end];
-        let mut payload = Vec::with_capacity(chunk.len() + 8);
-        payload.extend_from_slice(&(offset as u32).to_le_bytes());
-        payload.extend_from_slice(&crc32(chunk).to_le_bytes());
-        payload.extend_from_slice(chunk);
-        let acknowledged =
-            match checked_exchange(&mut session, CHUNK, sequence, &payload, "upload chunk") {
+        let batch_end = if capabilities & BUNDLE_BATCH_CAPABILITY != 0 {
+            (offset + CHUNK_BYTES * BUNDLE_BATCH_CHUNKS).min(bundle.len())
+        } else {
+            (offset + CHUNK_BYTES).min(bundle.len())
+        };
+        while offset < batch_end {
+            let end = (offset + CHUNK_BYTES).min(bundle.len());
+            let chunk = &bundle[offset..end];
+            let mut payload = Vec::with_capacity(chunk.len() + 8);
+            payload.extend_from_slice(&(offset as u32).to_le_bytes());
+            payload.extend_from_slice(&crc32(chunk).to_le_bytes());
+            payload.extend_from_slice(chunk);
+            if capabilities & BUNDLE_BATCH_CAPABILITY != 0 && end != batch_end {
+                session.send(&flagged_frame(
+                    CHUNK,
+                    sequence,
+                    FRAME_FLAG_NO_RESPONSE,
+                    &payload,
+                ))?;
+                offset = end;
+                sequence += 1;
+                continue;
+            }
+            let acknowledged = match checked_exchange(
+                &mut session,
+                CHUNK,
+                sequence,
+                &payload,
+                "upload bundle batch",
+            ) {
                 Ok(value) => value,
                 Err(DeviceError::Protocol(message)) if message.contains("timed out") => {
                     thread::sleep(Duration::from_millis(250));
@@ -263,7 +284,7 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
                         &begin,
                         "recover upload acknowledgement",
                     )?;
-                    if safe_offset < offset as u32 || safe_offset as usize > bundle.len() {
+                    if safe_offset as usize > bundle.len() {
                         return Err(DeviceError::Protocol(format!(
                             "invalid recovered offset {safe_offset}"
                         )));
@@ -274,13 +295,14 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
                 }
                 Err(error) => return Err(error),
             };
-        if acknowledged as usize != end {
-            return Err(DeviceError::Protocol(format!(
-                "device acknowledged byte {acknowledged}; expected {end}"
-            )));
+            if acknowledged as usize != end {
+                return Err(DeviceError::Protocol(format!(
+                    "device acknowledged byte {acknowledged}; expected {end}"
+                )));
+            }
+            offset = end;
+            sequence += 1;
         }
-        offset = end;
-        sequence += 1;
     }
     let generation = match checked_exchange(&mut session, COMMIT, sequence, &[], "commit bundle") {
         Ok(value) => value,
@@ -496,7 +518,6 @@ mod transport {
     const GENERIC_READ_WRITE: u32 = 0xC000_0000;
     const OPEN_EXISTING: u32 = 3;
     const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
-    const PIPE_TRANSFER_TIMEOUT: u32 = 3;
     const ERROR_IO_PENDING: u32 = 997;
     const WAIT_OBJECT_0: u32 = 0;
     const IO_TIMEOUT_MS: u32 = 5_000;
@@ -586,6 +607,7 @@ mod transport {
             template: Handle,
         ) -> Handle;
         fn CloseHandle(handle: Handle) -> i32;
+        fn ResetEvent(handle: Handle) -> i32;
         fn GetLastError() -> u32;
         fn CreateEventW(
             attributes: *mut c_void,
@@ -616,13 +638,6 @@ mod transport {
             alternate: u8,
             index: u8,
             pipe: *mut PipeInfo,
-        ) -> i32;
-        fn WinUsb_SetPipePolicy(
-            interface: Handle,
-            pipe: u8,
-            policy: u32,
-            length: u32,
-            value: *mut u32,
         ) -> i32;
         fn WinUsb_WritePipe(
             interface: Handle,
@@ -757,6 +772,8 @@ mod transport {
         usb: WinUsb,
         input: u8,
         output: u8,
+        write_event: Event,
+        read_event: Event,
     }
     unsafe impl Send for Connection {}
 
@@ -801,8 +818,9 @@ mod transport {
                     "bulk endpoints were not found".into(),
                 ));
             }
-            let mut timeout = IO_TIMEOUT_MS;
-            if WinUsb_SetPipePolicy(usb.0, input, PIPE_TRANSFER_TIMEOUT, 4, &mut timeout) == 0 {
+            let write_event = Event(CreateEventW(null_mut(), 0, 0, null()));
+            let read_event = Event(CreateEventW(null_mut(), 0, 0, null()));
+            if write_event.0.is_null() || read_event.0.is_null() {
                 return Err(last_error());
             }
             Ok(Self {
@@ -810,6 +828,8 @@ mod transport {
                 usb,
                 input,
                 output,
+                write_event,
+                read_event,
             })
         }
 
@@ -817,8 +837,7 @@ mod transport {
             let file = self.file.0;
             let usb = self.usb.0;
             let output = self.output;
-            let write_event = Event(CreateEventW(null_mut(), 0, 0, null()));
-            if write_event.0.is_null() {
+            if ResetEvent(self.write_event.0) == 0 {
                 return Err(last_error());
             }
             let mut write_overlapped = Overlapped {
@@ -826,7 +845,7 @@ mod transport {
                 internal_high: 0,
                 offset: 0,
                 offset_high: 0,
-                event: write_event.0,
+                event: self.write_event.0,
             };
             let mut written = 0u32;
             let write_started = WinUsb_WritePipe(
@@ -863,17 +882,12 @@ mod transport {
             let usb = self.usb.0;
             let input = self.input;
             let output = self.output;
-            let mut timeout = timeout_ms;
-            if WinUsb_SetPipePolicy(usb, input, PIPE_TRANSFER_TIMEOUT, 4, &mut timeout) == 0 {
-                return Err(last_error());
-            }
             let mut response = Vec::with_capacity(1420);
             let mut expected = 20usize;
             while response.len() < expected {
                 let mut packet = [0u8; 512];
                 let mut read = 0u32;
-                let read_event = Event(CreateEventW(null_mut(), 0, 0, null()));
-                if read_event.0.is_null() {
+                if ResetEvent(self.read_event.0) == 0 {
                     return Err(last_error());
                 }
                 let mut read_overlapped = Overlapped {
@@ -881,7 +895,7 @@ mod transport {
                     internal_high: 0,
                     offset: 0,
                     offset_high: 0,
-                    event: read_event.0,
+                    event: self.read_event.0,
                 };
                 let read_started = WinUsb_ReadPipe(
                     usb,

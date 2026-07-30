@@ -79,9 +79,15 @@ pub struct RadialItem {
 fn default_screensaver_timeout() -> u32 {
     15
 }
-fn default_brightness() -> u8 { 80 }
-fn default_orientation() -> String { "landscape".into() }
-fn default_true() -> bool { true }
+fn default_brightness() -> u8 {
+    80
+}
+fn default_orientation() -> String {
+    "landscape".into()
+}
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -93,7 +99,9 @@ pub enum ActionKind {
     None,
 }
 
-fn default_radial_action() -> ActionKind { ActionKind::Macro }
+fn default_radial_action() -> ActionKind {
+    ActionKind::Macro
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Macro {
@@ -199,7 +207,9 @@ fn is_consumer_key(value: &str) -> bool {
 pub fn migrate(project: &mut Project) {
     if project.schema_version == 2 {
         project.schema_version = 3;
-        if project.orientation.is_empty() { project.orientation = "landscape".into(); }
+        if project.orientation.is_empty() {
+            project.orientation = "landscape".into();
+        }
     }
 }
 
@@ -221,10 +231,19 @@ pub fn validate(project: &Project) -> Vec<ValidationIssue> {
         ));
     }
     if project.brightness_percent > 100 {
-        issues.push(issue("brightnessPercent", "Brightness must be between 0% and 100%."));
+        issues.push(issue(
+            "brightnessPercent",
+            "Brightness must be between 0% and 100%.",
+        ));
     }
-    if !matches!(project.orientation.as_str(), "landscape" | "landscape_flipped") {
-        issues.push(issue("orientation", "Orientation must be landscape or landscape flipped."));
+    if !matches!(
+        project.orientation.as_str(),
+        "landscape" | "landscape_flipped"
+    ) {
+        issues.push(issue(
+            "orientation",
+            "Orientation must be landscape or landscape flipped.",
+        ));
     }
     if project.profiles.is_empty() || project.profiles.len() > MAX_PROFILES {
         issues.push(issue(
@@ -310,18 +329,45 @@ pub fn validate(project: &Project) -> Vec<ValidationIssue> {
                     issues.push(issue(path.clone(), "The button references a missing icon."));
                 }
                 if let Some(radial) = &button.radial {
-                    if !matches!(radial.size, 4 | 6 | 8) || radial.items.len() != radial.size as usize {
-                        issues.push(issue(format!("{path}.radial"), "A radial menu must contain exactly 4, 6, or 8 items."));
+                    if !matches!(radial.size, 4 | 6 | 8)
+                        || radial.items.len() != radial.size as usize
+                    {
+                        issues.push(issue(
+                            format!("{path}.radial"),
+                            "A radial menu must contain exactly 4, 6, or 8 items.",
+                        ));
                     }
                     for (ri, item) in radial.items.iter().enumerate() {
-                        if item.action == ActionKind::Macro && item.macro_id.as_deref().is_none_or(|id| !macro_ids.contains(id)) {
-                            issues.push(issue(format!("{path}.radial.items[{ri}].macroId"), "The radial item references a missing macro."));
+                        if item.action == ActionKind::Macro
+                            && item
+                                .macro_id
+                                .as_deref()
+                                .is_none_or(|id| !macro_ids.contains(id))
+                        {
+                            issues.push(issue(
+                                format!("{path}.radial.items[{ri}].macroId"),
+                                "The radial item references a missing macro.",
+                            ));
                         }
-                        if item.icon_id.as_deref().is_some_and(|id| !asset_ids.contains(id)) {
-                            issues.push(issue(format!("{path}.radial.items[{ri}].iconId"), "The radial item references a missing icon."));
+                        if item
+                            .icon_id
+                            .as_deref()
+                            .is_some_and(|id| !asset_ids.contains(id))
+                        {
+                            issues.push(issue(
+                                format!("{path}.radial.items[{ri}].iconId"),
+                                "The radial item references a missing icon.",
+                            ));
                         }
-                        if item.image_fit.as_deref().is_some_and(|fit| fit != "cover" && fit != "contain") {
-                            issues.push(issue(format!("{path}.radial.items[{ri}].imageFit"), "Artwork display must be cover or contain."));
+                        if item
+                            .image_fit
+                            .as_deref()
+                            .is_some_and(|fit| fit != "cover" && fit != "contain")
+                        {
+                            issues.push(issue(
+                                format!("{path}.radial.items[{ri}].imageFit"),
+                                "Artwork display must be cover or contain.",
+                            ));
                         }
                     }
                 }
@@ -339,6 +385,7 @@ pub fn validate(project: &Project) -> Vec<ValidationIssue> {
         }
     }
     for (mi, item) in project.macros.iter().enumerate() {
+        let mut held_keys = HashSet::new();
         if item.steps.len() > MAX_STEPS {
             issues.push(issue(
                 format!("macros[{mi}].steps"),
@@ -394,6 +441,27 @@ pub fn validate(project: &Project) -> Vec<ValidationIssue> {
                     "Modifiers are only supported by Key press steps.",
                 ));
             }
+            if let Some(key) = step.key.as_deref().filter(|key| is_keyboard_key(key)) {
+                if step.kind == StepKind::KeyDown && !held_keys.insert(key) {
+                    issues.push(issue(
+                        format!("macros[{mi}].steps[{si}]"),
+                        format!("{key} is already held by this macro."),
+                    ));
+                } else if step.kind == StepKind::KeyUp && !held_keys.remove(key) {
+                    issues.push(issue(
+                        format!("macros[{mi}].steps[{si}]"),
+                        format!("{key} is not currently held by this macro."),
+                    ));
+                }
+            }
+        }
+        let mut unreleased: Vec<_> = held_keys.into_iter().collect();
+        unreleased.sort_unstable();
+        for key in unreleased {
+            issues.push(issue(
+                format!("macros[{mi}].steps"),
+                format!("{key} must be released before the macro ends."),
+            ));
         }
     }
     issues

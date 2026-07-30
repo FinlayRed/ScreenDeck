@@ -1,6 +1,6 @@
 use crate::model::{
-    validate, ActionKind, Asset, Button, Macro, MacroStep, Page, Profile, Project, RadialItem, RadialMenu, StepKind,
-    ValidationIssue, MAX_BUNDLE_BYTES,
+    validate, ActionKind, Asset, Button, Macro, MacroStep, Page, Profile, Project, RadialItem,
+    RadialMenu, StepKind, ValidationIssue, MAX_BUNDLE_BYTES,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
@@ -147,8 +147,21 @@ fn compile_validated(project: &Project) -> Result<Vec<u8>, CompileError> {
     let assets_offset = pages_offset + page_count * 32 * M5UI_BUTTON_BYTES;
     let button_ref_count = page_count * 32;
     let step_count: usize = project.macros.iter().map(|item| item.steps.len()).sum();
-    let radial_count: usize = project.profiles.iter().flat_map(|p| &p.pages).flat_map(|p| &p.buttons).filter(|b| b.radial.is_some()).count();
-    let radial_item_count: usize = project.profiles.iter().flat_map(|p| &p.pages).flat_map(|p| &p.buttons).filter_map(|b| b.radial.as_ref()).map(|r| r.items.len()).sum();
+    let radial_count: usize = project
+        .profiles
+        .iter()
+        .flat_map(|p| &p.pages)
+        .flat_map(|p| &p.buttons)
+        .filter(|b| b.radial.is_some())
+        .count();
+    let radial_item_count: usize = project
+        .profiles
+        .iter()
+        .flat_map(|p| &p.pages)
+        .flat_map(|p| &p.buttons)
+        .filter_map(|b| b.radial.as_ref())
+        .map(|r| r.items.len())
+        .sum();
     let button_macro_refs_offset = assets_offset + project.assets.len() * M5UI_ASSET_BYTES;
     let macro_descriptors_offset = button_macro_refs_offset + button_ref_count * 2;
     let macro_steps_offset =
@@ -219,7 +232,18 @@ fn compile_validated(project: &Project) -> Result<Vec<u8>, CompileError> {
                     ActionKind::PagePrevious => 3,
                     ActionKind::ProfileNext => 4,
                 };
-                payload.extend_from_slice(&button.radial.as_ref().map(|_| { let value = next_radial; next_radial += 1; value }).unwrap_or(u32::MAX).to_le_bytes());
+                payload.extend_from_slice(
+                    &button
+                        .radial
+                        .as_ref()
+                        .map(|_| {
+                            let value = next_radial;
+                            next_radial += 1;
+                            value
+                        })
+                        .unwrap_or(u32::MAX)
+                        .to_le_bytes(),
+                );
                 payload.extend_from_slice(&asset.to_le_bytes());
                 payload.push(action);
                 payload.push(u8::from(button.image_fit.as_deref() == Some("contain")));
@@ -347,21 +371,45 @@ fn compile_validated(project: &Project) -> Result<Vec<u8>, CompileError> {
         }
     }
     let mut first_radial_item = 0u16;
-    for button in project.profiles.iter().flat_map(|p| &p.pages).flat_map(|p| &p.buttons) {
+    for button in project
+        .profiles
+        .iter()
+        .flat_map(|p| &p.pages)
+        .flat_map(|p| &p.buttons)
+    {
         if let Some(radial) = &button.radial {
             payload.extend_from_slice(&first_radial_item.to_le_bytes());
             payload.push(radial.size);
-            let cover_mask = radial.items.iter().enumerate().fold(0u8, |mask, (index, item)| {
-                mask | (u8::from(item.image_fit.as_deref() == Some("cover")) << index)
-            });
+            let cover_mask = radial
+                .items
+                .iter()
+                .enumerate()
+                .fold(0u8, |mask, (index, item)| {
+                    mask | (u8::from(item.image_fit.as_deref() == Some("cover")) << index)
+                });
             payload.push(cover_mask);
             first_radial_item += radial.items.len() as u16;
         }
     }
-    for item in project.profiles.iter().flat_map(|p| &p.pages).flat_map(|p| &p.buttons).filter_map(|b| b.radial.as_ref()).flat_map(|r| &r.items) {
-        let asset = item.icon_id.as_deref().and_then(|id| asset_indices.get(id).copied()).unwrap_or(u16::MAX);
+    for item in project
+        .profiles
+        .iter()
+        .flat_map(|p| &p.pages)
+        .flat_map(|p| &p.buttons)
+        .filter_map(|b| b.radial.as_ref())
+        .flat_map(|r| &r.items)
+    {
+        let asset = item
+            .icon_id
+            .as_deref()
+            .and_then(|id| asset_indices.get(id).copied())
+            .unwrap_or(u16::MAX);
         let action_ref = match item.action {
-            ActionKind::Macro => item.macro_id.as_deref().and_then(|id| macro_indices.get(id).copied()).unwrap_or(RADIAL_ACTION_NONE),
+            ActionKind::Macro => item
+                .macro_id
+                .as_deref()
+                .and_then(|id| macro_indices.get(id).copied())
+                .unwrap_or(RADIAL_ACTION_NONE),
             ActionKind::PageNext => RADIAL_ACTION_PAGE_NEXT,
             ActionKind::PagePrevious => RADIAL_ACTION_PAGE_PREVIOUS,
             ActionKind::ProfileNext => RADIAL_ACTION_PROFILE_NEXT,
@@ -390,24 +438,71 @@ fn compile_validated(project: &Project) -> Result<Vec<u8>, CompileError> {
 
 pub fn summarize(project: &Project) -> CompileSummary {
     let issues = validate(project);
-    let (bundle_bytes, payload_crc32, fingerprint) = if issues.is_empty() {
-        match compile_validated(project) {
-            Ok(bundle) => (
-                bundle.len(),
-                u32::from_le_bytes(bundle[12..16].try_into().unwrap()),
-                fingerprint(&bundle),
-            ),
-            Err(_) => (0, 0, String::new()),
-        }
+    let bundle_bytes = if issues.is_empty() {
+        estimate_bundle_bytes(project)
     } else {
-        (0, 0, String::new())
+        0
     };
     CompileSummary {
         bundle_bytes,
-        payload_crc32,
-        fingerprint,
+        payload_crc32: 0,
+        fingerprint: String::new(),
         issues,
     }
+}
+
+fn encoded_data_length(data_url: &str) -> usize {
+    let Some((_, encoded)) = data_url.split_once(',') else {
+        return 0;
+    };
+    let padding = encoded
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'=')
+        .count();
+    (encoded.len().saturating_mul(3) / 4).saturating_sub(padding.min(2))
+}
+
+fn estimate_bundle_bytes(project: &Project) -> usize {
+    let page_count: usize = project
+        .profiles
+        .iter()
+        .map(|profile| profile.pages.len())
+        .sum();
+    let step_count: usize = project.macros.iter().map(|item| item.steps.len()).sum();
+    let radial_count = project
+        .profiles
+        .iter()
+        .flat_map(|profile| &profile.pages)
+        .flat_map(|page| &page.buttons)
+        .filter(|button| button.radial.is_some())
+        .count();
+    let radial_item_count: usize = project
+        .profiles
+        .iter()
+        .flat_map(|profile| &profile.pages)
+        .flat_map(|page| &page.buttons)
+        .filter_map(|button| button.radial.as_ref())
+        .map(|radial| radial.items.len())
+        .sum();
+    let metadata = M5UI_HEADER_BYTES
+        + project.profiles.len() * M5UI_PROFILE_BYTES
+        + page_count * 32 * M5UI_BUTTON_BYTES
+        + project.assets.len() * M5UI_ASSET_BYTES
+        + page_count * 32 * 2
+        + project.macros.len() * MACRO_DESCRIPTOR_BYTES
+        + step_count * MACRO_STEP_BYTES
+        + radial_count * RADIAL_DESCRIPTOR_BYTES
+        + radial_item_count * RADIAL_ITEM_BYTES;
+    let blobs: usize = project
+        .assets
+        .iter()
+        .map(|asset| {
+            encoded_data_length(&asset.data_url) + encoded_data_length(&asset.animation_data_url)
+        })
+        .sum();
+    16 + metadata + blobs
 }
 
 pub fn fingerprint(bundle: &[u8]) -> String {
@@ -638,11 +733,15 @@ pub fn decompile(bundle: &[u8]) -> Result<Project, String> {
                 None
             } else {
                 let descriptor = rdo + radial_index as usize * RADIAL_DESCRIPTOR_BYTES;
-                if radial_index as usize >= radial_count { return Err("invalid radial descriptor".into()); }
+                if radial_index as usize >= radial_count {
+                    return Err("invalid radial descriptor".into());
+                }
                 let first = u16_at(p, descriptor)? as usize;
                 let size = *p.get(descriptor + 2).ok_or("truncated radial descriptor")?;
                 let cover_mask = *p.get(descriptor + 3).ok_or("truncated radial descriptor")?;
-                if !matches!(size, 4 | 6 | 8) || first + size as usize > radial_item_count { return Err("invalid radial item range".into()); }
+                if !matches!(size, 4 | 6 | 8) || first + size as usize > radial_item_count {
+                    return Err("invalid radial item range".into());
+                }
                 let mut items = Vec::with_capacity(size as usize);
                 for ri in first..first + size as usize {
                     let item_offset = rio + ri * RADIAL_ITEM_BYTES;
@@ -653,13 +752,25 @@ pub fn decompile(bundle: &[u8]) -> Result<Project, String> {
                         RADIAL_ACTION_PAGE_NEXT => (ActionKind::PageNext, None),
                         RADIAL_ACTION_PAGE_PREVIOUS => (ActionKind::PagePrevious, None),
                         RADIAL_ACTION_PROFILE_NEXT => (ActionKind::ProfileNext, None),
-                        index if (index as usize) < macro_count => (ActionKind::Macro, Some(format!("device-macro-{index}"))),
+                        index if (index as usize) < macro_count => {
+                            (ActionKind::Macro, Some(format!("device-macro-{index}")))
+                        }
                         _ => return Err("invalid radial action reference".into()),
                     };
-                    if item_asset != u16::MAX && item_asset as usize >= asset_count { return Err("invalid radial reference".into()); }
+                    if item_asset != u16::MAX && item_asset as usize >= asset_count {
+                        return Err("invalid radial reference".into());
+                    }
                     items.push(RadialItem {
-                        icon_id: (item_asset != u16::MAX).then(|| format!("device-asset-{item_asset}")),
-                        image_fit: Some(if cover_mask & (1 << (ri - first)) != 0 { "cover" } else { "contain" }.into()),
+                        icon_id: (item_asset != u16::MAX)
+                            .then(|| format!("device-asset-{item_asset}")),
+                        image_fit: Some(
+                            if cover_mask & (1 << (ri - first)) != 0 {
+                                "cover"
+                            } else {
+                                "contain"
+                            }
+                            .into(),
+                        ),
                         action: item_action,
                         macro_id: item_macro_id,
                     });
@@ -703,7 +814,12 @@ pub fn decompile(bundle: &[u8]) -> Result<Project, String> {
             value => value,
         },
         brightness_percent: (u32_at(p, 68)? & 0xff) as u8,
-        orientation: if u32_at(p, 68)? & (1 << 8) != 0 { "landscape_flipped" } else { "landscape" }.into(),
+        orientation: if u32_at(p, 68)? & (1 << 8) != 0 {
+            "landscape_flipped"
+        } else {
+            "landscape"
+        }
+        .into(),
         screensaver_enabled: u32_at(p, 68)? & (1 << 9) != 0,
         profiles,
         macros,

@@ -98,9 +98,12 @@ Candidate post-display PSRAM reservations are: 1,843,200 bytes for one decoded f
 
 ## Warnings requiring follow-up
 
-- The vendor BSP logs that its GPIO 26 LEDC backlight configuration conflicts with another board function. The panel initializes, but M1 must replace or verify the BSP backlight path before relying on brightness control.
 - The GT911 I²C driver emits a generic pull-up resistance warning even though the controller initializes and reports its ID/configuration. Treat this as a board-BSP warning until a long touch test proves otherwise.
 - The M0 SDMMC read result is much lower than bus peak rate and lower than the previous benchmark's 1.82 MiB/s asset load. M1/M5 must profile buffered sequential reads and decoder/display overlap rather than extrapolating from bus clock alone.
+
+## Resolved warnings
+
+- **2026-07-14:** The GPIO 26 LEDC warning was traced to the Waveshare BSP initializing the same backlight channel twice during `bsp_display_start_with_config()`. The redundant outer initialization was removed; a clean physical boot showed working brightness control and no GPIO conflict warning.
 
 ## Physical verification
 

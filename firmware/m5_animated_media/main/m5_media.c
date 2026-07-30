@@ -36,8 +36,8 @@ static const char *TAG = "m5";
 #define M5_MARGIN_X_PX 16
 #define M5_ACTIVE_POLL_MS 5
 #define M5_DEFAULT_SCREENSAVER_IDLE_SECONDS 15
-#define M5_SCREENSAVER_FPS 30
-#define M5_MAX_FRAMES 900
+#define M5_SCREENSAVER_FPS 60
+#define M5_MAX_FRAMES 1800
 #define M5_PRELOAD_LIMIT (8U * 1024U * 1024U)
 #define M5_MAX_JPEG_BYTES (2U * 1024U * 1024U)
 #define M5_JPEG_PATH BSP_SD_MOUNT_POINT "/screendeck/screensaver.mjpg"
@@ -55,6 +55,7 @@ static const char *TAG = "m5";
 #define M5_ICON_MEDIUM_LOAD_FPS 10
 #define M5_ICON_HEAVY_LOAD_FPS 7
 #define M5_MACRO_SLOTS 8
+#define M5_CONSUMER_QUEUE_DEPTH 16
 #define M5_HID_KEYBOARD_REPORT_ID 1
 #define M5_HID_CONSUMER_REPORT_ID 2
 
@@ -128,6 +129,8 @@ typedef struct {
     int64_t due_us;
     bool tap_active;
     uint8_t tap_usage, tap_modifiers;
+    bool held_keys[256];
+    uint8_t held_modifiers;
 } m5_macro_slot_t;
 
 typedef struct {
@@ -157,6 +160,9 @@ static uint8_t s_index_buffer[M5_INDEX_BUFFER_BYTES];
 static m5_macro_slot_t s_macro_slots[M5_MACRO_SLOTS];
 static uint8_t s_key_refs[256], s_modifier_refs[8];
 static bool s_keyboard_report_pending;
+static uint16_t s_consumer_queue[M5_CONSUMER_QUEUE_DEPTH];
+static uint8_t s_consumer_queue_head, s_consumer_queue_count;
+static bool s_consumer_release_pending;
 static SemaphoreHandle_t s_macro_mutex;
 static TaskHandle_t s_macro_task_handle;
 static m5_visible_animation_t s_visible_animations[M5_BUTTONS];
@@ -315,10 +321,24 @@ static bool m5_flush_keyboard_locked(void)
 {
     if (!s_keyboard_report_pending) return true;
     uint8_t report[6] = {0};
-    uint8_t modifiers = 0, count = 0;
+    uint8_t modifiers = 0;
+    uint16_t count = 0;
     for (uint8_t i = 0; i < 8; ++i) if (s_modifier_refs[i]) modifiers |= 1U << i;
-    for (uint16_t usage = 1; usage < 256 && count < 6; ++usage) {
-        if (s_key_refs[usage]) report[count++] = (uint8_t) usage;
+    for (uint16_t usage = 1; usage < 256; ++usage) {
+        if (!s_key_refs[usage]) continue;
+        if (count < 6) report[count] = (uint8_t) usage;
+        ++count;
+    }
+    if (count > 6) {
+        /* Boot-protocol reports cannot represent more than six ordinary keys.
+         * Cancel every slot and send a clean release instead of hiding keys
+         * that could unexpectedly appear when another key is released. */
+        ESP_LOGE(TAG, "M5_HID result=too_many_keys action=release_all count=%u", count);
+        memset(s_key_refs, 0, sizeof(s_key_refs));
+        memset(s_modifier_refs, 0, sizeof(s_modifier_refs));
+        memset(s_macro_slots, 0, sizeof(s_macro_slots));
+        memset(report, 0, sizeof(report));
+        modifiers = 0;
     }
     if (!tud_hid_ready() ||
         !tud_hid_keyboard_report(M5_HID_KEYBOARD_REPORT_ID, modifiers, report)) {
@@ -337,6 +357,94 @@ static void m5_emit_keyboard_locked(void)
     (void) m5_flush_keyboard_locked();
 }
 
+static bool m5_flush_consumer_locked(void)
+{
+    uint16_t report;
+    if (s_consumer_release_pending) {
+        report = 0;
+    } else if (s_consumer_queue_count != 0) {
+        report = s_consumer_queue[s_consumer_queue_head];
+    } else {
+        return true;
+    }
+    if (!tud_hid_ready() ||
+        !tud_hid_report(M5_HID_CONSUMER_REPORT_ID, &report, sizeof(report))) {
+        return false;
+    }
+    if (s_consumer_release_pending) {
+        s_consumer_release_pending = false;
+    } else {
+        s_consumer_queue_head = (uint8_t) ((s_consumer_queue_head + 1) % M5_CONSUMER_QUEUE_DEPTH);
+        --s_consumer_queue_count;
+        s_consumer_release_pending = true;
+    }
+    return !s_consumer_release_pending && s_consumer_queue_count == 0;
+}
+
+static void m5_queue_consumer_locked(uint16_t usage)
+{
+    if (s_consumer_queue_count == M5_CONSUMER_QUEUE_DEPTH) {
+        ESP_LOGE(TAG, "M5_HID result=consumer_queue_full usage=%u", usage);
+        return;
+    }
+    const uint8_t tail = (uint8_t) ((s_consumer_queue_head + s_consumer_queue_count) % M5_CONSUMER_QUEUE_DEPTH);
+    s_consumer_queue[tail] = usage;
+    ++s_consumer_queue_count;
+    (void) m5_flush_consumer_locked();
+}
+
+static void m5_release_tap_locked(m5_macro_slot_t *slot)
+{
+    if (!slot->tap_active) return;
+    if (s_key_refs[slot->tap_usage]) --s_key_refs[slot->tap_usage];
+    for (uint8_t bit = 0; bit < 4; ++bit) {
+        if ((slot->tap_modifiers & (1U << bit)) && s_modifier_refs[bit]) --s_modifier_refs[bit];
+    }
+    slot->tap_active = false;
+}
+
+static void m5_release_slot_locked(m5_macro_slot_t *slot)
+{
+    m5_release_tap_locked(slot);
+    for (uint16_t usage = 1; usage < 256; ++usage) {
+        if (slot->held_keys[usage] && s_key_refs[usage]) --s_key_refs[usage];
+    }
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+        if ((slot->held_modifiers & (1U << bit)) && s_modifier_refs[bit]) --s_modifier_refs[bit];
+    }
+    memset(slot, 0, sizeof(*slot));
+}
+
+static bool m5_set_slot_key_locked(m5_macro_slot_t *slot, uint16_t usage, bool down)
+{
+    if (usage >= 0xe0 && usage <= 0xe7) {
+        const uint8_t bit = (uint8_t) (usage - 0xe0);
+        const uint8_t mask = (uint8_t) (1U << bit);
+        if (down && !(slot->held_modifiers & mask)) {
+            slot->held_modifiers |= mask;
+            if (s_modifier_refs[bit] != UINT8_MAX) ++s_modifier_refs[bit];
+            return true;
+        }
+        if (!down && (slot->held_modifiers & mask)) {
+            slot->held_modifiers &= (uint8_t) ~mask;
+            if (s_modifier_refs[bit]) --s_modifier_refs[bit];
+            return true;
+        }
+        return false;
+    }
+    if (down && !slot->held_keys[usage]) {
+        slot->held_keys[usage] = true;
+        if (s_key_refs[usage] != UINT8_MAX) ++s_key_refs[usage];
+        return true;
+    }
+    if (!down && slot->held_keys[usage]) {
+        slot->held_keys[usage] = false;
+        if (s_key_refs[usage]) --s_key_refs[usage];
+        return true;
+    }
+    return false;
+}
+
 void m5_hid_release_all(const char *reason)
 {
     if (s_macro_mutex == NULL || xSemaphoreTake(s_macro_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
@@ -344,10 +452,10 @@ void m5_hid_release_all(const char *reason)
     memset(s_modifier_refs, 0, sizeof(s_modifier_refs));
     memset(s_macro_slots, 0, sizeof(s_macro_slots));
     m5_emit_keyboard_locked();
-    if (tud_hid_ready()) {
-        const uint16_t released = 0;
-        tud_hid_report(M5_HID_CONSUMER_REPORT_ID, &released, sizeof(released));
-    }
+    s_consumer_queue_head = 0;
+    s_consumer_queue_count = 0;
+    s_consumer_release_pending = true;
+    (void) m5_flush_consumer_locked();
     xSemaphoreGive(s_macro_mutex);
     if (s_macro_task_handle != NULL) xTaskNotifyGive(s_macro_task_handle);
     ESP_LOGI(TAG, "M5_HID release_all reason=%s", reason ? reason : "unspecified");
@@ -359,8 +467,7 @@ static void m5_start_macro(uint16_t macro_index)
     m5_macro_slot_t *slot = NULL;
     for (size_t i = 0; i < M5_MACRO_SLOTS; ++i) {
         if (s_macro_slots[i].active && s_macro_slots[i].macro_index == macro_index) {
-            memset(s_key_refs, 0, sizeof(s_key_refs));
-            memset(s_modifier_refs, 0, sizeof(s_modifier_refs));
+            m5_release_slot_locked(&s_macro_slots[i]);
             m5_emit_keyboard_locked();
             slot = &s_macro_slots[i];
             break;
@@ -381,27 +488,26 @@ static void m5_macro_task(void *argument)
         if (xSemaphoreTake(s_macro_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             const int64_t now = esp_timer_get_time();
             (void) m5_flush_keyboard_locked();
+            (void) m5_flush_consumer_locked();
             for (size_t i = 0; s_ui_bundle.ready && i < M5_MACRO_SLOTS; ++i) {
                 m5_macro_slot_t *slot = &s_macro_slots[i];
                 if (!slot->active || now < slot->due_us) continue;
                 if (slot->tap_active) {
-                    if (s_key_refs[slot->tap_usage]) --s_key_refs[slot->tap_usage];
-                    for (uint8_t bit = 0; bit < 4; ++bit) if ((slot->tap_modifiers & (1U << bit)) && s_modifier_refs[bit]) --s_modifier_refs[bit];
-                    slot->tap_active = false;
+                    m5_release_tap_locked(slot);
                     m5_emit_keyboard_locked();
                     continue;
                 }
                 const m5_ui_macro_t *macro = &s_ui_bundle.macros[slot->macro_index];
-                if (slot->next_step >= macro->step_count) { slot->active = false; continue; }
+                if (slot->next_step >= macro->step_count) {
+                    m5_release_slot_locked(slot);
+                    m5_emit_keyboard_locked();
+                    continue;
+                }
                 const m5_ui_step_t *step = &s_ui_bundle.steps[macro->first_step + slot->next_step++];
                 if (step->kind == 3) {
                     slot->due_us = now + (int64_t) step->duration_ms * 1000;
                 } else if (step->kind == 4 && step->usage_page == 0x0c) {
-                    if (tud_hid_ready()) {
-                        tud_hid_report(M5_HID_CONSUMER_REPORT_ID, &step->usage, sizeof(step->usage));
-                        const uint16_t released = 0;
-                        tud_hid_report(M5_HID_CONSUMER_REPORT_ID, &released, sizeof(released));
-                    }
+                    m5_queue_consumer_locked(step->usage);
                 } else if (step->kind == 5 && step->usage < 0xe0 && step->usage < 256) {
                     if (s_key_refs[step->usage] != UINT8_MAX) ++s_key_refs[step->usage];
                     for (uint8_t bit = 0; bit < 4; ++bit) if ((step->usage_page & (1U << bit)) && s_modifier_refs[bit] != UINT8_MAX) ++s_modifier_refs[bit];
@@ -411,11 +517,9 @@ static void m5_macro_task(void *argument)
                     slot->due_us = now + (int64_t) (step->duration_ms ? step->duration_ms : 25) * 1000;
                     m5_emit_keyboard_locked();
                 } else if ((step->kind == 1 || step->kind == 2) && step->usage_page == 0x07 && step->usage < 256) {
-                    uint8_t *ref = step->usage >= 0xe0 && step->usage <= 0xe7
-                        ? &s_modifier_refs[step->usage - 0xe0] : &s_key_refs[step->usage];
-                    if (step->kind == 1 && *ref != UINT8_MAX) ++*ref;
-                    if (step->kind == 2 && *ref) --*ref;
-                    m5_emit_keyboard_locked();
+                    if (m5_set_slot_key_locked(slot, step->usage, step->kind == 1)) {
+                        m5_emit_keyboard_locked();
+                    }
                 }
             }
             const int64_t after = esp_timer_get_time();
@@ -426,7 +530,8 @@ static void m5_macro_task(void *argument)
                 const TickType_t candidate = remaining_us <= 0 ? 1 : pdMS_TO_TICKS((remaining_us + 999) / 1000);
                 if (wait_ticks == portMAX_DELAY || candidate < wait_ticks) wait_ticks = candidate;
             }
-            if (s_keyboard_report_pending && (wait_ticks == portMAX_DELAY || wait_ticks > 1)) {
+            if ((s_keyboard_report_pending || s_consumer_release_pending || s_consumer_queue_count != 0) &&
+                (wait_ticks == portMAX_DELAY || wait_ticks > 1)) {
                 wait_ticks = 1;
             }
             xSemaphoreGive(s_macro_mutex);
@@ -728,9 +833,9 @@ static bool m5_index_mjpeg(void)
         return false;
     }
     s_media.ready = true;
-    ESP_LOGI(TAG, "M5_MEDIA source=%s frames=%u bytes=%u largest=%u fps=30",
+    ESP_LOGI(TAG, "M5_MEDIA source=%s frames=%u bytes=%u largest=%u fps=%u",
              s_media.preloaded ? "psram" : "sd", s_media.frame_count,
-             s_media.file_size, s_media.largest_frame);
+             s_media.file_size, s_media.largest_frame, M5_SCREENSAVER_FPS);
     return true;
 }
 
@@ -789,7 +894,7 @@ static void m5_media_task(void *argument)
     }
     const bool media_ready = m5_index_mjpeg();
     if (!media_ready) {
-        ESP_LOGI(TAG, "M5_MEDIA source=none frames=0 fps=30");
+        ESP_LOGI(TAG, "M5_MEDIA source=none frames=0 fps=%u", M5_SCREENSAVER_FPS);
     }
     s_last_activity_us = esp_timer_get_time();
     ESP_LOGI(TAG, "M5_COMPLETE animation_fps=15 saver_ready=%u", media_ready);
@@ -887,13 +992,19 @@ static void m5_media_task(void *argument)
         }
 
         if (s_media.ready && now >= next_frame_us) {
+            const bool first_frame = next_frame_us == 0;
             const bool drawn = m5_decode_and_draw(saver_frame++);
             if (!drawn) {
                 ESP_LOGW(TAG, "M5_FRAME index=%u dropped=1", saver_frame - 1);
             }
             const int64_t period_us = 1000000 / M5_SCREENSAVER_FPS;
-            if (next_frame_us == 0) next_frame_us = now;
-            next_frame_us += period_us;
+            /* Start the playback clock once the cold first frame is ready;
+             * decoder initialization time is not a missed video deadline. */
+            if (first_frame) {
+                next_frame_us = esp_timer_get_time() + period_us;
+            } else {
+                next_frame_us += period_us;
+            }
             /* Drop timeline slots instead of slowing the whole video when a
              * read/decode overruns. Input therefore gets CPU time promptly. */
             if (next_frame_us <= esp_timer_get_time()) {

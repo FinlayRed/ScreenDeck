@@ -13,6 +13,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+const SCREENSAVER_FPS: u32 = 60;
+const SCREENSAVER_MAX_SECONDS: u32 = 30;
+const SCREENSAVER_MAX_FRAMES: u32 = SCREENSAVER_FPS * SCREENSAVER_MAX_SECONDS;
+
 const DEVICE_ICON_PIXELS: u16 = 149;
 const DEVICE_ICON_RADIUS: u16 = 12;
 
@@ -54,10 +58,35 @@ fn workspace_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-fn save_workspace(app: tauri::AppHandle, project: Project) -> Result<(), String> {
+fn save_workspace(
+    app: tauri::AppHandle,
+    mut project: Project,
+    preserve_asset_data: bool,
+) -> Result<(), String> {
+    let path = workspace_path(&app)?;
+    if preserve_asset_data {
+        let bytes =
+            fs::read(&path).map_err(|error| format!("could not read workspace assets: {error}"))?;
+        let saved: Project = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("saved workspace assets are invalid: {error}"))?;
+        let saved_assets: std::collections::HashMap<_, _> = saved
+            .assets
+            .into_iter()
+            .map(|asset| (asset.id.clone(), asset))
+            .collect();
+        for asset in &mut project.assets {
+            let saved = saved_assets
+                .get(&asset.id)
+                .ok_or_else(|| format!("saved workspace is missing asset {}", asset.id))?;
+            asset.data_url.clone_from(&saved.data_url);
+            asset.source_data_url.clone_from(&saved.source_data_url);
+            asset
+                .animation_data_url
+                .clone_from(&saved.animation_data_url);
+        }
+    }
     let bytes = serde_json::to_vec(&project)
         .map_err(|error| format!("could not serialize workspace: {error}"))?;
-    let path = workspace_path(&app)?;
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, bytes).map_err(|error| format!("could not save workspace: {error}"))?;
     fs::rename(&temporary, &path)
@@ -187,6 +216,10 @@ fn prepare_screensaver(path: &Path) -> Result<Vec<u8>, String> {
     let output =
         std::env::temp_dir().join(format!("screendeck-{stamp}-{}.mjpeg", std::process::id()));
     let ffmpeg = ffmpeg_path();
+    let video_filter = format!(
+        "fps={SCREENSAVER_FPS},scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,transpose=clock,format=yuvj420p"
+    );
+    let max_frames = SCREENSAVER_MAX_FRAMES.to_string();
     for quality in ["10", "20", "31"] {
         let result = Command::new(&ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
@@ -194,9 +227,9 @@ fn prepare_screensaver(path: &Path) -> Result<Vec<u8>, String> {
             .args([
                 "-an",
                 "-vf",
-                "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,transpose=clock,format=yuvj420p",
+                &video_filter,
                 "-frames:v",
-                "900",
+                &max_frames,
                 "-c:v",
                 "mjpeg",
                 "-q:v",
@@ -305,6 +338,7 @@ mod tests {
     #[test]
     fn compiler_emits_valid_sdb3_header() {
         let bundle = compiler::compile(&project()).unwrap();
+        assert_eq!(compiler::summarize(&project()).bundle_bytes, bundle.len());
         assert_eq!(&bundle[0..4], &0x3342_4453u32.to_le_bytes());
         assert_eq!(
             u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize,
@@ -376,17 +410,41 @@ mod tests {
         source.profiles[0].pages[0].buttons[0].radial = Some(model::RadialMenu {
             size: 4,
             items: vec![
-                model::RadialItem { icon_id: None, image_fit: Some("cover".into()), action: model::ActionKind::Macro, macro_id: Some("m1".into()) },
-                model::RadialItem { icon_id: None, image_fit: Some("contain".into()), action: model::ActionKind::PageNext, macro_id: None },
-                model::RadialItem { icon_id: None, image_fit: None, action: model::ActionKind::PagePrevious, macro_id: None },
-                model::RadialItem { icon_id: None, image_fit: Some("cover".into()), action: model::ActionKind::ProfileNext, macro_id: None },
+                model::RadialItem {
+                    icon_id: None,
+                    image_fit: Some("cover".into()),
+                    action: model::ActionKind::Macro,
+                    macro_id: Some("m1".into()),
+                },
+                model::RadialItem {
+                    icon_id: None,
+                    image_fit: Some("contain".into()),
+                    action: model::ActionKind::PageNext,
+                    macro_id: None,
+                },
+                model::RadialItem {
+                    icon_id: None,
+                    image_fit: None,
+                    action: model::ActionKind::PagePrevious,
+                    macro_id: None,
+                },
+                model::RadialItem {
+                    icon_id: None,
+                    image_fit: Some("cover".into()),
+                    action: model::ActionKind::ProfileNext,
+                    macro_id: None,
+                },
             ],
         });
         let restored = compiler::decompile(&compiler::compile(&source).unwrap()).unwrap();
         assert_eq!(restored.brightness_percent, 0);
         assert_eq!(restored.orientation, "landscape_flipped");
         assert!(!restored.screensaver_enabled);
-        let items = &restored.profiles[0].pages[0].buttons[0].radial.as_ref().unwrap().items;
+        let items = &restored.profiles[0].pages[0].buttons[0]
+            .radial
+            .as_ref()
+            .unwrap()
+            .items;
         assert_eq!(items.len(), 4);
         assert_eq!(items[0].action, model::ActionKind::Macro);
         assert_eq!(items[1].action, model::ActionKind::PageNext);
@@ -422,6 +480,73 @@ mod tests {
         let restored = compiler::decompile(&compiler::compile(&source).unwrap()).unwrap();
         assert!(restored.macros[0].steps.is_empty());
         assert!(model::validate(&restored).is_empty());
+    }
+
+    #[test]
+    fn validation_rejects_unbalanced_key_ownership() {
+        let mut source = project();
+        source.macros[0].steps = vec![
+            model::MacroStep {
+                kind: model::StepKind::KeyUp,
+                key: Some("F14".into()),
+                duration_ms: None,
+                modifiers: Vec::new(),
+            },
+            model::MacroStep {
+                kind: model::StepKind::KeyDown,
+                key: Some("F13".into()),
+                duration_ms: None,
+                modifiers: Vec::new(),
+            },
+            model::MacroStep {
+                kind: model::StepKind::KeyDown,
+                key: Some("F13".into()),
+                duration_ms: None,
+                modifiers: Vec::new(),
+            },
+        ];
+        let issues = model::validate(&source);
+        assert!(issues
+            .iter()
+            .any(|item| item.message.contains("F14 is not currently held")));
+        assert!(issues
+            .iter()
+            .any(|item| item.message.contains("F13 is already held")));
+        assert!(issues
+            .iter()
+            .any(|item| item.message.contains("F13 must be released")));
+    }
+
+    #[test]
+    fn validation_accepts_balanced_overlapping_keys() {
+        let mut source = project();
+        source.macros[0].steps = vec![
+            model::MacroStep {
+                kind: model::StepKind::KeyDown,
+                key: Some("F13".into()),
+                duration_ms: None,
+                modifiers: Vec::new(),
+            },
+            model::MacroStep {
+                kind: model::StepKind::KeyDown,
+                key: Some("F14".into()),
+                duration_ms: None,
+                modifiers: Vec::new(),
+            },
+            model::MacroStep {
+                kind: model::StepKind::KeyUp,
+                key: Some("F13".into()),
+                duration_ms: None,
+                modifiers: Vec::new(),
+            },
+            model::MacroStep {
+                kind: model::StepKind::KeyUp,
+                key: Some("F14".into()),
+                duration_ms: None,
+                modifiers: Vec::new(),
+            },
+        ];
+        assert!(model::validate(&source).is_empty());
     }
 
     #[test]
@@ -473,11 +598,46 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires FFmpeg"]
+    fn ffmpeg_converts_video_to_60fps_device_mjpeg() {
+        let media = prepare_screensaver(Path::new("../../../.m5_sample.mp4")).unwrap();
+        let frames = media
+            .windows(2)
+            .filter(|pair| *pair == [0xff, 0xd8])
+            .count();
+        assert_eq!(
+            frames, 12,
+            "the 0.2 second sample must contain 12 frames at 60 FPS"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg and a physical Screendeck connected to the USB-OTG port"]
+    fn physical_60fps_screensaver_conversion_and_upload() {
+        let media = prepare_screensaver(Path::new("../../../.m5_sample.mp4")).unwrap();
+        let frames = media
+            .windows(2)
+            .filter(|pair| *pair == [0xff, 0xd8])
+            .count();
+        assert_eq!(
+            frames, 12,
+            "the 0.2 second sample must contain 12 frames at 60 FPS"
+        );
+        let result = device::upload_screensaver(&media).unwrap();
+        assert_eq!(result.bytes_sent + result.resumed_at as usize, media.len());
+    }
+
+    #[test]
     #[ignore = "requires a physical Screendeck connected to the USB-OTG port"]
     fn physical_winusb_round_trip_and_sync() {
         let before = device::status();
         assert!(before.connected, "{}", before.detail);
         assert_eq!(before.capabilities & 0x1f, 0x1f);
+        assert_ne!(
+            before.capabilities & 0x200,
+            0,
+            "bundle batching not advertised"
+        );
         let mut sample = project();
         let icon = std::fs::read("icons/128x128.png").unwrap();
         sample.assets.push(model::Asset {
@@ -495,9 +655,8 @@ mod tests {
             animation_fps: 0,
         });
         sample.profiles[0].pages[0].buttons[0].icon_id = Some("physical-icon".into());
-        let summary = compiler::summarize(&sample);
         let bundle = compiler::compile(&sample).unwrap();
-        let result = device::sync(&bundle, summary.fingerprint).unwrap();
+        let result = device::sync(&bundle, compiler::fingerprint(&bundle)).unwrap();
         assert!(result.generation > 0);
         std::thread::sleep(std::time::Duration::from_secs(1));
         let mut after = device::status();
