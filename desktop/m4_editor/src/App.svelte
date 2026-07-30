@@ -334,6 +334,11 @@
     profileIndex = project.profiles.length - 1; pageIndex = 0; changed("Profile added");
   }
 
+  function updateIdleMinutes(value: number) {
+    project.screensaverTimeoutSeconds = Math.max(5, Math.min(3600, Math.round(value * 60)));
+    changed("Screensaver delay changed");
+  }
+
   function selectProfile(index: number) { profileIndex = index; pageIndex = 0; selectedButton = 0; }
   function selectPage(index: number) { pageIndex = index; selectedButton = 0; }
 
@@ -953,7 +958,7 @@
 <div class="app-shell">
   <header class="topbar" inert={modalOpen}>
     <div class="brand"><div class="brand-mark"><Layers3 size={17}/></div><span>Screendeck</span></div>
-    <div class="project-title"><input aria-label="Project name" bind:value={project.name} on:input={() => changed()} /></div>
+    <div class="project-title"><input aria-label="Project name" bind:value={project.name} on:input={() => changed()} on:keydown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); setNotice("info", "Project title updated"); } }} /></div>
     <nav class="toolbar" aria-label="Project actions">
       <button class="icon-button" aria-label="New project" title="New project" on:click={newProject}><FilePlus2 size={17}/></button>
       <button class="icon-button" aria-label="Open project" title="Open project" on:click={openProject}><FolderOpen size={17}/></button>
@@ -999,7 +1004,7 @@
       <select id="orientation" bind:value={project.orientation} on:change={() => changed("Orientation changed")}><option value="landscape">Landscape</option><option value="landscape_flipped">Landscape · flipped</option></select>
       <label class="check-setting"><input type="checkbox" bind:checked={project.screensaverEnabled} on:change={() => changed("Screensaver setting changed")}/> Screensaver enabled</label>
       <label for="screensaver-delay">Idle timeout</label>
-      <div><input id="screensaver-delay" type="number" min="5" max="3600" step="5" bind:value={project.screensaverTimeoutSeconds} on:change={() => changed("Screensaver delay changed")}/><span>seconds</span></div>
+      <div><input id="screensaver-delay" type="number" min="0.08" max="60" step="any" value={Number((project.screensaverTimeoutSeconds / 60).toFixed(2))} on:change={(event) => updateIdleMinutes(Number(event.currentTarget.value))}/><span>minutes</span></div>
     </div>
   </aside>
 
