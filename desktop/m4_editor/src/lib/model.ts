@@ -66,3 +66,18 @@ export const CONSUMER_KEYS = [
 export function cloneProject(project: Project): Project {
   return structuredClone(project);
 }
+
+export function moveButton(buttons: Button[], sourceIndex: number, targetIndex: number): boolean {
+  if (
+    sourceIndex === targetIndex ||
+    !Number.isInteger(sourceIndex) ||
+    !Number.isInteger(targetIndex) ||
+    sourceIndex < 0 ||
+    targetIndex < 0 ||
+    sourceIndex >= buttons.length ||
+    targetIndex >= buttons.length
+  ) return false;
+
+  [buttons[sourceIndex], buttons[targetIndex]] = [buttons[targetIndex], buttons[sourceIndex]];
+  return true;
+}

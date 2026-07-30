@@ -25,8 +25,8 @@
   import X from "@lucide/svelte/icons/x";
   import { backupBundle, deviceStatus, loadWorkspace, openArchive, prepareIconAnimation, saveArchive, saveWorkspace, syncFromDevice, syncProject, testScreensaver as testScreensaverOnDevice, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
   import type { CompileSummary, DeviceStatus } from "./lib/backend";
-  import { CONSUMER_KEYS, KEYBOARD_KEYS, starterProject } from "./lib/model";
-  import type { ActionKind, Asset, Macro, MacroStep, Project, RadialSize } from "./lib/model";
+  import { CONSUMER_KEYS, KEYBOARD_KEYS, moveButton, starterProject } from "./lib/model";
+  import type { ActionKind, Asset, Button, Macro, MacroStep, Project, RadialSize } from "./lib/model";
   import { radialDirection, radialGridOffset } from "./lib/radial";
 
   let project: Project = starterProject();
@@ -53,6 +53,16 @@
   let renameDialog: { target: ContextTarget; value: string } | null = null;
   let renameInput: HTMLInputElement | null = null;
   let deleteDialog: { target: ContextTarget; name: string } | null = null;
+  let draggedButtonIndex: number | null = null;
+  let dragOverButtonIndex: number | null = null;
+  let buttonPointerDrag: {
+    sourceIndex: number;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    sourceElement: HTMLButtonElement;
+  } | null = null;
+  let suppressButtonClick = false;
 
   $: profile = project.profiles[profileIndex];
   $: page = profile.pages[pageIndex];
@@ -433,7 +443,7 @@
 
   function iconFor(assetId?: string) { return assetId ? assetsById.get(assetId)?.dataUrl : undefined; }
 
-  async function importFiles(files: FileList | File[]) {
+  async function importFiles(files: FileList | File[], targetButtonIndex = selectedButton) {
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/") && !file.type.startsWith("video/")) continue;
       const sourceDataUrl = await new Promise<string>((resolve, reject) => {
@@ -473,13 +483,116 @@
         animationFps
       };
       project.assets = [...project.assets, asset];
-      page.buttons[selectedButton].iconId = asset.id;
-      page.buttons[selectedButton].imageFit = "cover";
+      page.buttons[targetButtonIndex].iconId = asset.id;
+      page.buttons[targetButtonIndex].imageFit = "cover";
     }
+    selectedButton = targetButtonIndex;
     changed("Icon imported and assigned");
   }
 
-  function dropIcon(event: DragEvent) { event.preventDefault(); if (event.dataTransfer?.files.length) importFiles(event.dataTransfer.files); }
+  function isButtonConfigured(target: Button) {
+    return target.action !== "none" || Boolean(target.iconId || target.macroId || target.radial);
+  }
+
+  function startButtonPointerDrag(event: PointerEvent, index: number) {
+    if (!event.isPrimary || event.button !== 0 || !isButtonConfigured(page.buttons[index])) return;
+    const sourceElement = event.currentTarget as HTMLButtonElement;
+    buttonPointerDrag = {
+      sourceIndex: index,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      sourceElement,
+    };
+    selectedButton = index;
+    sourceElement.setPointerCapture(event.pointerId);
+  }
+
+  function moveButtonPointerDrag(event: PointerEvent) {
+    if (!buttonPointerDrag || event.pointerId !== buttonPointerDrag.pointerId) return;
+    const distance = Math.hypot(
+      event.clientX - buttonPointerDrag.startX,
+      event.clientY - buttonPointerDrag.startY,
+    );
+    if (draggedButtonIndex === null && distance < 6) return;
+
+    event.preventDefault();
+    draggedButtonIndex = buttonPointerDrag.sourceIndex;
+    suppressButtonClick = true;
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-button-index]");
+    const targetIndex = Number(target?.dataset.buttonIndex);
+    dragOverButtonIndex = Number.isInteger(targetIndex) && targetIndex >= 0 && targetIndex < page.buttons.length
+      ? targetIndex
+      : null;
+  }
+
+  function finishButtonPointerDrag(event: PointerEvent) {
+    if (!buttonPointerDrag || event.pointerId !== buttonPointerDrag.pointerId) return;
+    const { sourceIndex, sourceElement } = buttonPointerDrag;
+    const targetIndex = dragOverButtonIndex;
+    const wasDragging = draggedButtonIndex !== null;
+    if (sourceElement.hasPointerCapture(event.pointerId)) sourceElement.releasePointerCapture(event.pointerId);
+    buttonPointerDrag = null;
+
+    if (wasDragging && targetIndex !== null) {
+      const targetWasConfigured = isButtonConfigured(page.buttons[targetIndex]);
+      if (moveButton(page.buttons, sourceIndex, targetIndex)) {
+        selectedButton = targetIndex;
+        selectedRadialItem = 0;
+        changed(targetWasConfigured
+          ? `Buttons ${sourceIndex + 1} and ${targetIndex + 1} swapped`
+          : `Button moved to position ${targetIndex + 1}`);
+      }
+    }
+
+    draggedButtonIndex = null;
+    dragOverButtonIndex = null;
+    if (wasDragging) setTimeout(() => suppressButtonClick = false, 0);
+  }
+
+  function cancelButtonPointerDrag(event: PointerEvent) {
+    if (!buttonPointerDrag || event.pointerId !== buttonPointerDrag.pointerId) return;
+    buttonPointerDrag = null;
+    draggedButtonIndex = null;
+    dragOverButtonIndex = null;
+    suppressButtonClick = false;
+  }
+
+  function selectButtonFromClick(index: number) {
+    if (suppressButtonClick) {
+      suppressButtonClick = false;
+      return;
+    }
+    selectedButton = index;
+  }
+
+  function dragOverButton(event: DragEvent, index: number) {
+    const isFile = event.dataTransfer?.types.includes("Files");
+    if (!isFile) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    dragOverButtonIndex = index;
+  }
+
+  async function dropOnButton(event: DragEvent, targetIndex: number) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer?.files.length) {
+      await importFiles(event.dataTransfer.files, targetIndex);
+      draggedButtonIndex = null;
+      dragOverButtonIndex = null;
+      return;
+    }
+    dragOverButtonIndex = null;
+  }
+
+  function leaveButtonGrid(event: DragEvent) {
+    const relatedTarget = event.relatedTarget;
+    if (!(relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(relatedTarget)) {
+      dragOverButtonIndex = null;
+    }
+  }
+
   function assignAsset(id: string) { page.buttons[selectedButton].iconId = id; page.buttons[selectedButton].imageFit ??= "cover"; changed("Icon assigned"); }
   function clearIcon() { page.buttons[selectedButton].iconId = undefined; page.buttons[selectedButton].imageFit = undefined; changed("Icon removed"); }
   function removeAsset(id: string) {
@@ -497,7 +610,7 @@
   refreshDevice();
 </script>
 
-<svelte:window on:click={closeContextMenu} on:blur={closeContextMenu} on:keydown={(event) => {
+<svelte:window on:click={closeContextMenu} on:blur={closeContextMenu} on:pointermove={moveButtonPointerDrag} on:pointerup={finishButtonPointerDrag} on:pointercancel={cancelButtonPointerDrag} on:keydown={(event) => {
   if (event.key === "Escape") { closeContextMenu(); renameDialog = null; deleteDialog = null; }
   if (event.ctrlKey && event.key.toLowerCase() === "s") { event.preventDefault(); saveProject(event.shiftKey); }
 }} />
@@ -600,10 +713,24 @@
       <div class="pager"><button on:click={() => pageIndex = Math.max(0, pageIndex - 1)} disabled={pageIndex === 0}><ChevronLeft size={16}/></button><span>{pageIndex + 1} / {profile.pages.length}</span><button on:click={() => pageIndex = Math.min(profile.pages.length - 1, pageIndex + 1)} disabled={pageIndex === profile.pages.length - 1}><ChevronRight size={16}/></button></div>
     </div>
     <section class="device-preview" aria-label="1280 by 720 Screendeck preview">
-      <div class="grid">
+      <div class="grid" role="group" aria-label="Button layout" on:dragleave={leaveButtonGrid}>
         {#each page.buttons as tile, index}
           {@const icon = iconFor(tile.iconId)}
-          <button class:selected={index === selectedButton} class:has-radial={Boolean(tile.radial)} class="tile" aria-label={`Button ${index + 1}`} on:click={() => selectedButton = index} on:dragover={(e) => e.preventDefault()} on:drop={dropIcon}>
+          <button
+            class:selected={index === selectedButton}
+            class:has-radial={Boolean(tile.radial)}
+            class:configured={isButtonConfigured(tile)}
+            class:dragging={index === draggedButtonIndex}
+            class:drop-target={index === dragOverButtonIndex && index !== draggedButtonIndex}
+            class="tile"
+            aria-label={`Button ${index + 1}`}
+            aria-grabbed={index === draggedButtonIndex}
+            data-button-index={index}
+            on:click={() => selectButtonFromClick(index)}
+            on:pointerdown={(event) => startButtonPointerDrag(event, index)}
+            on:dragover={(event) => dragOverButton(event, index)}
+            on:drop={(event) => dropOnButton(event, index)}
+          >
             {#if icon}<img class:contained={tile.imageFit === "contain"} src={icon} alt="" draggable="false"/>
             {:else if tile.action === "page_previous"}<ChevronLeft size={24}/>
             {:else if tile.action === "page_next"}<ChevronRight size={24}/>
