@@ -34,7 +34,7 @@
   import { backupBundle, deviceStatus, loadWorkspace, openArchive, prepareIconAnimation, saveArchive, saveWorkspace, syncFromDevice, syncProject, testScreensaver as testScreensaverOnDevice, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
   import type { CompileSummary, DeviceStatus } from "./lib/backend";
   import { CONSUMER_KEYS, KEYBOARD_KEYS, moveButton, starterProject } from "./lib/model";
-  import type { ActionKind, Asset, Button, Macro, MacroStep, Project, RadialSize } from "./lib/model";
+  import type { ActionKind, Asset, Button, EmptyButtonStyle, Macro, MacroStep, Project, RadialSize } from "./lib/model";
   import { createHistory, recordHistory, redoHistory, undoHistory } from "./lib/history";
   import { radialDirection, radialGridOffset } from "./lib/radial";
 
@@ -337,6 +337,11 @@
   function updateIdleMinutes(value: number) {
     project.screensaverTimeoutSeconds = Math.max(5, Math.min(3600, Math.round(value * 60)));
     changed("Screensaver delay changed");
+  }
+
+  function updateEmptyButtonStyle(value: string) {
+    project.emptyButtonStyle = value as EmptyButtonStyle;
+    changed("Empty key appearance changed");
   }
 
   function selectProfile(index: number) { profileIndex = index; pageIndex = 0; selectedButton = 0; }
@@ -1002,6 +1007,8 @@
       <div class="brightness-control"><input id="brightness" type="range" min="0" max="100" step="5" style={`--range-progress:${project.brightnessPercent}%`} bind:value={project.brightnessPercent} on:change={() => changed("Brightness changed")}/><output for="brightness">{project.brightnessPercent}%</output></div>
       <label for="orientation">Orientation</label>
       <select id="orientation" bind:value={project.orientation} on:change={() => changed("Orientation changed")}><option value="landscape">Landscape</option><option value="landscape_flipped">Landscape · flipped</option></select>
+      <label for="empty-button-style">Empty keys</label>
+      <select id="empty-button-style" value={project.emptyButtonStyle} on:change={(event) => updateEmptyButtonStyle(event.currentTarget.value)}><option value="grey">Grey</option><option value="hidden">Hidden</option></select>
       <label class="check-setting"><input type="checkbox" bind:checked={project.screensaverEnabled} on:change={() => changed("Screensaver setting changed")}/> Screensaver enabled</label>
       <label for="screensaver-delay">Idle timeout</label>
       <div><input id="screensaver-delay" type="number" min="0.08" max="60" step="any" value={Number((project.screensaverTimeoutSeconds / 60).toFixed(2))} on:change={(event) => updateIdleMinutes(Number(event.currentTarget.value))}/><span>minutes</span></div>
@@ -1116,6 +1123,7 @@
             class:selected={index === selectedButton}
             class:has-radial={Boolean(tile.radial)}
             class:configured={isButtonConfigured(tile)}
+            class:hidden-empty={project.emptyButtonStyle === "hidden" && !tile.iconId}
             class:dragging={index === draggedButtonIndex}
             class:drop-target={index === dragOverButtonIndex && index !== draggedButtonIndex}
             class:keyboard-moving={index === keyboardMoveSource}
@@ -1139,7 +1147,6 @@
             {:else if tile.action === "page_next"}<ChevronRight size={24}/>
             {:else if tile.action === "profile_next"}<Layers3 size={22}/>
             {:else if tile.action === "macro"}<Keyboard size={21}/>
-            {:else}<span class="empty-index">{index + 1}</span>
             {/if}
           </button>
         {/each}
@@ -1157,7 +1164,7 @@
   </main>
 
   <aside class="inspector" inert={modalOpen}>
-    <div class="inspector-tabs"><h2>Button {selectedButton + 1}</h2><span>Row {Math.floor(selectedButton / 8) + 1} · Column {(selectedButton % 8) + 1}</span></div>
+    <div class="inspector-tabs"><h2>Key settings</h2><span>Row {Math.floor(selectedButton / 8) + 1} · Column {(selectedButton % 8) + 1}</span></div>
     <div class="inspector-scroll">
       <label>Action<select value={button.action} on:change={(e) => updateButton("action", e.currentTarget.value)}><option value="none">None</option><option value="macro">Run macro</option><option value="page_next">Next page</option><option value="page_previous">Previous page</option><option value="profile_next">Next profile</option></select></label>
 

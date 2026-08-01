@@ -353,6 +353,35 @@ mod tests {
     }
 
     #[test]
+    fn compiler_round_trips_device_empty_button_style() {
+        for (style, encoded) in [("grey", 0u32), ("hidden", 2)] {
+            let mut source = project();
+            source.empty_button_style = style.into();
+            let bundle = compiler::compile(&source).unwrap();
+            let settings = u32::from_le_bytes(bundle[84..88].try_into().unwrap());
+            assert_eq!((settings >> 10) & 0x3, encoded);
+            assert_eq!(
+                compiler::decompile(&bundle).unwrap().empty_button_style,
+                style
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_black_empty_buttons_import_as_grey() {
+        let source = project();
+        let mut bundle = compiler::compile(&source).unwrap();
+        let settings = u32::from_le_bytes(bundle[84..88].try_into().unwrap()) | (1 << 10);
+        bundle[84..88].copy_from_slice(&settings.to_le_bytes());
+        let payload_crc = compiler::crc32(&bundle[16..]);
+        bundle[12..16].copy_from_slice(&payload_crc.to_le_bytes());
+        assert_eq!(
+            compiler::decompile(&bundle).unwrap().empty_button_style,
+            "grey"
+        );
+    }
+
+    #[test]
     fn compiler_serializes_button_macro_references_and_steps() {
         let bundle = compiler::compile(&project()).unwrap();
         let payload = &bundle[16..];

@@ -21,6 +21,8 @@ pub struct Project {
     pub orientation: String,
     #[serde(default = "default_true")]
     pub screensaver_enabled: bool,
+    #[serde(default = "default_empty_button_style")]
+    pub empty_button_style: String,
     pub profiles: Vec<Profile>,
     pub macros: Vec<Macro>,
     pub assets: Vec<Asset>,
@@ -87,6 +89,9 @@ fn default_orientation() -> String {
 }
 fn default_true() -> bool {
     true
+}
+fn default_empty_button_style() -> String {
+    "grey".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -211,6 +216,9 @@ pub fn migrate(project: &mut Project) {
             project.orientation = "landscape".into();
         }
     }
+    if project.empty_button_style == "black" {
+        project.empty_button_style = "grey".into();
+    }
 }
 
 pub fn validate(project: &Project) -> Vec<ValidationIssue> {
@@ -243,6 +251,12 @@ pub fn validate(project: &Project) -> Vec<ValidationIssue> {
         issues.push(issue(
             "orientation",
             "Orientation must be landscape or landscape flipped.",
+        ));
+    }
+    if !matches!(project.empty_button_style.as_str(), "grey" | "hidden") {
+        issues.push(issue(
+            "emptyButtonStyle",
+            "Empty key appearance must be grey or hidden.",
         ));
     }
     if project.profiles.is_empty() || project.profiles.len() > MAX_PROFILES {

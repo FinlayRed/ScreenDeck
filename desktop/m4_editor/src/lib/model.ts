@@ -1,5 +1,6 @@
 export type StepKind = "key_press" | "key_down" | "key_up" | "delay" | "consumer";
 export type ActionKind = "macro" | "page_next" | "page_previous" | "profile_next" | "none";
+export type EmptyButtonStyle = "grey" | "hidden";
 
 export interface MacroStep { kind: StepKind; key?: string; durationMs?: number; modifiers?: string[] }
 export interface Macro { id: string; name: string; steps: MacroStep[] }
@@ -27,6 +28,7 @@ export interface Project {
   brightnessPercent: number;
   orientation: "landscape" | "landscape_flipped";
   screensaverEnabled: boolean;
+  emptyButtonStyle: EmptyButtonStyle;
   profiles: Profile[];
   macros: Macro[];
   assets: Asset[];
@@ -48,6 +50,7 @@ export function starterProject(): Project {
     brightnessPercent: 80,
     orientation: "landscape",
     screensaverEnabled: true,
+    emptyButtonStyle: "grey",
     profiles: [{ id: "profile-1", name: "Default", pages: [first, page("page-2", "Media")] }],
     macros: [],
     assets: []

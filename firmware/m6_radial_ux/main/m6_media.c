@@ -191,6 +191,7 @@ static uint8_t s_visible_animation_count;
 static uint8_t s_visible_animation_cursor;
 static bool s_screensaver_enabled = true;
 static uint8_t s_brightness_percent = 80;
+static uint8_t s_empty_button_style;
 static lv_obj_t *s_radial_overlay;
 static lv_obj_t *s_radial_nodes[8];
 static lv_obj_t *s_radial_highlights[8];
@@ -437,6 +438,8 @@ static bool m5_load_ui_bundle(void)
         ? header->flags : M5_DEFAULT_SCREENSAVER_IDLE_SECONDS;
     s_brightness_percent = (header->settings & 0xff) <= 100 ? header->settings & 0xff : 80;
     s_screensaver_enabled = (header->settings & (1U << 9)) != 0;
+    s_empty_button_style = (header->settings >> 10) & 0x03;
+    if (s_empty_button_style != 2) s_empty_button_style = 0;
     ESP_ERROR_CHECK(bsp_display_brightness_set(s_brightness_percent));
     lv_display_set_rotation(s_display, (header->settings & (1U << 8)) ? LV_DISPLAY_ROTATION_180 : LV_DISPLAY_ROTATION_0);
     ESP_LOGI(TAG, "M6_UI bundle=loaded schema=3 profiles=%u pages=%u assets=%u macros=%u radials=%u bytes=%u",
@@ -998,8 +1001,13 @@ static void m5_render_active_ui(void)
             lv_obj_set_style_transform_height(tile, 0, LV_STATE_PRESSED);
             const m5_ui_button_t *definition = s_ui_bundle.ready
                 ? &s_ui_bundle.buttons[(size_t) s_current_page * M5_BUTTONS + index] : NULL;
-            lv_obj_set_style_bg_color(tile, lv_color_hex(0x202126), 0);
-            lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
+            const bool has_icon = definition && definition->asset_index != UINT16_MAX;
+            if (!has_icon && s_ui_bundle.ready && s_empty_button_style == 2) {
+                lv_obj_set_style_bg_opa(tile, LV_OPA_TRANSP, 0);
+            } else {
+                lv_obj_set_style_bg_color(tile, lv_color_hex(0x202126), 0);
+                lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
+            }
             lv_obj_add_event_cb(tile, m5_tile_event_cb, LV_EVENT_ALL, (void *) (uintptr_t) index);
             lv_obj_t *icon;
             if (definition && definition->asset_index != UINT16_MAX) {
@@ -1012,8 +1020,15 @@ static void m5_render_active_ui(void)
                         jpeg_decoder_get_info(s_ui_bundle.payload + first->offset, first->length, &info) == ESP_OK &&
                         info.width == tile_size && info.height == tile_size;
                 }
+                /* LVGL's COVER alignment can round an upscaled static image
+                 * one pixel inward, exposing the grey tile at the left and
+                 * bottom edges. Give full-bleed static artwork one clipped
+                 * pixel of overscan on every side. */
+                const bool static_cover =
+                    s_ui_bundle.assets[asset_index].type != 2 && definition->fit == 0;
+                const int icon_size = tile_size + (static_cover ? 2 : 0);
                 icon = lv_image_create(tile);
-                lv_obj_set_size(icon, tile_size, tile_size);
+                lv_obj_set_size(icon, icon_size, icon_size);
                 /* Animated frames have their rounded #202126 corners baked
                  * by the editor. Keep clip_radius at zero for those frames so
                  * the ESP32-P4 image accelerator remains eligible. Static
@@ -1025,7 +1040,11 @@ static void m5_render_active_ui(void)
                 lv_obj_set_scrollbar_mode(icon, LV_SCROLLBAR_MODE_OFF);
                 lv_image_set_src(icon, &s_ui_bundle.images[definition->asset_index]);
                 lv_image_set_inner_align(icon, definition->fit ? LV_IMAGE_ALIGN_CONTAIN : LV_IMAGE_ALIGN_COVER);
-                lv_obj_center(icon);
+                if (static_cover) {
+                    lv_obj_set_pos(icon, -1, -1);
+                } else {
+                    lv_obj_center(icon);
+                }
                 if (s_ui_bundle.assets[asset_index].type == 2 && s_visible_animation_count < M5_BUTTONS) {
                     m5_visible_animation_t *visible = &s_visible_animations[s_visible_animation_count++];
                     *visible = (m5_visible_animation_t) {.image = icon, .asset_index = asset_index};

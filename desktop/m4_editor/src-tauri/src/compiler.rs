@@ -193,7 +193,11 @@ fn compile_validated(project: &Project) -> Result<Vec<u8>, CompileError> {
     payload.extend_from_slice(&(radial_item_count as u32).to_le_bytes());
     let settings = u32::from(project.brightness_percent)
         | (u32::from(project.orientation == "landscape_flipped") << 8)
-        | (u32::from(project.screensaver_enabled) << 9);
+        | (u32::from(project.screensaver_enabled) << 9)
+        | (match project.empty_button_style.as_str() {
+            "hidden" => 2,
+            _ => 0,
+        } << 10);
     payload.extend_from_slice(&settings.to_le_bytes());
 
     let mut first_page = 0u16;
@@ -821,6 +825,11 @@ pub fn decompile(bundle: &[u8]) -> Result<Project, String> {
         }
         .into(),
         screensaver_enabled: u32_at(p, 68)? & (1 << 9) != 0,
+        empty_button_style: match (u32_at(p, 68)? >> 10) & 0x3 {
+            2 => "hidden",
+            _ => "grey",
+        }
+        .into(),
         profiles,
         macros,
         assets,

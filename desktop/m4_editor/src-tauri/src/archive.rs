@@ -47,6 +47,7 @@ pub fn save(path: &Path, project: &Project) -> Result<(), ArchiveError> {
         brightness_percent: project.brightness_percent,
         orientation: project.orientation.clone(),
         screensaver_enabled: project.screensaver_enabled,
+        empty_button_style: project.empty_button_style.clone(),
         profiles: project.profiles.clone(),
         macros: project.macros.clone(),
         assets: project
