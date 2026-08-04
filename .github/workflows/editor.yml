@@ -15,8 +15,8 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -31,11 +31,12 @@ jobs:
     runs-on: ubuntu-latest
     container: espressif/idf:v5.5.4
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
-      - run: idf.py -C firmware build
-      - uses: actions/upload-artifact@v4
+      - name: Build firmware
+        run: /opt/esp/entrypoint.sh idf.py -C firmware build
+      - uses: actions/upload-artifact@v7
         with:
           name: screendeck-firmware
           path: |

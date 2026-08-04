@@ -32,12 +32,11 @@ Firmware builds require an activated [ESP-IDF 5.5.4](https://docs.espressif.com/
 - `firmware/` — current ESP-IDF firmware
 - `scripts/` — media conversion utilities
 - `tests/` — host-side protocol and gesture checks
-- `docs/` — protocol, project plan, and milestone records
 - `vendor/` — pinned Waveshare board support submodule
 
 The UART USB port handles flashing and logs. The separate USB-OTG port carries HID output and editor sync.
 
-See [editor/README.md](editor/README.md), [firmware/README.md](firmware/README.md), and [docs/protocol.md](docs/protocol.md) for details.
+See [editor/README.md](editor/README.md) and [firmware/README.md](firmware/README.md) for details.
 
 ## License
 

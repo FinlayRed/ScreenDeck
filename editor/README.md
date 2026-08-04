@@ -12,7 +12,7 @@ npm run tauri dev
 
 Build the NSIS installer with `./build.ps1 -Target editor`. A browser-only preview is available through `npm run dev`, but device sync and file dialogs require Tauri.
 
-Projects use `.sdeck` ZIP archives. Compiled device bundles use the versioned `.sdb` format described in [the protocol documentation](../docs/protocol.md).
+Projects use `.sdeck` ZIP archives. Compiled device bundles use the versioned `.sdb` format.
 
 The ignored Rust test `physical_winusb_round_trip_and_sync` requires a connected ScreenDeck:
 
