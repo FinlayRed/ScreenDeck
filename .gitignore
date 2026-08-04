@@ -1,44 +1,32 @@
-# ESP-IDF build output
-build/
-.m0_verify/
-.m1_verify/
-.m5_build*/
-.m5_direct/
-.m5_verify*/
+# ESP-IDF
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/dependencies.lock
 .ccache/
-sdkconfig.old
-managed_components/
 
-# Desktop build/dependency output
-node_modules/
-dist/
-target/
-target-packaged/
-target-fixed/
-target-fast/
-target-batched/
-target-converter/
-target-commit-timeout/
-target-native-fps/
-target-quality/
-target-m5-complete/
+# Editor
+editor/node_modules/
+editor/dist/
+editor/src-tauri/target/
+editor/src-tauri/gen/
+
+# Local output
+artifacts/
+*.log
+*.sdb
+*.sdeck
+*.mjpg
+
+# Tools and editors
+.tools/
 __pycache__/
 *.pyc
-
-# Editor and OS noise
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-*.log
 
-# Local M5 media smoke-test output
-.m5_sample.*
-.m5_icon-*.jpg
-firmware/m5_animated_media/build_m5_complete/
-
-firmware/m6_radial_ux/build
-firmware/m6_radial_ux/build_current
-
-.tools/
+# Local hardware work
 enclosure/
