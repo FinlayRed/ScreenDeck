@@ -1,7 +1,7 @@
 <script lang="ts">
   import { open, save } from "@tauri-apps/plugin-dialog";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { onDestroy, tick } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import { flip } from "svelte/animate";
   import Archive from "@lucide/svelte/icons/archive";
   import Check from "@lucide/svelte/icons/check";
@@ -31,7 +31,7 @@
   import Upload from "@lucide/svelte/icons/upload";
   import Usb from "@lucide/svelte/icons/usb";
   import X from "@lucide/svelte/icons/x";
-  import { backupBundle, deviceStatus, loadWorkspace, openArchive, prepareIconAnimation, saveArchive, saveWorkspace, syncFromDevice, syncProject, testScreensaver as testScreensaverOnDevice, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
+  import { backupBundle, deviceStatus, exitApplication, loadWorkspace, openArchive, prepareIconAnimation, saveArchive, saveWorkspace, syncFromDevice, syncProject, testScreensaver as testScreensaverOnDevice, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
   import type { CompileSummary, DeviceStatus } from "./lib/backend";
   import { CONSUMER_KEYS, KEYBOARD_KEYS, moveButton, starterProject } from "./lib/model";
   import type { ActionKind, Asset, Button, EmptyButtonStyle, Macro, MacroStep, Project, RadialSize } from "./lib/model";
@@ -164,6 +164,14 @@
     rememberInvoker();
     dirtyDialog = { action, run };
     tick().then(() => dirtyCancel?.focus());
+  }
+
+  async function closeApplication() {
+    try { await exitApplication(); }
+    catch (error) {
+      try { await getCurrentWindow().destroy(); }
+      catch (fallbackError) { setNotice("error", "Could not close Screendeck", `${String(error)}\n${String(fallbackError)}`); }
+    }
   }
 
   async function resolveDirty(choice: "save" | "discard") {
@@ -943,13 +951,15 @@
   restoreWorkspace();
   refreshDevice();
   devicePoll = setInterval(() => { if (!busy) void refreshDevice(); }, 5000);
-  if ("__TAURI_INTERNALS__" in window) {
-    getCurrentWindow().onCloseRequested((event) => {
+  onMount(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    void getCurrentWindow().onCloseRequested((event) => {
       if (!dirty) return;
       event.preventDefault();
-      guardReplacement("close Screendeck", () => getCurrentWindow().destroy());
-    }).then((unlisten) => removeCloseListener = unlisten);
-  }
+      if (!dirtyDialog) guardReplacement("close Screendeck", closeApplication);
+    }).then((unlisten) => removeCloseListener = unlisten)
+      .catch((error) => setNotice("error", "Could not listen for window close", String(error)));
+  });
   onDestroy(() => {
     clearTimeout(autosaveTimer);
     clearTimeout(validationTimer);
@@ -962,7 +972,7 @@
 
 <div class="app-shell">
   <header class="topbar" inert={modalOpen}>
-    <div class="brand"><div class="brand-mark"><Layers3 size={17}/></div><span>Screendeck</span></div>
+    <div class="brand"><div class="brand-mark"><Layers3 size={17}/></div><span>Screendeck</span><span class="version">0.6.2</span></div>
     <div class="project-title"><input aria-label="Project name" bind:value={project.name} on:input={() => changed()} on:keydown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); setNotice("info", "Project title updated"); } }} /></div>
     <nav class="toolbar" aria-label="Project actions">
       <button class="icon-button" aria-label="New project" title="New project" on:click={newProject}><FilePlus2 size={17}/></button>

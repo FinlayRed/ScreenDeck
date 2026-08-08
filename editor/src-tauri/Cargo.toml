@@ -1,6 +1,6 @@
 [package]
 name = "screendeck-editor"
-version = "0.6.0"
+version = "0.6.2"
 description = "Screendeck Windows macro editor"
 authors = ["Screendeck"]
 license = "GPL-3.0-or-later"
