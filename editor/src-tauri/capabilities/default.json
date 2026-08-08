@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Main Screendeck editor window",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
+  "permissions": ["core:default", "core:window:allow-destroy", "dialog:allow-open", "dialog:allow-save"]
 }

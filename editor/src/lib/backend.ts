@@ -29,6 +29,7 @@ export const deviceStatus = (): Promise<DeviceStatus> => native()
   ? invoke("device_status")
   : Promise.resolve({ connected: false, generation: 0, capabilities: 0, detail: "Browser preview — open in the Tauri app to connect." });
 
+export const exitApplication = (): Promise<void> => invoke("exit_application");
 export const syncProject = (project: Project): Promise<SyncResult> => invoke("sync_project", { project });
 export const syncFromDevice = (): Promise<Project> => invoke("sync_from_device");
 export const uploadScreensaver = (path: string): Promise<ScreensaverResult> => invoke("upload_screensaver", { path });

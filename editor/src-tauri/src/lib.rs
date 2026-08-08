@@ -129,6 +129,11 @@ fn device_status() -> device::DeviceStatus {
 }
 
 #[tauri::command]
+fn exit_application() {
+    std::process::exit(0);
+}
+
+#[tauri::command]
 async fn test_screensaver() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(|| {
         device::test_screensaver().map_err(|error| error.to_string())
@@ -302,6 +307,7 @@ pub fn run() {
             load_workspace,
             backup_bundle,
             device_status,
+            exit_application,
             test_screensaver,
             sync_project,
             sync_from_device,
