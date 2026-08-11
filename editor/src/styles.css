@@ -235,7 +235,7 @@ input, textarea, pre { user-select: text; -webkit-user-select: text; }
 .screensaver-setting > div { min-width: 0; display: flex; align-items: center; gap: 5px; }
 .screensaver-setting #screensaver-delay { width: 44px; flex: 0 0 44px; padding-inline: 5px; }
 .screensaver-setting > div > span { font-size: 9px; }
-.screensaver-setting input[type="number"], .screensaver-setting select {
+.screensaver-setting input[type="number"] {
   width: 100%;
   min-width: 0;
   height: 31px;
@@ -246,8 +246,7 @@ input, textarea, pre { user-select: text; -webkit-user-select: text; }
   background: var(--surface-2);
   color: #e7e4e1;
 }
-.screensaver-setting select:focus, .screensaver-setting input:focus { border-color: var(--pink); }
-.screensaver-setting select { grid-column: 2; }
+.screensaver-setting input:focus { border-color: var(--pink); }
 .screensaver-setting .check-setting {
   grid-column: 1 / -1;
   min-height: 22px;
@@ -428,7 +427,7 @@ input, textarea, pre { user-select: text; -webkit-user-select: text; }
 .button-clipboard button:hover:not(:disabled) { background: var(--pink-surface); color: var(--pink-soft); }
 .button-clipboard button:disabled { opacity: .32; }
 .inspector label { margin-bottom: 13px; display: flex; flex-direction: column; gap: 7px; color: #9a9793; font-size: 10px; font-weight: 500; }
-.inspector select, .inspector input {
+.inspector input {
   height: 35px;
   padding: 0 10px;
   border: 1px solid #3b3936;
@@ -438,16 +437,8 @@ input, textarea, pre { user-select: text; -webkit-user-select: text; }
   color: #e8e5e2;
   font-size: 11px;
 }
-.inspector select:hover, .inspector input:hover { border-color: #5d5558; }
-.inspector select:focus, .inspector input:focus { border-color: var(--pink); box-shadow: 0 0 0 1px var(--pink); }
-.inspector-scroll > label > select, .artwork-controls > label > select, .radial-item-editor > label > select {
-  appearance: none;
-  padding-right: 34px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='%23c8c5c1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 11px center;
-  background-size: 13px;
-}
+.inspector input:hover { border-color: #5d5558; }
+.inspector input:focus { border-color: var(--pink); box-shadow: 0 0 0 1px var(--pink); }
 .rule { height: 1px; margin: 19px 0; background: var(--line-soft); }
 .macro-title { margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; }
 .macro-title div { min-width: 0; display: flex; flex-direction: row; align-items: baseline; gap: 8px; }
@@ -469,8 +460,7 @@ input, textarea, pre { user-select: text; -webkit-user-select: text; }
 .step-reorder button:hover:not(:disabled) { color: var(--pink-soft); }
 .step-reorder button:disabled { opacity: .22; }
 .step-number { color: #777470; font-size: 10px; text-align: center; }
-.step select, .step input { height: 30px; min-width: 0; padding: 0 6px; font-size: 10px; }
-.step .key-picker { appearance: none; padding-right: 25px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%23c8c5c1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; }
+.step input { height: 30px; min-width: 0; padding: 0 6px; font-size: 10px; }
 .duration { position: relative; }
 .duration input { width: 100%; padding-right: 22px; }
 .duration span { position: absolute; top: 9px; right: 6px; color: #777470; font-size: 9px; }
