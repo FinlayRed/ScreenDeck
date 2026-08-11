@@ -275,7 +275,7 @@
     const errors = validatedRevision === projectRevision
       ? summary.issues.filter((issue) => issue.severity === "error")
       : [];
-    if (errors.length) { setNotice("error", "Cannot sync until validation issues are fixed", errors.map((issue) => `${issue.path} — ${issue.message}`).join("\n")); return; }
+    if (errors.length) { setNotice("error", "Cannot sync until validation issues are fixed", errors.map((issue) => `${issue.path}: ${issue.message}`).join("\n")); return; }
     busy = true;
     setNotice("progress", "Syncing project to device…");
     try {
@@ -980,7 +980,7 @@
       <button class="icon-button" class:dirty-save={dirty} aria-label={dirty ? "Save unsaved changes" : "Project saved"} title={dirty ? "Save unsaved changes" : "Project saved"} on:click={() => saveProject()}>{#if dirty}<Save size={17}/>{:else}<Check size={17}/>{/if}</button>
       <button class="icon-button" aria-label="Undo" title="Undo (Ctrl+Z)" disabled={!history.undo.length} on:click={() => applyHistory("undo")}><Undo2 size={17}/></button>
       <button class="icon-button" aria-label="Redo" title="Redo (Ctrl+Y)" disabled={!history.redo.length} on:click={() => applyHistory("redo")}><Redo2 size={17}/></button>
-      <button class="icon-button" title="Export compiled backup" on:click={backup}><Archive size={17}/></button>
+      <button class="icon-button" aria-label="Export compiled backup" title="Export compiled backup" on:click={backup}><Archive size={17}/></button>
       <div class="divider"></div>
       <button class="icon-button" title="Upload screensaver image or video" disabled={busy || !device.connected} on:click={uploadScreensaver}><MonitorUp size={17}/></button>
       <button class="icon-button" title="Test screensaver on device" disabled={busy || !device.connected} on:click={testScreensaver}><Play size={17}/></button>
@@ -1116,13 +1116,13 @@
 
   <main class="workspace" inert={modalOpen}>
     <div class="workspace-head">
-      <div><span class="eyebrow">{profile.name}</span><h1>{page.name}</h1></div>
+      <div class="workspace-title"><span>{profile.name}</span><ChevronRight size={13}/><h1>{page.name}</h1></div>
       <div class="pager"><button aria-label="Previous page" on:click={() => pageIndex = Math.max(0, pageIndex - 1)} disabled={pageIndex === 0}><ChevronLeft size={16}/></button><span>{pageIndex + 1} / {profile.pages.length}</span><button aria-label="Next page" on:click={() => pageIndex = Math.min(profile.pages.length - 1, pageIndex + 1)} disabled={pageIndex === profile.pages.length - 1}><ChevronRight size={16}/></button></div>
     </div>
     {#if summary.issues.length}
       <section class="validation-summary" aria-labelledby="validation-title">
         <div><strong id="validation-title">{blockingIssues.length ? "Resolve before syncing" : "Project checks"}</strong><span>{summary.issues.length} issue{summary.issues.length === 1 ? "" : "s"}</span></div>
-        <ul>{#each summary.issues as issue}<li class:error={issue.severity === "error"}><button on:click={() => focusIssue(issue.path)}><strong>{issue.path}</strong> — {issue.message}<span>Go to issue</span></button></li>{/each}</ul>
+        <ul>{#each summary.issues as issue}<li class:error={issue.severity === "error"}><button on:click={() => focusIssue(issue.path)}><strong>{issue.path}</strong>: {issue.message}<span>Go to issue</span></button></li>{/each}</ul>
       </section>
     {/if}
     <section class="device-preview" aria-label="1280 by 720 Screendeck preview">
@@ -1164,11 +1164,11 @@
     </section>
 
     <section class="assets-strip">
-      <div class="assets-copy"><ImagePlus size={17}/><div><strong>Icon library</strong><span>Drop images onto any key</span></div></div>
+      <div class="assets-copy"><ImagePlus size={17}/><strong>Icons</strong></div>
       <div class="assets-list">
         <label class="asset-add" aria-label="Add icons to library" title="Add icons to library"><input aria-label="Add icons to library" type="file" accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple disabled={importing} on:change={(event) => { const files = event.currentTarget.files; if (files) importFiles(files); }}/><Plus size={18}/></label>
         {#each project.assets as asset}<div class="asset-item"><button class="asset" title={`${asset.name}${asset.animationFps ? " · 15 FPS" : ""}`} on:click={() => assignAsset(asset.id)} on:contextmenu={(event) => assetContextMenu(event, asset.id)}><img src={asset.dataUrl} alt={asset.name}/></button></div>{/each}
-        {#if !project.assets.length}<span class="empty-assets">PNG, JPEG, WebP, GIF, MP4, WebM or MOV · originals stay in the project archive</span>{/if}
+        {#if !project.assets.length}<span class="empty-assets">Add PNG, JPEG, WebP, GIF, MP4, WebM or MOV</span>{/if}
       </div>
     </section>
   </main>
