@@ -2,6 +2,8 @@
 
 ScreenDeck turns a Waveshare ESP32-P4-WIFI6-Touch-LCD-5 into a 32-key USB macro pad. The Windows editor configures pages, icons, macros, radial menus, and screensavers; the device stores the result on microSD and runs on its own.
 
+![ScreenDeck editor](https://img.reddi.ng/u/GyUM49.png)
+
 ## Build
 
 Clone the submodule and run the root build script from PowerShell:
