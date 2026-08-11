@@ -37,6 +37,36 @@
   import type { ActionKind, Asset, Button, EmptyButtonStyle, Macro, MacroStep, Project, RadialSize } from "./lib/model";
   import { createHistory, recordHistory, redoHistory, undoHistory } from "./lib/history";
   import { radialDirection, radialGridOffset } from "./lib/radial";
+  import CustomSelect from "./lib/CustomSelect.svelte";
+
+  const ACTION_OPTIONS = [
+    { value: "none", label: "None" },
+    { value: "macro", label: "Run macro" },
+    { value: "page_next", label: "Next page" },
+    { value: "page_previous", label: "Previous page" },
+    { value: "profile_next", label: "Next profile" },
+  ];
+  const STEP_KIND_OPTIONS = [
+    { value: "key_press", label: "Key press" },
+    { value: "key_down", label: "Key down" },
+    { value: "key_up", label: "Key up" },
+    { value: "delay", label: "Delay" },
+    { value: "consumer", label: "Media key" },
+  ];
+  const ARTWORK_FIT_OPTIONS = [
+    { value: "cover", label: "Fill entire key" },
+    { value: "contain", label: "Fit inside key" },
+  ];
+  const ORIENTATION_OPTIONS = [
+    { value: "landscape", label: "Landscape" },
+    { value: "landscape_flipped", label: "Landscape flipped" },
+  ];
+  const EMPTY_KEY_OPTIONS = [
+    { value: "grey", label: "Grey" },
+    { value: "hidden", label: "Hidden" },
+  ];
+  const KEYBOARD_KEY_OPTIONS = KEYBOARD_KEYS.map((key) => ({ value: key, label: key.replaceAll("_", " ") }));
+  const CONSUMER_KEY_OPTIONS = CONSUMER_KEYS.map((key) => ({ value: key, label: key.replaceAll("_", " ") }));
 
   let project: Project = starterProject();
   let profileIndex = 0;
@@ -275,7 +305,7 @@
     const errors = validatedRevision === projectRevision
       ? summary.issues.filter((issue) => issue.severity === "error")
       : [];
-    if (errors.length) { setNotice("error", "Cannot sync until validation issues are fixed", errors.map((issue) => `${issue.path} — ${issue.message}`).join("\n")); return; }
+    if (errors.length) { setNotice("error", "Cannot sync until validation issues are fixed", errors.map((issue) => `${issue.path}: ${issue.message}`).join("\n")); return; }
     busy = true;
     setNotice("progress", "Syncing project to device…");
     try {
@@ -980,7 +1010,7 @@
       <button class="icon-button" class:dirty-save={dirty} aria-label={dirty ? "Save unsaved changes" : "Project saved"} title={dirty ? "Save unsaved changes" : "Project saved"} on:click={() => saveProject()}>{#if dirty}<Save size={17}/>{:else}<Check size={17}/>{/if}</button>
       <button class="icon-button" aria-label="Undo" title="Undo (Ctrl+Z)" disabled={!history.undo.length} on:click={() => applyHistory("undo")}><Undo2 size={17}/></button>
       <button class="icon-button" aria-label="Redo" title="Redo (Ctrl+Y)" disabled={!history.redo.length} on:click={() => applyHistory("redo")}><Redo2 size={17}/></button>
-      <button class="icon-button" title="Export compiled backup" on:click={backup}><Archive size={17}/></button>
+      <button class="icon-button" aria-label="Export compiled backup" title="Export compiled backup" on:click={backup}><Archive size={17}/></button>
       <div class="divider"></div>
       <button class="icon-button" title="Upload screensaver image or video" disabled={busy || !device.connected} on:click={uploadScreensaver}><MonitorUp size={17}/></button>
       <button class="icon-button" title="Test screensaver on device" disabled={busy || !device.connected} on:click={testScreensaver}><Play size={17}/></button>
@@ -1016,9 +1046,9 @@
       <label for="brightness">Brightness</label>
       <div class="brightness-control"><input id="brightness" type="range" min="0" max="100" step="5" style={`--range-progress:${project.brightnessPercent}%`} bind:value={project.brightnessPercent} on:change={() => changed("Brightness changed")}/><output for="brightness">{project.brightnessPercent}%</output></div>
       <label for="orientation">Orientation</label>
-      <select id="orientation" bind:value={project.orientation} on:change={() => changed("Orientation changed")}><option value="landscape">Landscape</option><option value="landscape_flipped">Landscape · flipped</option></select>
+      <CustomSelect id="orientation" value={project.orientation} options={ORIENTATION_OPTIONS} onChange={(value) => { project.orientation = value as Project["orientation"]; changed("Orientation changed"); }} />
       <label for="empty-button-style">Empty keys</label>
-      <select id="empty-button-style" value={project.emptyButtonStyle} on:change={(event) => updateEmptyButtonStyle(event.currentTarget.value)}><option value="grey">Grey</option><option value="hidden">Hidden</option></select>
+      <CustomSelect id="empty-button-style" value={project.emptyButtonStyle} options={EMPTY_KEY_OPTIONS} onChange={updateEmptyButtonStyle} />
       <label class="check-setting"><input type="checkbox" bind:checked={project.screensaverEnabled} on:change={() => changed("Screensaver setting changed")}/> Screensaver enabled</label>
       <label for="screensaver-delay">Idle timeout</label>
       <div><input id="screensaver-delay" type="number" min="0.08" max="60" step="any" value={Number((project.screensaverTimeoutSeconds / 60).toFixed(2))} on:change={(event) => updateIdleMinutes(Number(event.currentTarget.value))}/><span>minutes</span></div>
@@ -1116,13 +1146,13 @@
 
   <main class="workspace" inert={modalOpen}>
     <div class="workspace-head">
-      <div><span class="eyebrow">{profile.name}</span><h1>{page.name}</h1></div>
+      <div class="workspace-title"><span>{profile.name}</span><ChevronRight size={13}/><h1>{page.name}</h1></div>
       <div class="pager"><button aria-label="Previous page" on:click={() => pageIndex = Math.max(0, pageIndex - 1)} disabled={pageIndex === 0}><ChevronLeft size={16}/></button><span>{pageIndex + 1} / {profile.pages.length}</span><button aria-label="Next page" on:click={() => pageIndex = Math.min(profile.pages.length - 1, pageIndex + 1)} disabled={pageIndex === profile.pages.length - 1}><ChevronRight size={16}/></button></div>
     </div>
     {#if summary.issues.length}
       <section class="validation-summary" aria-labelledby="validation-title">
         <div><strong id="validation-title">{blockingIssues.length ? "Resolve before syncing" : "Project checks"}</strong><span>{summary.issues.length} issue{summary.issues.length === 1 ? "" : "s"}</span></div>
-        <ul>{#each summary.issues as issue}<li class:error={issue.severity === "error"}><button on:click={() => focusIssue(issue.path)}><strong>{issue.path}</strong> — {issue.message}<span>Go to issue</span></button></li>{/each}</ul>
+        <ul>{#each summary.issues as issue}<li class:error={issue.severity === "error"}><button on:click={() => focusIssue(issue.path)}><strong>{issue.path}</strong>: {issue.message}<span>Go to issue</span></button></li>{/each}</ul>
       </section>
     {/if}
     <section class="device-preview" aria-label="1280 by 720 Screendeck preview">
@@ -1164,11 +1194,11 @@
     </section>
 
     <section class="assets-strip">
-      <div class="assets-copy"><ImagePlus size={17}/><div><strong>Icon library</strong><span>Drop images onto any key</span></div></div>
+      <div class="assets-copy"><ImagePlus size={17}/><strong>Icons</strong></div>
       <div class="assets-list">
         <label class="asset-add" aria-label="Add icons to library" title="Add icons to library"><input aria-label="Add icons to library" type="file" accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple disabled={importing} on:change={(event) => { const files = event.currentTarget.files; if (files) importFiles(files); }}/><Plus size={18}/></label>
         {#each project.assets as asset}<div class="asset-item"><button class="asset" title={`${asset.name}${asset.animationFps ? " · 15 FPS" : ""}`} on:click={() => assignAsset(asset.id)} on:contextmenu={(event) => assetContextMenu(event, asset.id)}><img src={asset.dataUrl} alt={asset.name}/></button></div>{/each}
-        {#if !project.assets.length}<span class="empty-assets">PNG, JPEG, WebP, GIF, MP4, WebM or MOV · originals stay in the project archive</span>{/if}
+        {#if !project.assets.length}<span class="empty-assets">Add PNG, JPEG, WebP, GIF, MP4, WebM or MOV</span>{/if}
       </div>
     </section>
   </main>
@@ -1176,7 +1206,7 @@
   <aside class="inspector" inert={modalOpen}>
     <div class="inspector-tabs"><h2>Key settings</h2><span>Row {Math.floor(selectedButton / 8) + 1} · Column {(selectedButton % 8) + 1}</span></div>
     <div class="inspector-scroll">
-      <label>Action<select value={button.action} on:change={(e) => updateButton("action", e.currentTarget.value)}><option value="none">None</option><option value="macro">Run macro</option><option value="page_next">Next page</option><option value="page_previous">Previous page</option><option value="profile_next">Next profile</option></select></label>
+      <label>Action<CustomSelect ariaLabel="Button action" value={button.action} options={ACTION_OPTIONS} onChange={(value) => updateButton("action", value)} /></label>
 
       <div class="button-clipboard" aria-label="Button configuration actions">
         <button on:click={() => copyButton()}><Copy size={14}/>Copy</button>
@@ -1193,9 +1223,9 @@
               <div class="step" animate:flip={{ duration: 110 }}>
                 <span class="step-reorder"><button aria-label={`Move step ${index + 1} up`} disabled={index === 0} data-macro-id={macro.id} data-step-index={index} data-step-move="up" on:click={() => moveStep(macro, index, -1)}><ArrowUp size={12}/></button><button aria-label={`Move step ${index + 1} down`} disabled={index === macro.steps.length - 1} data-macro-id={macro.id} data-step-index={index} data-step-move="down" on:click={() => moveStep(macro, index, 1)}><ArrowDown size={12}/></button></span>
                 <span class="step-number">{index + 1}</span>
-                <select aria-label={`Step ${index + 1} type`} value={step.kind} on:change={(e) => updateStep(macro, index, "kind", e.currentTarget.value)}><option value="key_press">Key press</option><option value="key_down">Key down</option><option value="key_up">Key up</option><option value="delay">Delay</option><option value="consumer">Media key</option></select>
+                <CustomSelect ariaLabel={`Step ${index + 1} type`} value={step.kind} options={STEP_KIND_OPTIONS} onChange={(value) => updateStep(macro, index, "kind", value)} />
                 {#if step.kind === "delay"}<div class="duration"><input aria-label={`Step ${index + 1} delay in milliseconds`} type="number" min="1" max="60000" value={step.durationMs ?? 25} on:change={(e) => updateStep(macro, index, "durationMs", Number(e.currentTarget.value))}/><span>ms</span></div>
-                {:else}<select aria-label={`Step ${index + 1} key`} class="key-picker" value={step.key ?? (step.kind === "consumer" ? "PLAY_PAUSE" : "F13")} on:change={(e) => updateStep(macro, index, "key", e.currentTarget.value)}>{#each step.kind === "consumer" ? CONSUMER_KEYS : KEYBOARD_KEYS as key}<option value={key}>{key.replaceAll("_", " ")}</option>{/each}</select>{/if}
+                {:else}<CustomSelect ariaLabel={`Step ${index + 1} key`} value={step.key ?? (step.kind === "consumer" ? "PLAY_PAUSE" : "F13")} options={step.kind === "consumer" ? CONSUMER_KEY_OPTIONS : KEYBOARD_KEY_OPTIONS} onChange={(value) => updateStep(macro, index, "key", value)} />{/if}
                 <button class="step-delete" aria-label={`Remove step ${index + 1}`} title={`Remove step ${index + 1}`} on:click={() => removeStep(macro, index)}><X size={13}/></button>
                 {#if step.kind === "key_press"}<div class="step-modifiers"><span>Hold</span>{#each [["CTRL","Ctrl"],["SHIFT","Shift"],["ALT","Alt"],["GUI","Win"]] as modifier}<button aria-pressed={step.modifiers?.includes(modifier[0]) ?? false} class:active={step.modifiers?.includes(modifier[0])} on:click={() => toggleModifier(step, modifier[0])}>{modifier[1]}</button>{/each}<label><input aria-label={`Step ${index + 1} duration in milliseconds`} type="number" min="1" max="1000" value={step.durationMs ?? 25} on:change={(e) => updateStep(macro, index, "durationMs", Number(e.currentTarget.value))}/> ms</label></div>{/if}
               </div>
@@ -1207,7 +1237,7 @@
 
       {#if button.iconId}
         <div class="artwork-controls">
-          <label>Artwork display<select value={button.imageFit ?? "cover"} on:change={(e) => updateButton("imageFit", e.currentTarget.value)}><option value="cover">Fill entire key</option><option value="contain">Fit inside key</option></select></label>
+          <label>Artwork display<CustomSelect ariaLabel="Artwork display" value={button.imageFit ?? "cover"} options={ARTWORK_FIT_OPTIONS} onChange={(value) => updateButton("imageFit", value)} /></label>
           <p>Fill entire key crops non-square artwork at the edges. Fit inside preserves the complete image.</p>
           <button class="remove-artwork" on:click={clearIcon}><Trash2 size={14}/> Remove artwork</button>
         </div>
@@ -1237,7 +1267,7 @@
           </div>
           <div class="radial-item-editor">
             <div class="radial-item-heading"><span>Position {selectedRadialItem + 1}</span><strong>{radialDirection(selectedRadialItem, button.radial.size)}</strong></div>
-            <label>Action<select value={radialItem?.action ?? "macro"} on:change={(e) => updateRadialAction(e.currentTarget.value)}><option value="none">None</option><option value="macro">Run macro</option><option value="page_next">Next page</option><option value="page_previous">Previous page</option><option value="profile_next">Next profile</option></select></label>
+            <label>Action<CustomSelect ariaLabel="Radial action" value={radialItem?.action ?? "macro"} options={ACTION_OPTIONS} onChange={updateRadialAction} /></label>
             {#if radialItem?.action === "macro" && radialMacro}
               <div class="radial-macro-editor">
                 <div class="macro-title"><div><span>Macro sequence</span><strong>{radialDirection(selectedRadialItem, button.radial.size)}</strong></div></div>
@@ -1246,9 +1276,9 @@
                     <div class="step" animate:flip={{ duration: 110 }}>
                       <span class="step-reorder"><button aria-label={`Move radial step ${index + 1} up`} disabled={index === 0} data-macro-id={radialMacro.id} data-step-index={index} data-step-move="up" on:click={() => moveStep(radialMacro, index, -1)}><ArrowUp size={12}/></button><button aria-label={`Move radial step ${index + 1} down`} disabled={index === radialMacro.steps.length - 1} data-macro-id={radialMacro.id} data-step-index={index} data-step-move="down" on:click={() => moveStep(radialMacro, index, 1)}><ArrowDown size={12}/></button></span>
                       <span class="step-number">{index + 1}</span>
-                      <select aria-label={`Radial step ${index + 1} type`} value={step.kind} on:change={(e) => updateStep(radialMacro, index, "kind", e.currentTarget.value)}><option value="key_press">Key press</option><option value="key_down">Key down</option><option value="key_up">Key up</option><option value="delay">Delay</option><option value="consumer">Media key</option></select>
+                      <CustomSelect ariaLabel={`Radial step ${index + 1} type`} value={step.kind} options={STEP_KIND_OPTIONS} onChange={(value) => updateStep(radialMacro, index, "kind", value)} />
                       {#if step.kind === "delay"}<div class="duration"><input aria-label={`Radial step ${index + 1} delay in milliseconds`} type="number" min="1" max="60000" value={step.durationMs ?? 25} on:change={(e) => updateStep(radialMacro, index, "durationMs", Number(e.currentTarget.value))}/><span>ms</span></div>
-                      {:else}<select aria-label={`Radial step ${index + 1} key`} class="key-picker" value={step.key ?? (step.kind === "consumer" ? "PLAY_PAUSE" : "F13")} on:change={(e) => updateStep(radialMacro, index, "key", e.currentTarget.value)}>{#each step.kind === "consumer" ? CONSUMER_KEYS : KEYBOARD_KEYS as key}<option value={key}>{key.replaceAll("_", " ")}</option>{/each}</select>{/if}
+                      {:else}<CustomSelect ariaLabel={`Radial step ${index + 1} key`} value={step.key ?? (step.kind === "consumer" ? "PLAY_PAUSE" : "F13")} options={step.kind === "consumer" ? CONSUMER_KEY_OPTIONS : KEYBOARD_KEY_OPTIONS} onChange={(value) => updateStep(radialMacro, index, "key", value)} />{/if}
                       <button class="step-delete" aria-label={`Remove radial step ${index + 1}`} title={`Remove radial step ${index + 1}`} on:click={() => removeStep(radialMacro, index)}><X size={13}/></button>
                       {#if step.kind === "key_press"}<div class="step-modifiers"><span>Hold</span>{#each [["CTRL","Ctrl"],["SHIFT","Shift"],["ALT","Alt"],["GUI","Win"]] as modifier}<button aria-pressed={step.modifiers?.includes(modifier[0]) ?? false} class:active={step.modifiers?.includes(modifier[0])} on:click={() => toggleModifier(step, modifier[0])}>{modifier[1]}</button>{/each}<label><input aria-label={`Radial step ${index + 1} duration in milliseconds`} type="number" min="1" max="1000" value={step.durationMs ?? 25} on:change={(e) => updateStep(radialMacro, index, "durationMs", Number(e.currentTarget.value))}/> ms</label></div>{/if}
                     </div>
@@ -1264,7 +1294,7 @@
             </div>
             {#if radialItem?.iconId}
               <div class="artwork-controls radial-artwork-controls">
-                <label>Artwork display<select value={radialItem.imageFit ?? "contain"} on:change={(e) => { radialItem.imageFit = e.currentTarget.value as "cover" | "contain"; changed("Radial artwork display changed"); }}><option value="cover">Fill entire key</option><option value="contain">Fit inside key</option></select></label>
+                <label>Artwork display<CustomSelect ariaLabel="Radial artwork display" value={radialItem.imageFit ?? "contain"} options={ARTWORK_FIT_OPTIONS} onChange={(value) => { radialItem.imageFit = value as "cover" | "contain"; changed("Radial artwork display changed"); }} /></label>
                 <p>Fill entire key crops non-square artwork at the edges. Fit inside preserves the complete image.</p>
               </div>
             {/if}
