@@ -55,6 +55,22 @@ pub struct DeviceStatus {
     pub detail: String,
 }
 
+/// Explicit device status (I1). The legacy STATUS response packed a single
+/// value that meant upload bytes while an upload was open and the active
+/// generation otherwise; firmware v2 returns this fixed struct so idle,
+/// partial, resumed, committed, and aborted states decode unambiguously.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusDetails {
+    pub protocol_version: u32,
+    pub upload_open: bool,
+    pub active_generation: u32,
+    pub received_bytes: u32,
+    pub total_bytes: u32,
+    pub upload_crc32: u32,
+    pub media_bytes: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncResult {
@@ -82,7 +98,7 @@ fn status_detail(status: u32, value: u32) -> String {
             1 => "screensaver file is missing or cannot be opened".into(),
             2 => "screensaver file is empty or its size cannot be read".into(),
             3 => "screensaver MJPEG framing is malformed".into(),
-            4 => "screensaver contains more than 900 frames".into(),
+            4 => "screensaver contains more than 1800 frames".into(),
             5 => "screensaver could not be reopened for playback".into(),
             6 => "a screensaver frame exceeds the 2 MiB device limit".into(),
             7 => "device could not allocate the screensaver read buffer".into(),
@@ -174,6 +190,214 @@ fn checked_response(
     Ok(value)
 }
 
+/// Parses a STATUS response: the v2 fixed struct (28-byte payload) or the
+/// legacy single-value payload (8 bytes) from older firmware.
+fn parse_status_response(bytes: &[u8], sequence: u32) -> Result<StatusDetails, DeviceError> {
+    if bytes.len() < 20
+        || u32::from_le_bytes(bytes[0..4].try_into().unwrap()) != MAGIC
+        || bytes[4] != VERSION
+        || bytes[5] != STATUS | 0x80
+        || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != sequence
+    {
+        return Err(DeviceError::Protocol(format!(
+            "unexpected status header ({} bytes)",
+            bytes.len()
+        )));
+    }
+    let payload_size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    if (payload_size != 28 && payload_size != 8) || bytes.len() != 20 + payload_size {
+        return Err(DeviceError::Protocol(format!(
+            "unexpected status payload size {payload_size}"
+        )));
+    }
+    if u32::from_le_bytes(bytes[16..20].try_into().unwrap()) != crc32(&bytes[20..]) {
+        return Err(DeviceError::Protocol(
+            "status response checksum mismatch".into(),
+        ));
+    }
+    if payload_size == 28 {
+        Ok(StatusDetails {
+            protocol_version: u32::from_le_bytes(bytes[20..24].try_into().unwrap()),
+            upload_open: bytes[24] & 1 != 0,
+            active_generation: u32::from_le_bytes(bytes[28..32].try_into().unwrap()),
+            received_bytes: u32::from_le_bytes(bytes[32..36].try_into().unwrap()),
+            total_bytes: u32::from_le_bytes(bytes[36..40].try_into().unwrap()),
+            upload_crc32: u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
+            media_bytes: u32::from_le_bytes(bytes[44..48].try_into().unwrap()),
+        })
+    } else {
+        // Legacy firmware: the value is the active generation when no upload
+        // is open; upload state is not distinguishable, so it is treated as
+        // the generation, matching the previous editor behaviour.
+        Ok(StatusDetails {
+            protocol_version: 1,
+            upload_open: false,
+            active_generation: u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            received_bytes: 0,
+            total_bytes: 0,
+            upload_crc32: 0,
+            media_bytes: 0,
+        })
+    }
+}
+
+fn status_query(
+    session: &mut transport::Session,
+    sequence: u32,
+) -> Result<StatusDetails, DeviceError> {
+    let response = session.exchange(&frame(STATUS, sequence, &[]))?;
+    parse_status_response(&response, sequence)
+}
+
+/// Returns true when an error after COMMIT is indeterminate: the device may
+/// have restarted or the link may have dropped mid-commit, so the caller must
+/// reconnect and verify instead of reporting a definite failure (I2).
+fn is_indeterminate_after_commit(error: &DeviceError) -> bool {
+    match error {
+        DeviceError::Protocol(message) => message.contains("timed out"),
+        DeviceError::Windows(code) => matches!(
+            *code,
+            31 | 57 | 109 | 121 | 995 | 1117 | 1167 // GEN_FAILURE, NO_SUCH_DEVICE, PIPE_BROKEN, SEMAPHORE_TIMEOUT, OPERATION_ABORTED, DEVICE_REMOVED, DEVICE_NOT_CONNECTED
+        ),
+        _ => false,
+    }
+}
+
+/// After a lost COMMIT acknowledgement the device may be restarting 500 ms
+/// later. Close the old session, wait for re-enumeration, open a fresh
+/// session, and confirm the active generation advanced (I2).
+fn reconnect_and_verify(initial_generation: u32) -> Result<u32, DeviceError> {
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let mut session = None;
+    for _ in 0..40 {
+        match transport::Session::open() {
+            Ok(opened) => {
+                session = Some(opened);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+        }
+    }
+    let mut session = session.ok_or(DeviceError::NotFound)?;
+    checked_exchange(&mut session, HELLO, 1, &[], "capability query")?;
+    let details = status_query(&mut session, 2)?;
+    if details.active_generation <= initial_generation {
+        return Err(DeviceError::Protocol(
+            "commit acknowledgement was lost and the active generation did not advance".into(),
+        ));
+    }
+    Ok(details.active_generation)
+}
+
+/// Media-commit variant of `reconnect_and_verify`: after a lost MEDIA_COMMIT
+/// acknowledgement, reconnect and confirm the active screensaver file size
+/// matches the uploaded stream (I2).
+fn reconnect_and_verify_media(expected_bytes: usize) -> Result<u32, DeviceError> {
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let mut session = None;
+    for _ in 0..40 {
+        match transport::Session::open() {
+            Ok(opened) => {
+                session = Some(opened);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+        }
+    }
+    let mut session = session.ok_or(DeviceError::NotFound)?;
+    let details = status_query(&mut session, 2)?;
+    if details.media_bytes != expected_bytes as u32 {
+        return Err(DeviceError::Protocol(format!(
+            "screensaver commit acknowledgement was lost and the active file size {} does not match the uploaded {expected_bytes} bytes",
+            details.media_bytes
+        )));
+    }
+    Ok(details.media_bytes)
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    fn status_response_v2(sequence: u32) -> Vec<u8> {
+        let mut status = Vec::new();
+        status.extend_from_slice(&2u32.to_le_bytes());
+        status.extend_from_slice(&1u32.to_le_bytes()); // upload open
+        status.extend_from_slice(&7u32.to_le_bytes()); // active generation
+        status.extend_from_slice(&4096u32.to_le_bytes());
+        status.extend_from_slice(&8192u32.to_le_bytes());
+        status.extend_from_slice(&0x1234_5678u32.to_le_bytes());
+        status.extend_from_slice(&16_384u32.to_le_bytes()); // media bytes
+        let mut response = Vec::new();
+        response.extend_from_slice(&MAGIC.to_le_bytes());
+        response.push(VERSION);
+        response.push(STATUS | 0x80);
+        response.extend_from_slice(&0u16.to_le_bytes());
+        response.extend_from_slice(&sequence.to_le_bytes());
+        response.extend_from_slice(&(status.len() as u32).to_le_bytes());
+        response.extend_from_slice(&crc32(&status).to_le_bytes());
+        response.extend_from_slice(&status);
+        response
+    }
+
+    #[test]
+    fn parses_v2_status_struct() {
+        let details = parse_status_response(&status_response_v2(9), 9).unwrap();
+        assert_eq!(details.protocol_version, 2);
+        assert!(details.upload_open);
+        assert_eq!(details.active_generation, 7);
+        assert_eq!(details.received_bytes, 4096);
+        assert_eq!(details.total_bytes, 8192);
+        assert_eq!(details.upload_crc32, 0x1234_5678);
+        assert_eq!(details.media_bytes, 16_384);
+    }
+
+    #[test]
+    fn parses_legacy_status_value() {
+        // Legacy firmware: an 8-byte payload (status + value) whose value is
+        // the generation.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_le_bytes()); // status success
+        body.extend_from_slice(&42u32.to_le_bytes()); // value
+        let mut response = Vec::new();
+        response.extend_from_slice(&MAGIC.to_le_bytes());
+        response.push(VERSION);
+        response.push(STATUS | 0x80);
+        response.extend_from_slice(&0u16.to_le_bytes());
+        response.extend_from_slice(&3u32.to_le_bytes());
+        response.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        response.extend_from_slice(&crc32(&body).to_le_bytes());
+        response.extend_from_slice(&body);
+        let details = parse_status_response(&response, 3).unwrap();
+        assert_eq!(details.protocol_version, 1);
+        assert!(!details.upload_open);
+        assert_eq!(details.active_generation, 42);
+    }
+
+    #[test]
+    fn rejects_malformed_status_payloads() {
+        assert!(parse_status_response(&status_response_v2(9), 10).is_err()); // wrong sequence
+        let mut truncated = status_response_v2(9);
+        truncated.truncate(24);
+        assert!(parse_status_response(&truncated, 9).is_err());
+    }
+
+    #[test]
+    fn indeterminate_error_classification() {
+        assert!(is_indeterminate_after_commit(&DeviceError::Protocol(
+            "USB transfer timed out after 5 seconds".into()
+        )));
+        assert!(is_indeterminate_after_commit(&DeviceError::Windows(1117)));
+        assert!(is_indeterminate_after_commit(&DeviceError::Windows(109)));
+        assert!(!is_indeterminate_after_commit(&DeviceError::Windows(5)));
+        assert!(!is_indeterminate_after_commit(&DeviceError::Rejected {
+            operation: "commit bundle",
+            status: 4,
+            detail: "bundle validation failed".into(),
+        }));
+    }
+}
+
 pub fn status() -> DeviceStatus {
     let result = (|| {
         let mut session = transport::Session::open()?;
@@ -183,15 +407,15 @@ pub fn status() -> DeviceStatus {
                 "unsupported capability word 0x{capabilities:08X}"
             )));
         }
-        let generation = checked_exchange(&mut session, STATUS, 2, &[], "status query")?;
-        Ok((capabilities, generation))
+        let details = status_query(&mut session, 2)?;
+        Ok((capabilities, details))
     })();
     match result {
-        Ok((capabilities, generation)) => DeviceStatus {
+        Ok((capabilities, details)) => DeviceStatus {
             connected: true,
-            generation,
+            generation: details.active_generation,
             capabilities,
-            detail: "SDC3 v1 · resume · checksums · atomic activation".into(),
+            detail: "SDC3 v2 · explicit status · resume · checksums · atomic activation".into(),
         },
         Err(error) => DeviceStatus {
             connected: false,
@@ -229,7 +453,7 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
             "device capabilities 0x{capabilities:08X} do not satisfy M4"
         )));
     }
-    let initial_generation = checked_exchange(&mut session, STATUS, 2, &[], "status query")?;
+    let initial_generation = status_query(&mut session, 2)?.active_generation;
     let payload_crc = u32::from_le_bytes(bundle[12..16].try_into().unwrap());
     let mut begin = Vec::with_capacity(8);
     begin.extend_from_slice(&(bundle.len() as u32).to_le_bytes());
@@ -309,17 +533,13 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
     }
     let generation = match checked_exchange(&mut session, COMMIT, sequence, &[], "commit bundle") {
         Ok(value) => value,
-        Err(DeviceError::Protocol(message)) if message.contains("timed out") => {
-            thread::sleep(Duration::from_millis(250));
-            let observed =
-                checked_exchange(&mut session, STATUS, sequence + 1, &[], "verify commit")?;
-            if observed <= initial_generation {
-                return Err(DeviceError::Protocol(
-                    "commit acknowledgement was lost and the active generation did not advance"
-                        .into(),
-                ));
-            }
-            observed
+        // I2: the device restarts 500 ms after a durable commit, so a lost
+        // acknowledgement, disconnect, or pipe failure is indeterminate. Close
+        // the old session, wait for re-enumeration, and verify the generation
+        // advanced on a fresh session.
+        Err(error) if is_indeterminate_after_commit(&error) => {
+            drop(session);
+            reconnect_and_verify(initial_generation)?
         }
         Err(error) => return Err(error),
     };
@@ -497,15 +717,26 @@ pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError
             media.len()
         )));
     }
-    let committed = checked_exchange_with_timeout(
+    let committed = match checked_exchange_with_timeout(
         &mut session,
         MEDIA_COMMIT,
         sequence,
         &[],
         "commit screensaver",
         30_000,
-    )
-    .map_err(|error| DeviceError::Protocol(format!("screensaver commit: {error}")))?;
+    ) {
+        Ok(value) => value,
+        // I2: same reconnect-and-verify recovery as the bundle commit.
+        Err(error) if is_indeterminate_after_commit(&error) => {
+            drop(session);
+            reconnect_and_verify_media(media.len())?
+        }
+        Err(error) => {
+            return Err(DeviceError::Protocol(format!(
+                "screensaver commit: {error}"
+            )));
+        }
+    };
     if committed as usize != media.len() {
         return Err(DeviceError::Protocol(format!(
             "device committed {committed} bytes; expected {}",

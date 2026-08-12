@@ -529,6 +529,15 @@ The audit passed these checks:
   - E3: archive saves build in a uniquely named temp file, `sync_all`, then atomically replace via `MoveFileExW` (Windows) so no earlier failure can destroy the previous archive; the same pattern applies to workspace persistence. A regression test injects a mid-save failure and asserts the previous archive stays byte-identical with no staging leftovers.
   - Verification: 22 Rust tests (2 new), clippy clean, rustfmt clean, firmware builds, PowerShell parser checks pass, T1 assertion verified.
 
+- **Phase 3 (2026-08-12):** Protocol and media contract alignment landed on `phase/3-protocol-media-contract`.
+  - I1: firmware STATUS now returns an explicit fixed struct (version, upload-open flag, active generation, received/total bytes, upload CRC, active media bytes); the editor parses v2 and keeps a legacy 8-byte fallback. New parse tests cover v2, legacy, and malformed payloads.
+  - I2: lost COMMIT acknowledgements (timeout, disconnect, pipe failure) are treated as indeterminate; the editor closes the session, waits for re-enumeration, reconnects, and verifies the active generation advanced (bundle) or the media file size matches (screensaver).
+  - I3: the standalone converter now produces 720x1280 MJPEG at 60 FPS (max 1800 frames, 16 MiB total, 2 MiB per frame), matching the editor converter and firmware parser, with full output validation (frame scan, per-frame size, ffprobe dimension check). Verified end-to-end: 2 s source -> 120 frames at 720x1280.
+  - I4: shared icon contract constants (15 FPS, 2..=120 frames) in model.rs; compilation and decompilation both reject out-of-range or count-mismatched animation streams, with tests for 1, 2, and 121 frames and a patched frame-count mismatch.
+  - E9: `summarize` now reports a blocking issue when the estimated bundle size exceeds the shared 16 MiB limit, so Sync is disabled before compilation fails; regression test with a 17.25 MiB asset.
+  - E14: the screensaver diagnostic now reports 1800 frames.
+  - Verification: 29 Rust tests (7 new), clippy clean, rustfmt clean, firmware builds, PowerShell parser checks pass, T1 assertion verified, converter validated with ffprobe.
+
 ## Completion checklist
 
 Update this list as fixes land:
@@ -546,20 +555,20 @@ Update this list as fixes land:
 - [ ] E6 True discard behavior
 - [ ] E7 Bounded archive expansion
 - [ ] E8 Nonblocking device polling
-- [ ] E9 Bundle-size validation
+- [x] E9 Bundle-size validation
 - [ ] E10 Stable async import destination
 - [ ] E11 FFmpeg distribution
 - [ ] E12 Temporary-file cleanup
-- [ ] I1 Explicit status response
-- [ ] I2 Reconnect-based commit verification
-- [ ] I3 Compatible standalone conversion
-- [ ] I4 Shared animation limits
+- [x] I1 Explicit status response
+- [x] I2 Reconnect-based commit verification
+- [x] I3 Compatible standalone conversion
+- [x] I4 Shared animation limits
 - [x] T1 Correct WinUSB smoke-test ABI
 - [ ] E13 Compiled-backup restore or relabeling
 - [x] F6 Detach-safe download ownership
 - [x] F7 Full MJPEG validation and fallback
 - [ ] F8 Screensaver orientation
-- [ ] E14 Correct frame-limit diagnostic
+- [x] E14 Correct frame-limit diagnostic
 - [ ] Full editor verification passes
 - [ ] Fresh firmware build passes
 - [ ] Hardware and recovery matrix passes

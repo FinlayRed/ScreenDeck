@@ -1040,6 +1040,38 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
 #endif
 }
 
+/* Explicit device status (I1): the legacy response packed a single value that
+ * meant upload bytes while an upload was open and the active generation
+ * otherwise. Editors must now parse this fixed struct so idle, partial,
+ * resumed, committed, and aborted upload states decode unambiguously. */
+typedef struct __attribute__((packed)) {
+    uint32_t version;
+    uint32_t flags; /* bit 0: upload open */
+    uint32_t active_generation;
+    uint32_t received_bytes;
+    uint32_t total_bytes;
+    uint32_t upload_crc32;
+    uint32_t media_bytes; /* size of the active screensaver file, 0 when absent */
+} m3_status_v2_t;
+
+static void m3_send_status(uint8_t opcode, uint32_t sequence)
+{
+    m3_status_v2_t status = {
+        .version = 2,
+        .flags = s_storage.upload_open ? 1U : 0U,
+        .active_generation = s_storage.active_generation,
+        .received_bytes = s_storage.received_bytes,
+        .total_bytes = s_storage.total_bytes,
+        .upload_crc32 = s_storage.upload_open ? s_storage.bundle_crc32 : 0,
+        .media_bytes = 0,
+    };
+    struct stat media;
+    if (stat(M3_MEDIA_FILE, &media) == 0 && media.st_size <= (off_t) M3_MAX_MEDIA_BYTES) {
+        status.media_bytes = (uint32_t) media.st_size;
+    }
+    m3_send_payload(opcode, sequence, &status, sizeof(status));
+}
+
 static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *payload)
 {
     if (frame->opcode == M3_OP_HELLO) {
@@ -1085,8 +1117,7 @@ static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *pay
         s_storage.upload_open = false; s_storage.received_bytes = 0; s_storage.durable_bytes = 0;
         m3_send_response(M3_OP_ABORT, frame->sequence, M3_STATUS_OK, 0);
     } else if (frame->opcode == M3_OP_STATUS || frame->opcode == M3_OP_DIAG) {
-        m3_send_response(frame->opcode, frame->sequence, M3_STATUS_OK,
-                         s_storage.upload_open ? s_storage.received_bytes : s_storage.active_generation);
+        m3_send_status(frame->opcode, frame->sequence);
     } else {
         m3_send_response(frame->opcode, frame->sequence, M3_STATUS_BAD_FRAME, 0);
     }

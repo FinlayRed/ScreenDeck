@@ -382,6 +382,92 @@ mod tests {
         }
     }
 
+    fn animated_asset_with(frames: u16) -> model::Asset {
+        // A frame is a marker-only JPEG: the compiler and firmware both count
+        // SOI/EOI pairs, and compile-level validation is structural.
+        let mut stream = Vec::new();
+        for _ in 0..frames {
+            stream.extend_from_slice(&[0xff, 0xd8, 0xff, 0xd9]);
+        }
+        model::Asset {
+            id: "anim".into(),
+            name: "anim.mjpg".into(),
+            media_type: "image/png".into(),
+            data_url: "data:image/png;base64,REVWSUNF".into(),
+            source_name: String::new(),
+            source_media_type: String::new(),
+            source_data_url: String::new(),
+            animation_data_url: format!(
+                "data:video/x-motion-jpeg;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(stream)
+            ),
+            animation_fps: 15,
+        }
+    }
+
+    #[test]
+    fn animated_icon_frame_count_matches_device_contract() {
+        // I4: the device accepts only 2..=120 complete frames. Compilation and
+        // decompilation must agree so a crafted bundle cannot sync and then
+        // prevent the UI bundle from loading.
+        let mut one_frame = project();
+        one_frame.assets.push(animated_asset_with(1));
+        assert!(compiler::compile(&one_frame).is_err());
+
+        let mut too_many = project();
+        too_many.assets.push(animated_asset_with(121));
+        assert!(compiler::compile(&too_many).is_err());
+
+        let mut valid = project();
+        valid.assets.push(animated_asset_with(2));
+        valid.profiles[0].pages[0].buttons[0].icon_id = Some("anim".into());
+        let bundle = compiler::compile(&valid).unwrap();
+        let restored = compiler::decompile(&bundle).unwrap();
+        assert_eq!(restored.assets[0].animation_fps, 15);
+    }
+
+    #[test]
+    fn decompile_rejects_animation_frame_count_mismatch() {
+        let mut valid = project();
+        valid.assets.push(animated_asset_with(2));
+        valid.profiles[0].pages[0].buttons[0].icon_id = Some("anim".into());
+        let mut bundle = compiler::compile(&valid).unwrap();
+        // Asset table starts after the SDB header; the frame_count field is at
+        // asset offset 16 within the 20-byte m5_ui_asset_t.
+        let assets_offset = u32::from_le_bytes(bundle[32..36].try_into().unwrap()) as usize;
+        bundle[16 + assets_offset + 16..16 + assets_offset + 18]
+            .copy_from_slice(&3u16.to_le_bytes());
+        let payload_crc = compiler::crc32(&bundle[16..]);
+        bundle[12..16].copy_from_slice(&payload_crc.to_le_bytes());
+        assert!(compiler::decompile(&bundle).is_err());
+    }
+
+    #[test]
+    fn summarize_reports_oversized_bundle_as_blocking() {
+        // E9: validation and compilation share the 16 MiB limit, so Sync is
+        // blocked before a too-large project ever reaches the device.
+        let mut source = project();
+        // 23 MiB of base64 'A' decodes to ~17.25 MiB, above the 16 MiB limit.
+        let blob = "A".repeat(23 * 1024 * 1024);
+        source.assets.push(model::Asset {
+            id: "huge".into(),
+            name: "huge.png".into(),
+            media_type: "image/png".into(),
+            data_url: format!("data:image/png;base64,{blob}"),
+            source_name: String::new(),
+            source_media_type: String::new(),
+            source_data_url: String::new(),
+            animation_data_url: String::new(),
+            animation_fps: 0,
+        });
+        let summary = compiler::summarize(&source);
+        assert!(summary
+            .issues
+            .iter()
+            .any(|issue| issue.message.contains("16 MiB device limit")));
+        assert!(compiler::compile(&source).is_err());
+    }
+
     #[test]
     fn minimal_bundle_layout_matches_smoke_test_fixture() {
         // The device-sync.ps1 -CommitTestBundle fixture (MinimalUiPayload)

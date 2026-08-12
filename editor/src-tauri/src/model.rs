@@ -10,6 +10,13 @@ pub const MAX_MACROS: usize = 128;
 pub const MAX_STEPS: usize = 64;
 pub const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Shared animated-icon contract, mirrored by the firmware
+/// (firmware/main/m6_media.h: M5_ICON_FPS / M5_ICON_MAX_FRAMES). The device
+/// accepts only complete MJPEG streams with 2..=120 frames at 15 FPS.
+pub const ICON_FPS: u8 = 15;
+pub const ICON_MIN_FRAMES: u16 = 2;
+pub const ICON_MAX_FRAMES: u16 = 120;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -302,10 +309,10 @@ pub fn validate(project: &Project) -> Vec<ValidationIssue> {
                 "Original asset name, media type and data must be stored together.",
             ));
         }
-        if !asset.animation_data_url.is_empty() && asset.animation_fps != 15 {
+        if !asset.animation_data_url.is_empty() && asset.animation_fps != ICON_FPS {
             issues.push(issue(
                 format!("assets[{index}].animationFps"),
-                "Animated icons must use the deterministic 15 FPS preset.",
+                format!("Animated icons must use the deterministic {ICON_FPS} FPS preset."),
             ));
         }
     }
