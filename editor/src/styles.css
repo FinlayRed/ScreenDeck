@@ -76,27 +76,6 @@ input, textarea, pre { user-select: text; -webkit-user-select: text; }
 }
 .version { color: #73716e; font-size: 10px; font-weight: 500; }
 
-.project-title {
-  grid-column: 2;
-  min-width: 0;
-  justify-self: center;
-}
-.project-title input {
-  width: 250px;
-  height: 34px;
-  padding: 0 10px;
-  border: 1px solid transparent;
-  border-radius: var(--radius);
-  outline: none;
-  background: transparent;
-  color: var(--soft);
-  font-size: 12px;
-  font-weight: 600;
-  text-align: center;
-}
-.project-title input:hover { border-color: var(--line); background: var(--surface); }
-.project-title input:focus { border-color: var(--pink); background: var(--surface-2); color: #fff; }
-
 .toolbar {
   grid-column: 3;
   justify-self: end;
@@ -529,7 +508,6 @@ input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-o
   .app-shell { grid-template-columns: 184px minmax(520px, 1fr) 315px; }
   .topbar { grid-template-columns: 184px minmax(0, 1fr) auto auto; }
   .brand { padding-inline: 11px; }
-  .project-title { display: none; }
   .toolbar { gap: 1px; }
   .sync-button { padding-inline: 8px !important; }
   .workspace { padding-inline: 15px; }

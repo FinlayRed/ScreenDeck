@@ -925,7 +925,6 @@
 
   function focusIssue(path: string) {
     const direct: Record<string, string> = {
-      name: ".project-title input",
       screensaverTimeoutSeconds: "#screensaver-delay",
       brightnessPercent: "#brightness",
       orientation: "#orientation",
@@ -1135,7 +1134,6 @@
 <div class="app-shell">
   <div class="topbar" role="banner" data-tauri-drag-region inert={modalOpen || busy} on:dblclick={titlebarDoubleClick}>
     <div class="brand" data-tauri-drag-region><div class="brand-mark" data-tauri-drag-region><Layers3 size={17}/></div><span data-tauri-drag-region>Screendeck</span><span class="version" data-tauri-drag-region>0.6.2</span></div>
-    <div class="project-title"><input aria-label="Project name" bind:value={project.name} on:input={() => changed("", true)} on:keydown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); setNotice("info", "Project title updated"); } }} /></div>
     <nav class="toolbar" aria-label="Project actions">
       <button class="icon-button" aria-label="New project" title="New project" on:click={newProject}><FilePlus2 size={17}/></button>
       <button class="icon-button" aria-label="Open project" title="Open project" on:click={openProject}><FolderOpen size={17}/></button>
