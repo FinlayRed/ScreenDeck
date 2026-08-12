@@ -38,26 +38,6 @@ The UART USB port handles flashing and logs. The separate USB-OTG port carries H
 
 See [editor/README.md](editor/README.md) and [firmware/README.md](firmware/README.md) for details.
 
-## FFmpeg runtime
-
-Animated icons and screensaver conversion require FFmpeg. The installer does not currently bundle it. The editor looks for it, in order, at:
-
-1. `ffmpeg.exe` beside the installed Screendeck executable
-2. `ffmpeg` on `PATH`
-
-If FFmpeg is missing, the editor disables animated-icon import and screensaver upload and shows these installation options. Static icons and every non-conversion feature remain available.
-
-### Future bundled distribution
-
-Bundling FFmpeg requires adding a pinned Windows binary to the Tauri bundle configuration and installing it beside the application executable, where the existing runtime lookup will find it. Before doing that:
-
-- Record the exact source, version, architecture, and SHA-256 checksum.
-- Include the applicable FFmpeg GPL or LGPL license files.
-- Verify the checksum during packaging.
-- Test the NSIS installer on a machine without system FFmpeg.
-
-Do not add an unpinned download or silently fetch an executable at runtime.
-
 ## License
 
 ScreenDeck is licensed under the [GNU General Public License, version 3 or later](LICENSE). Third-party dependencies keep their own licenses. The Waveshare code under `vendor/` remains Apache-2.0 licensed.
