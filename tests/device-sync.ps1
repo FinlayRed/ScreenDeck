@@ -4,6 +4,7 @@
 param(
     [switch] $CommitTestBundle,
     [switch] $ResumeTest,
+    [switch] $RejectInvalidBundle,
     [switch] $AllowDestructiveBundle
 )
 
@@ -66,6 +67,42 @@ namespace Screendeck {
       uint crc = 0;
       foreach (byte value in data) { crc ^= value; for (int bit=0; bit<8; bit++) crc = (crc >> 1) ^ ((crc & 1) != 0 ? 0xedb88320u : 0u); }
       return ~crc;
+    }
+    static void Put16(byte[] value, int offset, ushort number) { Array.Copy(BitConverter.GetBytes(number), 0, value, offset, 2); }
+    // A minimal structurally valid M5UI payload (schema 3): one profile, one
+    // page of 32 empty buttons, no assets, macros, or radials. Offsets are
+    // chosen to satisfy range and 2-byte alignment checks (F3/F4).
+    public static byte[] MinimalUiPayload() {
+      var payload = new byte[400];
+      Put(payload, 0, 0x4955354D); // magic 'MU5I'
+      Put16(payload, 4, 3);        // version
+      Put16(payload, 6, 72);       // header_bytes
+      Put16(payload, 8, 1);        // profile_count
+      Put16(payload, 10, 1);       // page_count
+      Put16(payload, 12, 0);       // asset_count
+      Put16(payload, 14, 32);      // buttons_per_page
+      Put16(payload, 16, 0);       // macro_count
+      Put16(payload, 18, 0);       // radial_count
+      Put(payload, 20, 0);         // step_count
+      Put(payload, 24, 72);        // profiles_offset
+      Put(payload, 28, 80);        // pages_offset
+      Put(payload, 32, 336);       // assets_offset (empty table)
+      Put(payload, 36, 336);       // button_macro_refs_offset
+      Put(payload, 40, 400);       // macro_descriptors_offset (empty)
+      Put(payload, 44, 400);       // macro_steps_offset (empty)
+      Put(payload, 48, 400);       // blob_offset
+      Put(payload, 52, 15);        // flags = screensaver idle seconds
+      Put(payload, 56, 400);       // radial_descriptors_offset (empty)
+      Put(payload, 60, 400);       // radial_items_offset (empty)
+      Put(payload, 64, 0);         // radial_item_count
+      Put(payload, 68, 592);       // settings: brightness 80 + screensaver enabled
+      Put16(payload, 72, 0); Put16(payload, 74, 1); Put(payload, 76, 0); // profile 0
+      for (int i = 0; i < 32; i++) {
+        int off = 80 + i * 8;
+        Put(payload, off, 0xFFFFFFFF); Put16(payload, off + 4, 0xFFFF); // empty button
+      }
+      for (int i = 0; i < 32; i++) Put16(payload, 336 + i * 2, 0xFFFF); // no macro refs
+      return payload;
     }
     public static string DevicePath() { return Path(); }
     static uint U32(byte[] value, int offset) { return BitConverter.ToUInt32(value, offset); }
@@ -140,15 +177,16 @@ if (($caps -band 0x1F) -ne 0x1F) { throw "Unexpected M3 capability word: 0x$($ca
 $before = Invoke-M3 6 $sequence; $sequence++
 Write-Host "M3 HELLO ok capabilities=0x$($caps.ToString('X8')); generation=$before"
 if ($CommitTestBundle -and $ResumeTest) { throw 'Choose either -CommitTestBundle or -ResumeTest.' }
-# The commit test bundles a deliberately invalid M5UI payload (96 pseudo-random
-# bytes). Activating it can replace a working device UI with an unloadable one,
-# so it is disabled unless the operator explicitly opts in (see F3).
+if ($RejectInvalidBundle -and $ResumeTest) { throw 'Choose either -RejectInvalidBundle or -ResumeTest.' }
+# -CommitTestBundle replaces the active UI with a minimal but fully loadable
+# M5UI bundle (F3). It no longer risks an unloadable device, but it still
+# overwrites the working configuration, so it stays explicitly opt-in.
 if ($CommitTestBundle -and -not $AllowDestructiveBundle) {
-    throw 'Refusing to commit an invalid test bundle: this can replace the working device UI. Pass -AllowDestructiveBundle only on a sacrificial device, or wait for the F3 fix to build a valid bundle.'
+    throw 'Refusing to commit a test bundle: it replaces the working device UI. Pass -AllowDestructiveBundle only on a sacrificial device.'
 }
 
 if ($CommitTestBundle -or $ResumeTest) {
-    [byte[]] $payload = 0..95 | ForEach-Object { [byte](($_ * 37 + 11) -band 0xFF) }
+    [byte[]] $payload = if ($CommitTestBundle) { [Screendeck.M3WinUsb]::MinimalUiPayload() } else { 0..95 | ForEach-Object { [byte](($_ * 37 + 11) -band 0xFF) } }
     [byte[]] $bundle = [Screendeck.M3WinUsb]::Bundle($payload)
     $bundleCrc = [Screendeck.M3WinUsb]::Crc32($payload)
     [byte[]] $begin = [byte[]](@([BitConverter]::GetBytes([uint32]$bundle.Length)) + @([BitConverter]::GetBytes([uint32]$bundleCrc)))
@@ -178,4 +216,31 @@ if ($CommitTestBundle -or $ResumeTest) {
         $generation = Invoke-M3 4 $sequence; $sequence++
         Write-Host "M3 COMMIT ok generation=$generation bytes=$($bundle.Length) payload_crc=0x$($bundleCrc.ToString('X8'))"
     }
+}
+
+if ($RejectInvalidBundle) {
+    # F3 negative test: a CRC-correct bundle whose M5UI payload is invalid must
+    # be rejected by COMMIT and must never advance the active generation.
+    [byte[]] $invalid = [Screendeck.M3WinUsb]::MinimalUiPayload()
+    $invalid[0] = 0xEE  # corrupt the M5UI magic; the SDB envelope CRC stays valid
+    [byte[]] $badBundle = [Screendeck.M3WinUsb]::Bundle($invalid)
+    $badCrc = [Screendeck.M3WinUsb]::Crc32($invalid)
+    [byte[]] $badBegin = [byte[]](@([BitConverter]::GetBytes([uint32]$badBundle.Length)) + @([BitConverter]::GetBytes([uint32]$badCrc)))
+    $offset = Invoke-M3 2 $sequence $badBegin; $sequence++
+    if ($offset -gt $badBundle.Length) { throw "Device resume offset exceeds invalid bundle size." }
+    if ($offset -lt $badBundle.Length) {
+        [byte[]] $chunk = $badBundle[$offset..($badBundle.Length - 1)]
+        $chunkCrc = [Screendeck.M3WinUsb]::Crc32($chunk)
+        [byte[]] $chunkPayload = [byte[]](@([BitConverter]::GetBytes([uint32]$offset)) + @([BitConverter]::GetBytes([uint32]$chunkCrc)) + @($chunk))
+        $received = Invoke-M3 3 $sequence $chunkPayload; $sequence++
+        if ($received -ne $badBundle.Length) { throw "M3 acknowledged $received bytes; expected $($badBundle.Length)." }
+    }
+    $rejected = $false
+    try { $null = Invoke-M3 4 $sequence } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Invalid M5UI bundle was accepted by COMMIT.' }
+    $generationAfter = Invoke-M3 6 $sequence; $sequence++
+    if ($generationAfter -ne $before) {
+        throw "Invalid bundle activated: generation advanced from $before to $generationAfter."
+    }
+    Write-Host "M3 NEGATIVE ok invalid_bundle=rejected generation=$before"
 }

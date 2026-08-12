@@ -44,21 +44,15 @@ static const char *TAG = "m6";
 #define M5_DEFAULT_SCREENSAVER_IDLE_SECONDS 15
 #define M5_SCREENSAVER_FPS 60
 #define M5_SAVER_BENCH_FRAMES 120
-#define M5_MAX_FRAMES 1800
 #define M5_PRELOAD_LIMIT (8U * 1024U * 1024U)
-#define M5_MAX_JPEG_BYTES (2U * 1024U * 1024U)
 #define M5_SD_READ_AHEAD_BYTES (128U * 1024U)
 #define M5_JPEG_PATH BSP_SD_MOUNT_POINT "/screendeck/screensaver.mjpg"
 #define M5_LCD_WIDTH 1280
 #define M5_LCD_HEIGHT 720
-#define M5_PANEL_WIDTH 720
-#define M5_PANEL_HEIGHT 1280
 #define M5_RGB565_BYTES (M5_LCD_WIDTH * M5_LCD_HEIGHT * 2U)
 #define M5_INDEX_BUFFER_BYTES (16U * 1024U)
 #define M5_UI_MAGIC 0x4955354DUL
 #define M5_SDB3_MAGIC 0x33424453UL
-#define M5_ICON_FPS 15
-#define M5_ICON_MAX_FRAMES 120
 #define M5_ICON_UPDATE_BATCH 4
 #define M5_ICON_MEDIUM_LOAD_FPS 10
 #define M5_ICON_HEAVY_LOAD_FPS 7
@@ -366,6 +360,194 @@ static bool m5_index_icon(const uint8_t *payload, const m5_ui_asset_t *asset, m5
     return !in_frame && index->count == asset->frame_count && index->count > 1;
 }
 
+/* Reads a bounded M5UI table range from the payload stream into a scratch
+ * buffer. `bytes` is already validated against payload_size, so the allocation
+ * is bounded by the 16 MiB bundle limit. */
+static uint8_t *m5_read_table(FILE *file, long payload_offset, uint32_t offset, uint32_t bytes)
+{
+    uint8_t *buffer = heap_caps_malloc(bytes ? bytes : 1,
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buffer == NULL) return NULL;
+    if (fseek(file, payload_offset + (long) offset, SEEK_SET) != 0 ||
+        fread(buffer, 1, bytes, file) != bytes) {
+        heap_caps_free(buffer);
+        return NULL;
+    }
+    return buffer;
+}
+
+/* Scans one icon animation stream on the payload for complete SOI/EOI frames.
+ * Mirrors m5_index_icon: the stream must close cleanly with more than one and
+ * at most M5_ICON_MAX_FRAMES frames, exactly matching the declared count. */
+static bool m5_scan_animation_frames(FILE *file, long payload_offset,
+                                     const m5_ui_asset_t *asset, uint32_t *count)
+{
+    if (fseek(file, payload_offset + (long) asset->animation_offset, SEEK_SET) != 0) return false;
+    bool in_frame = false;
+    uint8_t previous = 0;
+    uint32_t frames = 0;
+    uint32_t remaining = asset->animation_length;
+    uint8_t block[1024];
+    while (remaining != 0) {
+        const size_t want = remaining < sizeof(block) ? (size_t) remaining : sizeof(block);
+        const size_t got = fread(block, 1, want, file);
+        if (got != want) return false;
+        for (size_t index = 0; index < got; ++index) {
+            const uint8_t current = block[index];
+            if (!in_frame && previous == 0xff && current == 0xd8) {
+                in_frame = true;
+            } else if (in_frame && previous == 0xff && current == 0xd9) {
+                if (++frames > M5_ICON_MAX_FRAMES) return false;
+                in_frame = false;
+            }
+            previous = current;
+        }
+        remaining -= (uint32_t) got;
+    }
+    *count = frames;
+    return !in_frame && frames == asset->frame_count && frames > 1;
+}
+
+bool m5_ui_bundle_valid(FILE *file, long payload_offset, uint32_t payload_size)
+{
+    /* The header is copied into an aligned local so no field access depends on
+     * the payload's alignment; every later table is likewise memcpy'd into a
+     * scratch buffer (F4). */
+    m5_ui_header_t header;
+    if (payload_size < sizeof(header) ||
+        fread(&header, 1, sizeof(header), file) != sizeof(header)) {
+        return false;
+    }
+    if (header.magic != M5_UI_MAGIC || header.version != 3 ||
+        header.header_bytes != sizeof(header) || header.profile_count == 0 ||
+        header.page_count == 0 || header.buttons_per_page != M5_BUTTONS ||
+        header.blob_offset > payload_size ||
+        !m5_range_valid(header.profiles_offset, header.profile_count, sizeof(m5_ui_profile_t), payload_size) ||
+        !m5_range_valid(header.pages_offset, (size_t) header.page_count * M5_BUTTONS, sizeof(m5_ui_button_t), payload_size) ||
+        !m5_range_valid(header.assets_offset, header.asset_count, sizeof(m5_ui_asset_t), payload_size) ||
+        !m5_range_valid(header.button_macro_refs_offset, (size_t) header.page_count * M5_BUTTONS, sizeof(uint16_t), payload_size) ||
+        !m5_range_valid(header.macro_descriptors_offset, header.macro_count, sizeof(m5_ui_macro_t), payload_size) ||
+        !m5_range_valid(header.macro_steps_offset, header.step_count, sizeof(m5_ui_step_t), payload_size) ||
+        !m5_range_valid(header.radial_descriptors_offset, header.radial_count, sizeof(m6_ui_radial_t), payload_size) ||
+        !m5_range_valid(header.radial_items_offset, header.radial_item_count, sizeof(m6_ui_radial_item_t), payload_size) ||
+        /* F4: typed-table offsets must satisfy the element alignment so the
+         * runtime can form typed pointers without an unaligned load panic. */
+        header.profiles_offset % _Alignof(m5_ui_profile_t) != 0 ||
+        header.pages_offset % _Alignof(m5_ui_button_t) != 0 ||
+        header.assets_offset % _Alignof(m5_ui_asset_t) != 0 ||
+        header.button_macro_refs_offset % _Alignof(uint16_t) != 0 ||
+        header.macro_descriptors_offset % _Alignof(m5_ui_macro_t) != 0 ||
+        header.macro_steps_offset % _Alignof(m5_ui_step_t) != 0 ||
+        header.radial_descriptors_offset % _Alignof(m6_ui_radial_t) != 0 ||
+        header.radial_items_offset % _Alignof(m6_ui_radial_item_t) != 0) {
+        return false;
+    }
+
+    const size_t pages = (size_t) header.page_count * M5_BUTTONS;
+    uint8_t *profiles = m5_read_table(file, payload_offset, header.profiles_offset,
+                                      (uint32_t) header.profile_count * sizeof(m5_ui_profile_t));
+    uint8_t *buttons = m5_read_table(file, payload_offset, header.pages_offset,
+                                     (uint32_t) pages * sizeof(m5_ui_button_t));
+    uint8_t *macro_refs = m5_read_table(file, payload_offset, header.button_macro_refs_offset,
+                                        (uint32_t) pages * sizeof(uint16_t));
+    uint8_t *assets = header.asset_count == 0 ? NULL :
+        m5_read_table(file, payload_offset, header.assets_offset,
+                      (uint32_t) header.asset_count * sizeof(m5_ui_asset_t));
+    uint8_t *macros = header.macro_count == 0 ? NULL :
+        m5_read_table(file, payload_offset, header.macro_descriptors_offset,
+                      (uint32_t) header.macro_count * sizeof(m5_ui_macro_t));
+    uint8_t *steps = header.step_count == 0 ? NULL :
+        m5_read_table(file, payload_offset, header.macro_steps_offset,
+                      header.step_count * sizeof(m5_ui_step_t));
+    uint8_t *radials = header.radial_count == 0 ? NULL :
+        m5_read_table(file, payload_offset, header.radial_descriptors_offset,
+                      (uint32_t) header.radial_count * sizeof(m6_ui_radial_t));
+    uint8_t *radial_items = header.radial_item_count == 0 ? NULL :
+        m5_read_table(file, payload_offset, header.radial_items_offset,
+                      header.radial_item_count * sizeof(m6_ui_radial_item_t));
+    if (profiles == NULL || buttons == NULL || macro_refs == NULL ||
+        (header.asset_count != 0 && assets == NULL) ||
+        (header.macro_count != 0 && macros == NULL) ||
+        (header.step_count != 0 && steps == NULL) ||
+        (header.radial_count != 0 && radials == NULL) ||
+        (header.radial_item_count != 0 && radial_items == NULL)) {
+        goto invalid;
+    }
+
+    const m5_ui_profile_t *profile_table = (const m5_ui_profile_t *) profiles;
+    for (uint16_t i = 0; i < header.profile_count; ++i) {
+        if (profile_table[i].page_count == 0 ||
+            (uint32_t) profile_table[i].first_page + profile_table[i].page_count > header.page_count) {
+            goto invalid;
+        }
+    }
+
+    const m5_ui_asset_t *asset_table = (const m5_ui_asset_t *) assets;
+    for (uint16_t i = 0; i < header.asset_count; ++i) {
+        if (!m5_range_valid(asset_table[i].static_offset, asset_table[i].static_length, 1, payload_size) ||
+            asset_table[i].static_offset < header.blob_offset) {
+            goto invalid;
+        }
+        if (asset_table[i].type == 2) {
+            uint32_t animation_frames = 0;
+            if (asset_table[i].fps != M5_ICON_FPS ||
+                !m5_range_valid(asset_table[i].animation_offset, asset_table[i].animation_length, 1, payload_size) ||
+                asset_table[i].animation_offset < header.blob_offset ||
+                !m5_scan_animation_frames(file, payload_offset, &asset_table[i], &animation_frames)) {
+                goto invalid;
+            }
+        }
+    }
+
+    const m5_ui_macro_t *macro_table = (const m5_ui_macro_t *) macros;
+    for (uint16_t i = 0; i < header.macro_count; ++i) {
+        if ((uint32_t) macro_table[i].first_step + macro_table[i].step_count > header.step_count) {
+            goto invalid;
+        }
+    }
+
+    const m5_ui_button_t *button_table = (const m5_ui_button_t *) buttons;
+    const uint16_t *ref_table = (const uint16_t *) macro_refs;
+    for (size_t i = 0; i < pages; ++i) {
+        if (button_table[i].asset_index != UINT16_MAX && button_table[i].asset_index >= header.asset_count) {
+            goto invalid;
+        }
+        if (ref_table[i] != UINT16_MAX && ref_table[i] >= header.macro_count) {
+            goto invalid;
+        }
+        if (button_table[i].radial_index != UINT32_MAX && button_table[i].radial_index >= header.radial_count) {
+            goto invalid;
+        }
+    }
+
+    const m6_ui_radial_t *radial_table = (const m6_ui_radial_t *) radials;
+    for (uint16_t i = 0; i < header.radial_count; ++i) {
+        if ((radial_table[i].count != 4 && radial_table[i].count != 6 && radial_table[i].count != 8) ||
+            (uint32_t) radial_table[i].first_item + radial_table[i].count > header.radial_item_count) {
+            goto invalid;
+        }
+    }
+    const m6_ui_radial_item_t *item_table = (const m6_ui_radial_item_t *) radial_items;
+    for (uint32_t i = 0; i < header.radial_item_count; ++i) {
+        const uint16_t action_ref = item_table[i].macro_index;
+        if ((action_ref >= header.macro_count && action_ref < M6_RADIAL_ACTION_PROFILE_NEXT) ||
+            (item_table[i].asset_index != UINT16_MAX && item_table[i].asset_index >= header.asset_count)) {
+            goto invalid;
+        }
+    }
+
+    heap_caps_free(profiles); heap_caps_free(buttons); heap_caps_free(macro_refs);
+    heap_caps_free(assets); heap_caps_free(macros); heap_caps_free(steps);
+    heap_caps_free(radials); heap_caps_free(radial_items);
+    return true;
+
+invalid:
+    heap_caps_free(profiles); heap_caps_free(buttons); heap_caps_free(macro_refs);
+    heap_caps_free(assets); heap_caps_free(macros); heap_caps_free(steps);
+    heap_caps_free(radials); heap_caps_free(radial_items);
+    return false;
+}
+
 static bool m5_load_ui_bundle(void)
 {
     const char *path = m3_active_bundle_path();
@@ -382,6 +564,16 @@ static bool m5_load_ui_bundle(void)
         fclose(file); return false;
     }
     const size_t payload_size = total_bytes - 16U;
+    /* Pre-activation structural validation (F3/F4): reject bad magic, schema,
+     * counts, offsets, alignment, references, assets, and animation streams
+     * before allocating the payload. The in-memory checks below remain as
+     * defense in depth. */
+    if (fseek(file, 16, SEEK_SET) != 0 ||
+        !m5_ui_bundle_valid(file, 16, (uint32_t) payload_size) ||
+        fseek(file, 16, SEEK_SET) != 0) {
+        fclose(file);
+        return false;
+    }
     uint8_t *payload = heap_caps_malloc(payload_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (payload == NULL || fread(payload, 1, payload_size, file) != payload_size) {
         heap_caps_free(payload); fclose(file); return false;
@@ -398,7 +590,10 @@ static bool m5_load_ui_bundle(void)
         !m5_range_valid(header->macro_steps_offset, header->step_count, sizeof(m5_ui_step_t), payload_size) ||
         !m5_range_valid(header->radial_descriptors_offset, header->radial_count, sizeof(m6_ui_radial_t), payload_size) ||
         !m5_range_valid(header->radial_items_offset, header->radial_item_count, sizeof(m6_ui_radial_item_t), payload_size) ||
-        header->blob_offset > payload_size) {
+        header->blob_offset > payload_size ||
+        /* F4: the uint16_t macro-reference table must be 2-byte aligned for
+         * the ESP32-P4's aligned-load requirement. */
+        (header->button_macro_refs_offset & 1U) != 0) {
         heap_caps_free(payload); return false;
     }
     const m5_ui_profile_t *profiles = (const m5_ui_profile_t *) (payload + header->profiles_offset);
@@ -1281,6 +1476,93 @@ static bool m5_index_mjpeg(void)
              s_media.preloaded ? "psram" : "sd", s_media.frame_count,
              s_media.file_size, s_media.largest_frame, M5_SCREENSAVER_FPS);
     return true;
+}
+
+bool m5_mjpeg_file_valid(const char *path)
+{
+    /* F7: full structural validation of a screensaver stream before activation
+     * and at boot: complete SOI/EOI frame boundaries, frame count within
+     * M5_MAX_FRAMES, per-frame size within M5_MAX_JPEG_BYTES, and every frame
+     * decoding to M5_PANEL_WIDTH x M5_PANEL_HEIGHT. The four bytes FF D8 FF D9
+     * fail here because the frame cannot be parsed as a 720x1280 JPEG. */
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) return false;
+    uint8_t block[1024];
+    uint8_t previous = 0;
+    bool in_frame = false;
+    uint32_t start = 0;
+    uint32_t position = 0;
+    uint32_t frame_count = 0;
+    uint32_t largest_frame = 0;
+    size_t read;
+    while ((read = fread(block, 1, sizeof(block), file)) != 0) {
+        for (size_t index = 0; index < read; ++index) {
+            const uint8_t current = block[index];
+            if (!in_frame && previous == 0xff && current == 0xd8) {
+                start = position - 1U;
+                in_frame = true;
+            } else if (in_frame && previous == 0xff && current == 0xd9) {
+                const uint32_t length = position + 1U - start;
+                if (length > M5_MAX_JPEG_BYTES) { fclose(file); return false; }
+                if (++frame_count > M5_MAX_FRAMES) { fclose(file); return false; }
+                if (length > largest_frame) largest_frame = length;
+                in_frame = false;
+            }
+            previous = current;
+            ++position;
+        }
+    }
+    if (in_frame || frame_count == 0) { fclose(file); return false; }
+
+    /* Second pass: decode every frame header. Frame offsets are stored in the
+     * first pass so reads never interleave with the streaming scan. */
+    m5_frame_index_t *frames = heap_caps_malloc(
+        (size_t) frame_count * sizeof(m5_frame_index_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *frame_buffer = heap_caps_malloc(largest_frame, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    bool valid = frames != NULL && frame_buffer != NULL && fseek(file, 0, SEEK_SET) == 0;
+    if (valid) {
+        previous = 0;
+        in_frame = false;
+        start = 0;
+        position = 0;
+        uint32_t stored = 0;
+        while (valid && (read = fread(block, 1, sizeof(block), file)) != 0) {
+            for (size_t index = 0; valid && index < read; ++index) {
+                const uint8_t current = block[index];
+                if (!in_frame && previous == 0xff && current == 0xd8) {
+                    start = position - 1U;
+                    in_frame = true;
+                } else if (in_frame && previous == 0xff && current == 0xd9) {
+                    frames[stored++] = (m5_frame_index_t) {
+                        .offset = start,
+                        .length = position + 1U - start,
+                    };
+                    in_frame = false;
+                }
+                previous = current;
+                ++position;
+            }
+        }
+        valid = stored == frame_count;
+    }
+    for (uint32_t i = 0; valid && i < frame_count; ++i) {
+        if (fseek(file, (long) frames[i].offset, SEEK_SET) != 0 ||
+            fread(frame_buffer, 1, frames[i].length, file) != frames[i].length) {
+            valid = false;
+            break;
+        }
+        jpeg_decode_picture_info_t info;
+        if (jpeg_decoder_get_info(frame_buffer, frames[i].length, &info) != ESP_OK ||
+            info.width != M5_PANEL_WIDTH || info.height != M5_PANEL_HEIGHT) {
+            valid = false;
+            break;
+        }
+    }
+    heap_caps_free(frames);
+    heap_caps_free(frame_buffer);
+    fclose(file);
+    return valid;
 }
 
 static const uint8_t *m5_frame_bytes(uint32_t index, uint32_t *length)

@@ -90,13 +90,20 @@ fn save_workspace(
     let bytes = serde_json::to_vec(&project)
         .map_err(|error| format!("could not serialize workspace: {error}"))?;
     let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes).map_err(|error| format!("could not save workspace: {error}"))?;
-    fs::rename(&temporary, &path)
-        .or_else(|_| {
-            let _ = fs::remove_file(&path);
-            fs::rename(&temporary, &path)
-        })
-        .map_err(|error| format!("could not activate saved workspace: {error}"))
+    let write_result = (|| -> Result<(), String> {
+        let mut file = std::fs::File::create(&temporary)
+            .map_err(|error| format!("could not save workspace: {error}"))?;
+        std::io::Write::write_all(&mut file, &bytes)
+            .map_err(|error| format!("could not save workspace: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("could not flush saved workspace: {error}"))?;
+        archive::atomic_replace(&path, &temporary)
+            .map_err(|error| format!("could not activate saved workspace: {error}"))
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write_result
 }
 
 #[tauri::command]
@@ -376,6 +383,34 @@ mod tests {
     }
 
     #[test]
+    fn minimal_bundle_layout_matches_smoke_test_fixture() {
+        // The device-sync.ps1 -CommitTestBundle fixture (MinimalUiPayload)
+        // hardcodes these offsets, and the firmware validator
+        // (m5_ui_bundle_valid) accepts the bundle only while they hold. Pin
+        // the fixture against the compiler's reference emit.
+        let mut minimal = project();
+        minimal.macros.clear();
+        for button in &mut minimal.profiles[0].pages[0].buttons {
+            button.action = model::ActionKind::None;
+            button.macro_id = None;
+        }
+        let bundle = compiler::compile(&minimal).unwrap();
+        let payload = &bundle[16..];
+        assert_eq!(u16::from_le_bytes(payload[6..8].try_into().unwrap()), 72);
+        assert_eq!(u16::from_le_bytes(payload[14..16].try_into().unwrap()), 32);
+        assert_eq!(u32::from_le_bytes(payload[24..28].try_into().unwrap()), 72);
+        assert_eq!(u32::from_le_bytes(payload[28..32].try_into().unwrap()), 80);
+        assert_eq!(u32::from_le_bytes(payload[32..36].try_into().unwrap()), 336);
+        assert_eq!(u32::from_le_bytes(payload[36..40].try_into().unwrap()), 336);
+        assert_eq!(u32::from_le_bytes(payload[40..44].try_into().unwrap()), 400);
+        assert_eq!(u32::from_le_bytes(payload[44..48].try_into().unwrap()), 400);
+        assert_eq!(u32::from_le_bytes(payload[48..52].try_into().unwrap()), 400);
+        assert_eq!(u32::from_le_bytes(payload[56..60].try_into().unwrap()), 400);
+        assert_eq!(u32::from_le_bytes(payload[60..64].try_into().unwrap()), 400);
+        assert_eq!(u32::from_le_bytes(payload[64..68].try_into().unwrap()), 0);
+    }
+
+    #[test]
     fn legacy_black_empty_buttons_import_as_grey() {
         let source = project();
         let mut bundle = compiler::compile(&source).unwrap();
@@ -594,6 +629,48 @@ mod tests {
         let restored = archive::open(&path).unwrap();
         assert_eq!(restored.name, "Round trip");
         assert!(model::validate(&restored).is_empty());
+    }
+
+    #[test]
+    fn failed_archive_save_preserves_the_previous_archive() {
+        // E3: a failure at any stage (here: invalid asset base64 during
+        // decoding) must leave the previous archive byte-for-byte intact and
+        // must not leave a staging file behind.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("media.sdeck");
+        let mut good = project();
+        good.assets.push(model::Asset {
+            id: "asset-1".into(),
+            name: "icon.png".into(),
+            media_type: "image/png".into(),
+            data_url: "data:image/png;base64,REVWSUNF".into(),
+            source_name: String::new(),
+            source_media_type: String::new(),
+            source_data_url: String::new(),
+            animation_data_url: String::new(),
+            animation_fps: 0,
+        });
+        archive::save(&path, &good).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let mut broken = good.clone();
+        broken.assets[0].data_url = "data:image/png;base64,!!!not-base64!!!".into();
+        assert!(archive::save(&path, &broken).is_err());
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "previous archive changed"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "media.sdeck")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "staging files left behind: {leftovers:?}"
+        );
     }
 
     #[test]

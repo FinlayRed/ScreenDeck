@@ -477,6 +477,26 @@ static bool m3_validate_bundle_file(const char *path, uint32_t expected_bytes, u
     return crc == expected_crc && header.payload_crc32 == expected_crc;
 }
 
+/* Full pre-activation validation: the SDB envelope and CRC plus every inner
+ * M5UI semantic (F3/F4). A bundle passes only when the runtime parser can
+ * build a working UI from it, so an invalid but CRC-correct bundle can never
+ * be marked active. */
+static bool m3_bundle_fully_valid(const char *path, uint32_t expected_bytes, uint32_t expected_crc)
+{
+    if (!m3_validate_bundle_file(path, expected_bytes, expected_crc)) return false;
+#ifdef M5_MEDIA_ENABLED
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) return false;
+    const bool valid = m5_ui_bundle_valid(
+        file, sizeof(m3_bundle_header_t),
+        expected_bytes - (uint32_t) sizeof(m3_bundle_header_t));
+    fclose(file);
+    return valid;
+#else
+    return true;
+#endif
+}
+
 static bool m3_read_pointer(const char *path, m3_pointer_t *pointer)
 {
     return m3_read_exact(path, pointer, sizeof(*pointer)) &&
@@ -574,8 +594,8 @@ static void m3_find_active_pointer(void)
         const bool valid = stat(bundle_path, &bundle) == 0 &&
                            bundle.st_size >= (off_t) sizeof(m3_bundle_header_t) &&
                            bundle.st_size <= M3_MAX_BUNDLE_BYTES &&
-                           m3_validate_bundle_file(bundle_path, (uint32_t) bundle.st_size,
-                                                   pointer.bundle_crc32);
+                           m3_bundle_fully_valid(bundle_path, (uint32_t) bundle.st_size,
+                                                 pointer.bundle_crc32);
         if (valid && valid_count == 0) {
             s_storage.active_generation = pointer.generation;
             s_storage.active_bundle_valid = true;
@@ -607,6 +627,23 @@ static bool m3_storage_init(void)
     if (stat(M3_MEDIA_FILE, &media) != 0 && stat(M3_MEDIA_BACKUP_FILE, &media) == 0 &&
         rename(M3_MEDIA_BACKUP_FILE, M3_MEDIA_FILE) == 0) {
         ESP_LOGW(TAG, "M3_MEDIA action=recover_previous");
+    } else if (stat(M3_MEDIA_FILE, &media) == 0) {
+        /* F7 boot rollback: if the active screensaver is present but cannot be
+         * decoded, restore the last good backup instead of playing nothing or
+         * crashing the indexer. */
+        bool media_valid = media.st_size >= 4 && media.st_size <= (off_t) M3_MAX_MEDIA_BYTES;
+#ifdef M5_MEDIA_ENABLED
+        media_valid = media_valid && m5_mjpeg_file_valid(M3_MEDIA_FILE);
+#endif
+        if (!media_valid) {
+            unlink(M3_MEDIA_FILE);
+            if (stat(M3_MEDIA_BACKUP_FILE, &media) == 0 &&
+                rename(M3_MEDIA_BACKUP_FILE, M3_MEDIA_FILE) == 0) {
+                ESP_LOGW(TAG, "M3_MEDIA action=restore_backup reason=invalid_active");
+            } else {
+                ESP_LOGW(TAG, "M3_MEDIA action=discard_invalid_active");
+            }
+        }
     }
     m3_find_active_pointer();
     if (!m3_upload_state_load()) {
@@ -808,7 +845,7 @@ static void m3_handle_commit(const m3_frame_header_t *frame)
                               m3_bundle_upload_checkpoint();
     m3_bundle_upload_close();
     if (!checkpointed ||
-        !m3_validate_bundle_file(M3_STAGE_FILE, s_storage.total_bytes, s_storage.bundle_crc32)) {
+        !m3_bundle_fully_valid(M3_STAGE_FILE, s_storage.total_bytes, s_storage.bundle_crc32)) {
         m3_send_response(M3_OP_COMMIT, frame->sequence, M3_STATUS_BAD_BUNDLE, s_storage.received_bytes);
         return;
     }
@@ -858,20 +895,21 @@ static bool m3_validate_mjpeg_file(const char *path, uint32_t expected_bytes, ui
     uint8_t block[512];
     uint32_t crc = UINT32_MAX;
     uint32_t bytes = 0;
-    uint8_t first[2] = {0};
-    uint8_t last[2] = {0};
     size_t read;
     while ((read = fread(block, 1, sizeof(block), file)) != 0) {
-        if (bytes == 0 && read >= 2) memcpy(first, block, 2);
-        for (size_t index = 0; index < read; ++index) {
-            last[0] = last[1]; last[1] = block[index];
-        }
         crc = esp_crc32_le(crc, block, read);
-        bytes += read;
+        bytes += (uint32_t) read;
     }
     fclose(file);
-    return bytes == expected_bytes && crc == expected_crc &&
-           first[0] == 0xFF && first[1] == 0xD8 && last[0] == 0xFF && last[1] == 0xD9;
+    if (bytes != expected_bytes || crc != expected_crc) return false;
+#ifdef M5_MEDIA_ENABLED
+    /* F7: byte count and CRC are not enough. Reject streams that cannot be
+     * decoded (marker-only, truncated, wrong-dimension, oversized, or
+     * over-count frames) before activation. */
+    return m5_mjpeg_file_valid(path);
+#else
+    return true;
+#endif
 }
 
 static void m3_handle_media_begin(const m3_frame_header_t *frame, const uint8_t *payload)

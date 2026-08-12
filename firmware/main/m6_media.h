@@ -3,15 +3,42 @@
 #pragma once
 
 #include "lvgl.h"
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/* Shared screensaver media contract (mirrored by the editor and the standalone
+ * converter; see AUDIT_AND_FIX_PLAN.md Phase 3). */
+#define M5_PANEL_WIDTH 720
+#define M5_PANEL_HEIGHT 1280
+#define M5_MAX_FRAMES 1800
+#define M5_MAX_JPEG_BYTES (2U * 1024U * 1024U)
+#define M5_ICON_FPS 15
+#define M5_ICON_MAX_FRAMES 120
+
 /* Starts M5's media scheduler after the shared M3 display has been created. */
 void m5_media_start(lv_display_t *display);
 uint32_t m5_media_trigger_screensaver(void);
 void m5_hid_release_all(const char *reason);
+
+/* Side-effect-free structural validation of an SDB3 payload (M5UI). `file` is
+ * positioned at the payload start; `payload_offset` is the byte offset of that
+ * position from the file start, and `payload_size` bounds every read. Checks
+ * the M5UI magic, schema, table ranges, counts, references, assets, animation
+ * streams, and typed-table alignment (F3/F4). Never allocates the payload and
+ * never mutates media state. */
+bool m5_ui_bundle_valid(FILE *file, long payload_offset, uint32_t payload_size);
+
+/* Side-effect-free validation of a complete MJPEG screensaver stream on disk:
+ * complete SOI/EOI frame boundaries, frame count within M5_MAX_FRAMES, per-
+ * frame size within M5_MAX_JPEG_BYTES, and every frame decoding to
+ * M5_PANEL_WIDTH x M5_PANEL_HEIGHT (F7). Used before media activation and for
+ * boot recovery. */
+bool m5_mjpeg_file_valid(const char *path);
 
 /* Media control requests. The media task is the sole owner of screensaver
  * file handles and buffers, so cross-task work (bundle/media sync, screensaver
