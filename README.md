@@ -1,17 +1,29 @@
 # ScreenDeck
+ScreenDeck turns the [ESP32-P4-WIFI6-Touch-LCD-5](https://www.waveshare.com/esp32-p4-wifi6-touch-lcd-5.htm) into a customizable 32-key touchscreen macro pad, with keyboard input, radial menus, multiple pages, video screensavers, two-way sync, and more. A lightweight, full-featured editor makes configuration easy, but isn’t required to use ScreenDeck once set up.
 
-ScreenDeck turns a Waveshare ESP32-P4-WIFI6-Touch-LCD-5 into a 32-key USB macro pad. The Windows editor configures pages, icons, macros, radial menus, and screensavers; the device stores the result on microSD and runs on its own.
 
+![ScreenDeck editor](https://img.reddi.ng/u/XtpycL.jpg)
 ![ScreenDeck editor](https://img.reddi.ng/u/jwzcoE.png)
+
+## Hardware
+
+ScreenDeck is built for the Waveshare ESP32-P4-WIFI6-Touch-LCD-5.
+
+You’ll need:
+
+  - [ESP32-P4-WIFI6-Touch-LCD-5](https://www.waveshare.com/esp32-p4-wifi6-touch-lcd-5.htm) — the main display and controller
+  - MicroSD card — used for ScreenDeck assets and media
+  - USB-C cable — connect to the board’s USB-OTG port, not the UART port, for normal use
+  - Stand (optional) — the stand shown in the project photos is the [UGREEN Magsafe Phone Holder](https://www.amazon.co.uk/UGREEN-Magnetic-Adjustable-Aluminum-Compatible-Gray)
 
 ## Build
 
 Clone the submodule and run the root build script from PowerShell:
 
 ```powershell
-git clone --recurse-submodules https://github.com/FinlayRed/screendeckp4.git
-cd screendeckp4
-./build.ps1 -Target test
+git clone --recurse-submodules https://github.com/FinlayRed/ScreenDeck.git
+cd ScreenDeck
+#Build the installer
 ./build.ps1 -Target editor
 ```
 
