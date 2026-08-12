@@ -170,9 +170,11 @@ typedef struct {
     m5_media_ctrl_t type;
     SemaphoreHandle_t reply;
     uint32_t result;
+    uint8_t references;
 } m5_media_control_msg_t;
 
 static QueueHandle_t s_media_control_queue;
+static portMUX_TYPE s_media_control_lock = portMUX_INITIALIZER_UNLOCKED;
 static lv_display_t *s_display;
 static esp_lcd_panel_handle_t s_panel;
 static lv_obj_t *s_saver_input;
@@ -236,6 +238,21 @@ static const char *const s_symbols[M5_BUTTONS] = {
 
 static void m5_render_active_ui(void);
 static void m5_media_handle_control(m5_media_control_msg_t *ctrl);
+
+/* The caller and the queued request each hold one reference. This keeps the
+ * message and its semaphore alive when the caller times out before the media
+ * task dequeues or finishes the request. */
+static void m5_media_control_release(m5_media_control_msg_t *ctrl)
+{
+    bool destroy = false;
+    portENTER_CRITICAL(&s_media_control_lock);
+    if (--ctrl->references == 0) destroy = true;
+    portEXIT_CRITICAL(&s_media_control_lock);
+    if (destroy) {
+        vSemaphoreDelete(ctrl->reply);
+        free(ctrl);
+    }
+}
 
 static void m6_log_render_time(const char *phase, int64_t started_us)
 {
@@ -1578,6 +1595,7 @@ static void m5_media_handle_control(m5_media_control_msg_t *ctrl)
         break;
     }
     if (ctrl->reply != NULL) xSemaphoreGive(ctrl->reply);
+    m5_media_control_release(ctrl);
 }
 
 uint32_t m5_media_control(m5_media_ctrl_t control, uint32_t timeout_ms)
@@ -1585,7 +1603,11 @@ uint32_t m5_media_control(m5_media_ctrl_t control, uint32_t timeout_ms)
     if (s_media_control_queue == NULL) return UINT32_MAX;
     m5_media_control_msg_t *msg = malloc(sizeof(*msg));
     if (msg == NULL) return UINT32_MAX;
-    *msg = (m5_media_control_msg_t) {.type = control, .result = UINT32_MAX};
+    *msg = (m5_media_control_msg_t) {
+        .type = control,
+        .result = UINT32_MAX,
+        .references = 2,
+    };
     msg->reply = xSemaphoreCreateBinary();
     if (msg->reply == NULL) {
         free(msg);
@@ -1598,9 +1620,8 @@ uint32_t m5_media_control(m5_media_ctrl_t control, uint32_t timeout_ms)
         return UINT32_MAX;
     }
     const BaseType_t acked = xSemaphoreTake(msg->reply, pdMS_TO_TICKS(timeout_ms));
-    const uint32_t result = msg->result;
-    vSemaphoreDelete(msg->reply);
-    free(msg);
+    const uint32_t result = acked == pdTRUE ? msg->result : UINT32_MAX;
+    m5_media_control_release(msg);
     return acked == pdTRUE ? result : UINT32_MAX;
 }
 
