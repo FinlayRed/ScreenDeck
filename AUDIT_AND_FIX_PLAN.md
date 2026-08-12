@@ -587,8 +587,8 @@ Update this list as fixes land:
 - [x] F7 Full MJPEG validation and fallback
 - [x] F8 Screensaver orientation
 - [x] E14 Correct frame-limit diagnostic
-- [ ] Full editor verification passes
-- [ ] Fresh firmware build passes
+- [x] Full editor verification passes (33 Rust tests, clippy clean, rustfmt clean, svelte-check clean, 13 Vitest, Vite build clean)
+- [x] Fresh firmware build passes (ESP-IDF 5.5.5, esp32p4, all phases)
 - [ ] Hardware and recovery matrix passes
 
 ## References
