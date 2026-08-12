@@ -44,4 +44,5 @@ Assert ($source.Contains('s_radial_highlights') -and -not $source.Contains('lv_o
 Assert ($source.Contains('M6_RADIAL_ACTION_PAGE_NEXT') -and $source.Contains('m6_run_radial_action')) 'radial navigation actions are supported'
 Assert ($source.Contains('m6_schedule_radial_prewarm') -and $source.Contains('lv_image_decoder_open')) 'active page radial artwork is prewarmed'
 Assert (-not $source.Contains('m6_load_next_radial_image') -and $source.Contains('lv_image_set_src(image, &s_ui_bundle.images[asset])')) 'radial artwork is attached immediately'
+Assert ($source.Contains('s_media_flipped = (header->settings & (1U << 8)) != 0') -and $source.Contains('m5_flip_rgb565_180((uint16_t *) s_media.panel_buffers')) 'screensaver follows the project display orientation'
 Write-Host 'M6 gesture matrix complete: corners, edges, jitter, flick, hysteresis, wake suppression.'

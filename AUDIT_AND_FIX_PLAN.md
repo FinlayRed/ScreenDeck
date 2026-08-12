@@ -552,7 +552,7 @@ The audit passed these checks:
   - E11: `startup_info` detects FFmpeg (sidecar then PATH); the editor disables animated-icon import and screensaver upload with an exact installation explanation when missing. README documents the pinned sidecar layout, licensing, checksum, and upgrade process.
   - E12: a `TempGuard` whose Drop removes every staged file covers both conversion helpers, so failed spawns, early error returns, and successes all clean up.
   - E13: `restore_bundle` validates and decompiles a local .sdb into an unsaved project with device-ready icons (no source media); the toolbar gains a Restore backup action.
-  - Verification: 33 Rust tests (2 new), clippy clean, rustfmt clean, svelte-check clean, 13 Vitest, Vite build clean.
+  - Verification: 34 Rust tests, clippy clean, rustfmt clean, svelte-check clean, 13 Vitest, Vite build clean.
 
 - **F8 (2026-08-12):** Screensaver orientation landed on `fix/f8-screensaver-orientation`. The media task stores the 180-degree rotation flag from the bundle settings and mirrors each decoded RGB565 frame in place before presenting, so the screensaver matches the LVGL UI orientation without maintaining a second media file. Firmware builds clean.
 
@@ -587,7 +587,7 @@ Update this list as fixes land:
 - [x] F7 Full MJPEG validation and fallback
 - [x] F8 Screensaver orientation
 - [x] E14 Correct frame-limit diagnostic
-- [x] Full editor verification passes (33 Rust tests, clippy clean, rustfmt clean, svelte-check clean, 13 Vitest, Vite build clean)
+- [x] Full editor verification passes (34 Rust tests, clippy clean, rustfmt clean, svelte-check clean, 13 Vitest, Vite build clean)
 - [x] Fresh firmware build passes (ESP-IDF 5.5.5, esp32p4, all phases)
 - [ ] Hardware and recovery matrix passes
 
