@@ -512,17 +512,26 @@ The audit passed these checks:
 ## Progress log
 
 - **Phase 0 (2026-08-12):** Baseline protected on `phase/0-baseline`. The four pre-existing editor diffs and this document are committed. The destructive `-CommitTestBundle` smoke test now refuses to run without `-AllowDestructiveBundle` (F3 will replace it with a valid-bundle test). Baseline checks re-recorded: 13 Rust tests (5 ignored), 11 Vitest, svelte-check clean, Vite build clean, clippy clean across targets, rustfmt clean, firmware builds under ESP-IDF v5.5.5 (previously unavailable).
+- **Phase 1 (2026-08-12):** Memory and filesystem safety fixes landed on `phase/1-memory-filesystem-safety`.
+  - E1: WinUSB transfers now run through an owned heap `IoOperation` (OVERLAPPED, buffer, byte count). `run_transfer` cancels on timeout and waits for the kernel to reach a terminal state (`ERROR_OPERATION_ABORTED` or a real byte count) before the allocation is freed; the completion-racing-cancellation case is handled via `ERROR_NOT_FOUND`; a genuinely stuck operation is leaked rather than freed. The Win32 layer is injectable (`Win32Io`); seven mock tests cover success, pending completion, timeout+cancel, racing completion, failed cancel, disconnect, and immediate failure.
+  - F1: media task owns all screensaver handles and buffers. New control queue (`M5_MEDIA_CTRL_QUIESCE/RELOAD/TEST`) serializes cross-task requests. `MEDIA_COMMIT` quiesces the media task (with acknowledgement) before renaming, then reloads after activation.
+  - F2: `TEST_SCREENSAVER` now routes through the control queue; indexing, reload, playback, and test transitions are serialized in the media task.
+  - F5: explicit download transaction. `DOWNLOAD_END` opcode (15) added; firmware closes the stream on end, terminal error, detach, and abort; the editor sends `DOWNLOAD_END` after the final chunk; generation cleanup skips the open download generation.
+  - F6: the TinyUSB detach callback only publishes the connection change; the sync task closes the download stream on its next bounded wait.
+  - T1: smoke-test `WINUSB_PIPE_INFORMATION` no longer uses `Pack=1` (8 bytes); it now marshals to the ABI-correct 12 bytes and the script asserts that size before any native call.
+  - Secondary guard: `CONFIG_FATFS_FS_LOCK=8` enabled.
+  - Verification: 20 Rust tests (7 new), clippy clean, rustfmt clean, firmware builds, PowerShell parser checks pass, T1 assertion verified at runtime.
 
 ## Completion checklist
 
 Update this list as fixes land:
 
-- [ ] E1 WinUSB cancellation lifetime
-- [ ] F1 Safe screensaver replacement
-- [ ] F2 Serialized screensaver testing/indexing
+- [x] E1 WinUSB cancellation lifetime
+- [x] F1 Safe screensaver replacement
+- [x] F2 Serialized screensaver testing/indexing
 - [ ] F3 Full pre-activation M5UI validation
 - [ ] F4 Typed-table alignment validation
-- [ ] F5 Download transaction cleanup
+- [x] F5 Download transaction cleanup
 - [ ] E2 Symmetric project persistence
 - [ ] E3 Atomic archive saving
 - [ ] E4 Bounded undo history
@@ -538,9 +547,9 @@ Update this list as fixes land:
 - [ ] I2 Reconnect-based commit verification
 - [ ] I3 Compatible standalone conversion
 - [ ] I4 Shared animation limits
-- [ ] T1 Correct WinUSB smoke-test ABI
+- [x] T1 Correct WinUSB smoke-test ABI
 - [ ] E13 Compiled-backup restore or relabeling
-- [ ] F6 Detach-safe download ownership
+- [x] F6 Detach-safe download ownership
 - [ ] F7 Full MJPEG validation and fallback
 - [ ] F8 Screensaver orientation
 - [ ] E14 Correct frame-limit diagnostic

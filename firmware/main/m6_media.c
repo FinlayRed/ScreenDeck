@@ -163,6 +163,16 @@ typedef struct {
     lv_image_dsc_t descriptor;
 } m5_visible_animation_t;
 
+/* Control requests sent by the M3 sync task are serialized through this queue
+ * so the media task remains the sole owner of screensaver handles and buffers.
+ * See m5_media_control() in m6_media.h. */
+typedef struct {
+    m5_media_ctrl_t type;
+    SemaphoreHandle_t reply;
+    uint32_t result;
+} m5_media_control_msg_t;
+
+static QueueHandle_t s_media_control_queue;
 static lv_display_t *s_display;
 static esp_lcd_panel_handle_t s_panel;
 static lv_obj_t *s_saver_input;
@@ -179,6 +189,7 @@ static volatile bool s_page_change_requested;
 static volatile bool s_screensaver_requested;
 static uint32_t s_screensaver_idle_seconds = M5_DEFAULT_SCREENSAVER_IDLE_SECONDS;
 static uint32_t s_media_index_error;
+static const uint32_t M5_MEDIA_CONTROL_TIMEOUT_MS = 30000;
 static uint8_t s_index_buffer[M5_INDEX_BUFFER_BYTES];
 static m5_macro_slot_t s_macro_slots[M5_MACRO_SLOTS];
 static uint8_t s_key_refs[256], s_modifier_refs[8];
@@ -224,6 +235,7 @@ static const char *const s_symbols[M5_BUTTONS] = {
 };
 
 static void m5_render_active_ui(void);
+static void m5_media_handle_control(m5_media_control_msg_t *ctrl);
 
 static void m6_log_render_time(const char *phase, int64_t started_us)
 {
@@ -1321,6 +1333,13 @@ static void m5_media_task(void *argument)
     uint32_t saver_window_dropped = 0;
     uint32_t saver_window_max_work_us = 0;
     while (true) {
+        /* Serialize cross-task media requests (sync QUIESCE/RELOAD, USB test)
+         * here in the owning task before any other state is observed. */
+        m5_media_control_msg_t *ctrl;
+        while (s_media_control_queue != NULL &&
+               xQueueReceive(s_media_control_queue, &ctrl, 0) == pdTRUE) {
+            m5_media_handle_control(ctrl);
+        }
         if (!s_ui_ready) {
             /* The adapter lock is not guaranteed to be available from
              * app_main immediately after bsp_display_start. Retry from the
@@ -1481,6 +1500,8 @@ void m5_media_start(lv_display_t *display)
     s_panel = bsp_display_get_panel_handle();
     s_last_activity_us = esp_timer_get_time();
     memset(&s_media, 0, sizeof(s_media));
+    s_media_control_queue = xQueueCreate(4, sizeof(m5_media_control_msg_t *));
+    ESP_ERROR_CHECK(s_media_control_queue == NULL ? ESP_ERR_NO_MEM : ESP_OK);
     s_macro_mutex = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(s_macro_mutex ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(s_panel, 3,
@@ -1510,23 +1531,80 @@ void m5_media_start(lv_display_t *display)
     ESP_LOGI(TAG, "M5_MEDIA indexing=background");
 }
 
+/* Closes every screensaver resource the media task owns. Only ever called from
+ * the media task (or m5_media_start before the task starts). After this, the
+ * sync task may rename or unlink the screensaver files safely. */
+static void m5_media_quiesce(void)
+{
+    if (s_media.file != NULL) fclose(s_media.file);
+    heap_caps_free(s_media.read_buffer);
+    heap_caps_free(s_media.preload);
+    heap_caps_free(s_media.file_buffer);
+    s_media.file = NULL;
+    s_media.read_buffer = NULL;
+    s_media.preload = NULL;
+    s_media.file_buffer = NULL;
+    s_media.preloaded = false;
+    s_media.ready = false;
+    s_media.frame_count = 0;
+    s_media.largest_frame = 0;
+    s_media.file_size = 0;
+    s_media.file_offset = 0;
+    s_media_index_error = 0;
+}
+
+static void m5_media_handle_control(m5_media_control_msg_t *ctrl)
+{
+    switch (ctrl->type) {
+    case M5_MEDIA_CTRL_QUIESCE:
+        m5_media_quiesce();
+        ctrl->result = 0;
+        break;
+    case M5_MEDIA_CTRL_RELOAD:
+        m5_media_quiesce();
+        (void) m5_index_mjpeg();
+        ctrl->result = s_media.ready ? 0 : (s_media_index_error ? s_media_index_error : UINT32_MAX);
+        break;
+    case M5_MEDIA_CTRL_TEST:
+        if (!s_media.ready) {
+            m5_media_quiesce();
+            (void) m5_index_mjpeg();
+        }
+        ctrl->result = s_media.ready ? 0 : (s_media_index_error ? s_media_index_error : UINT32_MAX);
+        if (s_media.ready) s_screensaver_requested = true;
+        break;
+    default:
+        ctrl->result = UINT32_MAX;
+        break;
+    }
+    if (ctrl->reply != NULL) xSemaphoreGive(ctrl->reply);
+}
+
+uint32_t m5_media_control(m5_media_ctrl_t control, uint32_t timeout_ms)
+{
+    if (s_media_control_queue == NULL) return UINT32_MAX;
+    m5_media_control_msg_t *msg = malloc(sizeof(*msg));
+    if (msg == NULL) return UINT32_MAX;
+    *msg = (m5_media_control_msg_t) {.type = control, .result = UINT32_MAX};
+    msg->reply = xSemaphoreCreateBinary();
+    if (msg->reply == NULL) {
+        free(msg);
+        return UINT32_MAX;
+    }
+    const BaseType_t queued = xQueueSend(s_media_control_queue, &msg, pdMS_TO_TICKS(100));
+    if (queued != pdTRUE) {
+        vSemaphoreDelete(msg->reply);
+        free(msg);
+        return UINT32_MAX;
+    }
+    const BaseType_t acked = xSemaphoreTake(msg->reply, pdMS_TO_TICKS(timeout_ms));
+    const uint32_t result = msg->result;
+    vSemaphoreDelete(msg->reply);
+    free(msg);
+    return acked == pdTRUE ? result : UINT32_MAX;
+}
+
 uint32_t m5_media_trigger_screensaver(void)
 {
-    if (!s_media.ready) {
-        if (s_media.file != NULL) fclose(s_media.file);
-        heap_caps_free(s_media.read_buffer);
-        heap_caps_free(s_media.preload);
-        heap_caps_free(s_media.file_buffer);
-        s_media.file = NULL;
-        s_media.read_buffer = NULL;
-        s_media.preload = NULL;
-        s_media.file_buffer = NULL;
-        s_media.preloaded = false;
-        s_media.frame_count = 0;
-        s_media.largest_frame = 0;
-        s_media.file_size = 0;
-        if (!m5_index_mjpeg()) return s_media_index_error ? s_media_index_error : UINT32_MAX;
-    }
-    s_screensaver_requested = true;
-    return 0;
+    return m5_media_control(M5_MEDIA_CTRL_TEST, M5_MEDIA_CONTROL_TIMEOUT_MS);
 }

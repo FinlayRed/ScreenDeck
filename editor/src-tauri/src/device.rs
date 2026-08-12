@@ -18,6 +18,7 @@ const MEDIA_COMMIT: u8 = 10;
 const TEST_SCREENSAVER: u8 = 12;
 const DOWNLOAD_BEGIN: u8 = 13;
 const DOWNLOAD_CHUNK: u8 = 14;
+const DOWNLOAD_END: u8 = 15;
 const DOWNLOAD_CAPABILITY: u32 = 0x100;
 const TEST_SCREENSAVER_CAPABILITY: u32 = 0x80;
 const MEDIA_BATCH_CAPABILITY: u32 = 0x40;
@@ -367,6 +368,19 @@ pub fn download() -> Result<Vec<u8>, DeviceError> {
             "downloaded bundle failed validation".into(),
         ));
     }
+    // F5: close the device-side file handle with an explicit end marker so
+    // generation cleanup never unlinks an open file after later commits. A
+    // failed marker is non-fatal: the bundle is already received and validated,
+    // and the device releases the handle on the next download, detach, or
+    // commit anyway.
+    let _ = checked_exchange_with_timeout(
+        &mut session,
+        DOWNLOAD_END,
+        sequence,
+        &[],
+        "end download",
+        2_000,
+    );
     Ok(bundle)
 }
 
@@ -521,8 +535,14 @@ mod transport {
     const OPEN_EXISTING: u32 = 3;
     const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
     const ERROR_IO_PENDING: u32 = 997;
+    const ERROR_OPERATION_ABORTED: u32 = 995;
+    const ERROR_NOT_FOUND: u32 = 1168;
     const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 0x102;
+    const WAIT_FAILED: u32 = 0xFFFF_FFFF;
     const IO_TIMEOUT_MS: u32 = 5_000;
+    const POST_CANCEL_WAIT_MS: u32 = 10_000;
+    const CANCEL_RETRIES: u32 = 3;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -697,31 +717,6 @@ mod transport {
         DeviceError::Windows(unsafe { GetLastError() })
     }
 
-    unsafe fn await_io(
-        file: Handle,
-        started: i32,
-        overlapped: &mut Overlapped,
-        transferred: &mut u32,
-        timeout_ms: u32,
-    ) -> Result<(), DeviceError> {
-        if started == 0 && GetLastError() != ERROR_IO_PENDING {
-            return Err(last_error());
-        }
-        if started == 0 {
-            if WaitForSingleObject(overlapped.event, timeout_ms) != WAIT_OBJECT_0 {
-                CancelIoEx(file, overlapped);
-                return Err(DeviceError::Protocol(format!(
-                    "USB transfer timed out after {} seconds",
-                    timeout_ms / 1000
-                )));
-            }
-            if GetOverlappedResult(file, overlapped, transferred, 0) == 0 {
-                return Err(last_error());
-            }
-        }
-        Ok(())
-    }
-
     unsafe fn device_path() -> Result<Vec<u16>, DeviceError> {
         let set = DeviceSet(SetupDiGetClassDevsW(
             &INTERFACE_GUID,
@@ -767,6 +762,203 @@ mod transport {
         let mut path = std::slice::from_raw_parts(start, length).to_vec();
         path.push(0);
         Ok(path)
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum IoDirection {
+        Read,
+        Write,
+    }
+
+    /// Owned, heap-allocated I/O operation. The `OVERLAPPED`, transfer buffer
+    /// and byte count all live here so Windows never touches stack memory
+    /// after cancellation (E1). A transfer is only freed after the kernel
+    /// reports completion or `ERROR_OPERATION_ABORTED`.
+    struct IoOperation {
+        overlapped: Overlapped,
+        direction: IoDirection,
+        buffer: Vec<u8>,
+        transferred: u32,
+        started: bool,
+    }
+
+    impl IoOperation {
+        fn new(direction: IoDirection, buffer: Vec<u8>, event: Handle) -> Box<Self> {
+            Box::new(Self {
+                overlapped: Overlapped {
+                    internal: 0,
+                    internal_high: 0,
+                    offset: 0,
+                    offset_high: 0,
+                    event,
+                },
+                direction,
+                buffer,
+                transferred: 0,
+                started: false,
+            })
+        }
+    }
+
+    /// Injectable Win32 seam for the transfer loop. The production `RealWin32`
+    /// calls the real WinUSB/kernel32 functions; tests substitute a scripted
+    /// mock to cover cancellation, racing completion, and disconnect paths.
+    trait Win32Io {
+        /// Starts a read or write. Nonzero return means synchronous completion.
+        fn start(&self, usb: Handle, pipe: u8, op: &mut IoOperation) -> i32;
+        fn last_error(&self) -> u32;
+        fn wait_for_object(&self, event: Handle, milliseconds: u32) -> u32;
+        fn cancel_io(&self, file: Handle, op: &mut IoOperation) -> i32;
+        /// Ok(transferred) or Err(win32 error).
+        fn get_overlapped_result(&self, file: Handle, op: &mut IoOperation) -> Result<u32, u32>;
+        fn reset_event(&self, event: Handle) -> i32;
+        fn abort_pipe(&self, usb: Handle, pipe: u8) -> i32;
+        fn reset_pipe(&self, usb: Handle, pipe: u8) -> i32;
+    }
+
+    struct RealWin32;
+
+    impl Win32Io for RealWin32 {
+        fn start(&self, usb: Handle, pipe: u8, op: &mut IoOperation) -> i32 {
+            unsafe {
+                match op.direction {
+                    IoDirection::Write => WinUsb_WritePipe(
+                        usb,
+                        pipe,
+                        op.buffer.as_ptr(),
+                        op.buffer.len() as u32,
+                        &mut op.transferred,
+                        &mut op.overlapped as *mut _ as *mut c_void,
+                    ),
+                    IoDirection::Read => WinUsb_ReadPipe(
+                        usb,
+                        pipe,
+                        op.buffer.as_mut_ptr(),
+                        op.buffer.len() as u32,
+                        &mut op.transferred,
+                        &mut op.overlapped as *mut _ as *mut c_void,
+                    ),
+                }
+            }
+        }
+        fn last_error(&self) -> u32 {
+            unsafe { GetLastError() }
+        }
+        fn wait_for_object(&self, event: Handle, milliseconds: u32) -> u32 {
+            unsafe { WaitForSingleObject(event, milliseconds) }
+        }
+        fn cancel_io(&self, file: Handle, op: &mut IoOperation) -> i32 {
+            unsafe { CancelIoEx(file, &mut op.overlapped) }
+        }
+        fn get_overlapped_result(&self, file: Handle, op: &mut IoOperation) -> Result<u32, u32> {
+            unsafe {
+                let mut transferred = 0u32;
+                if GetOverlappedResult(file, &mut op.overlapped, &mut transferred, 0) == 0 {
+                    Err(GetLastError())
+                } else {
+                    op.transferred = transferred;
+                    Ok(transferred)
+                }
+            }
+        }
+        fn reset_event(&self, event: Handle) -> i32 {
+            unsafe { ResetEvent(event) }
+        }
+        fn abort_pipe(&self, usb: Handle, pipe: u8) -> i32 {
+            unsafe { WinUsb_AbortPipe(usb, pipe) }
+        }
+        fn reset_pipe(&self, usb: Handle, pipe: u8) -> i32 {
+            unsafe { WinUsb_ResetPipe(usb, pipe) }
+        }
+    }
+
+    /// Outcome of `run_transfer`. `Stuck` means the kernel never reached a
+    /// terminal state with the operation, so the caller must leak the
+    /// operation object rather than free memory Windows may still access.
+    enum TransferOutcome {
+        Transferred(u32),
+        Error(DeviceError),
+        Stuck(DeviceError),
+    }
+
+    fn timeout_error(timeout_ms: u32) -> DeviceError {
+        DeviceError::Protocol(format!(
+            "USB transfer timed out after {} seconds",
+            timeout_ms / 1000
+        ))
+    }
+
+    /// Runs one transfer to a terminal state. Windows cancellation is
+    /// asynchronous, so on timeout the operation is cancelled and this helper
+    /// waits for the kernel to finish with it (`ERROR_OPERATION_ABORTED` or a
+    /// real byte count) before returning. The race where the transfer finishes
+    /// between the wait and the cancel is handled via `ERROR_NOT_FOUND`.
+    fn run_transfer(
+        win: &dyn Win32Io,
+        file: Handle,
+        usb: Handle,
+        pipe: u8,
+        op: &mut IoOperation,
+        timeout_ms: u32,
+    ) -> TransferOutcome {
+        op.transferred = 0;
+        op.started = false;
+        let started = win.start(usb, pipe, op);
+        if started == 0 && win.last_error() != ERROR_IO_PENDING {
+            return TransferOutcome::Error(DeviceError::Windows(win.last_error()));
+        }
+        if started == 0 && win.wait_for_object(op.overlapped.event, timeout_ms) != WAIT_OBJECT_0 {
+            return cancel_and_wait(win, file, op, timeout_ms);
+        }
+        match win.get_overlapped_result(file, op) {
+            Ok(transferred) => TransferOutcome::Transferred(transferred),
+            Err(ERROR_OPERATION_ABORTED) => TransferOutcome::Error(timeout_error(timeout_ms)),
+            Err(error) => TransferOutcome::Error(DeviceError::Windows(error)),
+        }
+    }
+
+    fn cancel_and_wait(
+        win: &dyn Win32Io,
+        file: Handle,
+        op: &mut IoOperation,
+        timeout_ms: u32,
+    ) -> TransferOutcome {
+        let mut cancelled = win.cancel_io(file, op) != 0;
+        if !cancelled && win.last_error() == ERROR_NOT_FOUND {
+            // The transfer completed between the wait and the cancel; read the
+            // bytes instead of treating the lost cancel as a failure.
+            return match win.get_overlapped_result(file, op) {
+                Ok(transferred) => TransferOutcome::Transferred(transferred),
+                Err(error) => TransferOutcome::Error(DeviceError::Windows(error)),
+            };
+        }
+        let mut retries = CANCEL_RETRIES;
+        loop {
+            match win.wait_for_object(op.overlapped.event, POST_CANCEL_WAIT_MS) {
+                WAIT_OBJECT_0 => break,
+                WAIT_TIMEOUT => {
+                    if retries == 0 {
+                        return TransferOutcome::Stuck(timeout_error(timeout_ms));
+                    }
+                    retries -= 1;
+                    cancelled = win.cancel_io(file, op) != 0;
+                    if !cancelled && win.last_error() == ERROR_NOT_FOUND {
+                        break;
+                    }
+                }
+                WAIT_FAILED => {
+                    return TransferOutcome::Stuck(DeviceError::Protocol(
+                        "USB completion wait failed".into(),
+                    ));
+                }
+                _ => unreachable!(),
+            }
+        }
+        match win.get_overlapped_result(file, op) {
+            Ok(transferred) => TransferOutcome::Transferred(transferred),
+            Err(ERROR_OPERATION_ABORTED) => TransferOutcome::Error(timeout_error(timeout_ms)),
+            Err(error) => TransferOutcome::Error(DeviceError::Windows(error)),
+        }
     }
 
     struct Connection {
@@ -836,38 +1028,31 @@ mod transport {
         }
 
         unsafe fn send(&mut self, frame: &[u8]) -> Result<(), DeviceError> {
-            let file = self.file.0;
-            let usb = self.usb.0;
-            let output = self.output;
-            if ResetEvent(self.write_event.0) == 0 {
-                return Err(last_error());
+            let win = RealWin32;
+            if win.reset_event(self.write_event.0) == 0 {
+                return Err(DeviceError::Windows(win.last_error()));
             }
-            let mut write_overlapped = Overlapped {
-                internal: 0,
-                internal_high: 0,
-                offset: 0,
-                offset_high: 0,
-                event: self.write_event.0,
-            };
-            let mut written = 0u32;
-            let write_started = WinUsb_WritePipe(
-                usb,
-                output,
-                frame.as_ptr(),
-                frame.len() as u32,
-                &mut written,
-                &mut write_overlapped as *mut _ as *mut c_void,
-            );
-            await_io(
-                file,
-                write_started,
-                &mut write_overlapped,
-                &mut written,
+            let mut op = IoOperation::new(IoDirection::Write, frame.to_vec(), self.write_event.0);
+            let transferred = match run_transfer(
+                &win,
+                self.file.0,
+                self.usb.0,
+                self.output,
+                &mut op,
                 IO_TIMEOUT_MS,
-            )?;
-            if written as usize != frame.len() {
+            ) {
+                TransferOutcome::Transferred(bytes) => bytes,
+                TransferOutcome::Error(error) => return Err(error),
+                TransferOutcome::Stuck(error) => {
+                    // Intentional leak: Windows may still reference the
+                    // operation, so the owned buffer must outlive the caller.
+                    let _ = Box::into_raw(op);
+                    return Err(error);
+                }
+            };
+            if transferred as usize != frame.len() {
                 return Err(DeviceError::Protocol(format!(
-                    "short USB write: {written}/{}",
+                    "short USB write: {transferred}/{}",
                     frame.len()
                 )));
             }
@@ -880,50 +1065,36 @@ mod transport {
             timeout_ms: u32,
         ) -> Result<Vec<u8>, DeviceError> {
             self.send(frame)?;
+            let win = RealWin32;
             let file = self.file.0;
             let usb = self.usb.0;
             let input = self.input;
-            let output = self.output;
             let mut response = Vec::with_capacity(1420);
             let mut expected = 20usize;
             while response.len() < expected {
-                let mut packet = [0u8; 512];
-                let mut read = 0u32;
-                if ResetEvent(self.read_event.0) == 0 {
-                    return Err(last_error());
+                if win.reset_event(self.read_event.0) == 0 {
+                    return Err(DeviceError::Windows(win.last_error()));
                 }
-                let mut read_overlapped = Overlapped {
-                    internal: 0,
-                    internal_high: 0,
-                    offset: 0,
-                    offset_high: 0,
-                    event: self.read_event.0,
+                let mut op = IoOperation::new(IoDirection::Read, vec![0u8; 512], self.read_event.0);
+                let read = match run_transfer(&win, file, usb, input, &mut op, timeout_ms) {
+                    TransferOutcome::Transferred(bytes) => bytes,
+                    TransferOutcome::Error(error) => {
+                        self.abort_and_reset_pipes(&win);
+                        return Err(error);
+                    }
+                    TransferOutcome::Stuck(error) => {
+                        // Intentional leak: Windows may still reference the
+                        // operation, so the owned buffer must outlive the
+                        // caller.
+                        let _ = Box::into_raw(op);
+                        self.abort_and_reset_pipes(&win);
+                        return Err(error);
+                    }
                 };
-                let read_started = WinUsb_ReadPipe(
-                    usb,
-                    input,
-                    packet.as_mut_ptr(),
-                    packet.len() as u32,
-                    &mut read,
-                    &mut read_overlapped as *mut _ as *mut c_void,
-                );
-                if let Err(error) = await_io(
-                    file,
-                    read_started,
-                    &mut read_overlapped,
-                    &mut read,
-                    timeout_ms,
-                ) {
-                    WinUsb_AbortPipe(usb, input);
-                    WinUsb_ResetPipe(usb, input);
-                    WinUsb_AbortPipe(usb, output);
-                    WinUsb_ResetPipe(usb, output);
-                    return Err(error);
-                }
                 if read == 0 {
                     return Err(DeviceError::Protocol("empty USB response".into()));
                 }
-                response.extend_from_slice(&packet[..read as usize]);
+                response.extend_from_slice(&op.buffer[..read as usize]);
                 if response.len() >= 20 {
                     expected =
                         20 + u32::from_le_bytes(response[12..16].try_into().unwrap()) as usize;
@@ -934,6 +1105,13 @@ mod transport {
             }
             response.truncate(expected);
             Ok(response)
+        }
+
+        unsafe fn abort_and_reset_pipes(&self, win: &RealWin32) {
+            win.abort_pipe(self.usb.0, self.input);
+            win.reset_pipe(self.usb.0, self.input);
+            win.abort_pipe(self.usb.0, self.output);
+            win.reset_pipe(self.usb.0, self.output);
         }
     }
 
@@ -955,6 +1133,205 @@ mod transport {
             timeout_ms: u32,
         ) -> Result<Vec<u8>, DeviceError> {
             unsafe { self.0.exchange(frame, timeout_ms) }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::cell::Cell;
+
+        const ERROR_ACCESS_DENIED: u32 = 5;
+        const ERROR_DEVICE_REMOVED: u32 = 1117;
+
+        /// Scripted Win32 layer for exercising the transfer loop without a
+        /// physical device. Each scenario drives exactly the call sequence the
+        /// production `RealWin32` would produce for that hardware outcome.
+        enum Scenario {
+            /// Completed synchronously with N bytes.
+            ImmediateSuccess(u32),
+            /// Started pending, signalled, N bytes.
+            PendingSuccess(u32),
+            /// Pending, wait timed out, cancel accepted, aborted.
+            TimeoutAborted,
+            /// Pending, wait timed out, but the transfer finished before the
+            /// cancel landed (cancel reports ERROR_NOT_FOUND).
+            TimeoutRaceCompleted(u32),
+            /// Pending, wait timed out, cancel denied, transfer completes on
+            /// the follow-up wait.
+            CancelFailedThenCompleted(u32),
+            /// Signalled, but completion reports a device-removal error.
+            Disconnect,
+            /// Start failed immediately with a Win32 error.
+            ImmediateError(u32),
+        }
+
+        struct MockWin32 {
+            scenario: Scenario,
+            wait_calls: Cell<u32>,
+            cancel_calls: Cell<u32>,
+            last_error: Cell<u32>,
+        }
+
+        impl MockWin32 {
+            fn new(scenario: Scenario) -> Self {
+                Self {
+                    scenario,
+                    wait_calls: Cell::new(0),
+                    cancel_calls: Cell::new(0),
+                    last_error: Cell::new(0),
+                }
+            }
+        }
+
+        impl Win32Io for MockWin32 {
+            fn start(&self, _usb: Handle, _pipe: u8, op: &mut IoOperation) -> i32 {
+                match self.scenario {
+                    Scenario::ImmediateSuccess(bytes) => {
+                        op.transferred = bytes;
+                        1
+                    }
+                    Scenario::ImmediateError(error) => {
+                        self.last_error.set(error);
+                        0
+                    }
+                    _ => {
+                        self.last_error.set(ERROR_IO_PENDING);
+                        0
+                    }
+                }
+            }
+            fn last_error(&self) -> u32 {
+                self.last_error.get()
+            }
+            fn wait_for_object(&self, _event: Handle, _milliseconds: u32) -> u32 {
+                let call = self.wait_calls.get();
+                self.wait_calls.set(call + 1);
+                match self.scenario {
+                    Scenario::PendingSuccess(_) | Scenario::Disconnect => WAIT_OBJECT_0,
+                    Scenario::TimeoutAborted
+                    | Scenario::TimeoutRaceCompleted(_)
+                    | Scenario::CancelFailedThenCompleted(_) => {
+                        if call == 0 {
+                            WAIT_TIMEOUT
+                        } else {
+                            WAIT_OBJECT_0
+                        }
+                    }
+                    _ => WAIT_OBJECT_0,
+                }
+            }
+            fn cancel_io(&self, _file: Handle, _op: &mut IoOperation) -> i32 {
+                let call = self.cancel_calls.get();
+                self.cancel_calls.set(call + 1);
+                match self.scenario {
+                    Scenario::TimeoutAborted => 1,
+                    Scenario::TimeoutRaceCompleted(_) => {
+                        self.last_error.set(ERROR_NOT_FOUND);
+                        0
+                    }
+                    Scenario::CancelFailedThenCompleted(_) => {
+                        self.last_error.set(ERROR_ACCESS_DENIED);
+                        0
+                    }
+                    _ => 1,
+                }
+            }
+            fn get_overlapped_result(
+                &self,
+                _file: Handle,
+                op: &mut IoOperation,
+            ) -> Result<u32, u32> {
+                match self.scenario {
+                    Scenario::ImmediateSuccess(bytes)
+                    | Scenario::PendingSuccess(bytes)
+                    | Scenario::TimeoutRaceCompleted(bytes)
+                    | Scenario::CancelFailedThenCompleted(bytes) => {
+                        op.transferred = bytes;
+                        Ok(bytes)
+                    }
+                    Scenario::TimeoutAborted => Err(ERROR_OPERATION_ABORTED),
+                    Scenario::Disconnect => Err(ERROR_DEVICE_REMOVED),
+                    Scenario::ImmediateError(_) => Err(self.last_error.get()),
+                }
+            }
+            fn reset_event(&self, _event: Handle) -> i32 {
+                1
+            }
+            fn abort_pipe(&self, _usb: Handle, _pipe: u8) -> i32 {
+                1
+            }
+            fn reset_pipe(&self, _usb: Handle, _pipe: u8) -> i32 {
+                1
+            }
+        }
+
+        fn run(scenario: Scenario, timeout_ms: u32) -> (TransferOutcome, u32, u32) {
+            let win = MockWin32::new(scenario);
+            let event = null_mut();
+            let mut op = IoOperation::new(IoDirection::Read, vec![0u8; 512], event);
+            let outcome = run_transfer(&win, null_mut(), null_mut(), 0x81, &mut op, timeout_ms);
+            (outcome, win.wait_calls.get(), win.cancel_calls.get())
+        }
+
+        #[test]
+        fn synchronous_completion_reports_bytes() {
+            let (outcome, _, _) = run(Scenario::ImmediateSuccess(96), 500);
+            assert!(matches!(outcome, TransferOutcome::Transferred(96)));
+        }
+
+        #[test]
+        fn pending_completion_reports_bytes() {
+            let (outcome, waits, _) = run(Scenario::PendingSuccess(128), 500);
+            assert!(matches!(outcome, TransferOutcome::Transferred(128)));
+            assert_eq!(waits, 1);
+        }
+
+        #[test]
+        fn timeout_cancels_and_waits_for_terminal_state() {
+            let (outcome, waits, cancels) = run(Scenario::TimeoutAborted, 100);
+            assert!(matches!(
+                outcome,
+                TransferOutcome::Error(DeviceError::Protocol(_))
+            ));
+            assert_eq!(cancels, 1, "timeout must cancel exactly once");
+            assert_eq!(waits, 2, "must wait again after cancellation");
+        }
+
+        #[test]
+        fn completion_racing_cancellation_keeps_the_bytes() {
+            let (outcome, _, cancels) = run(Scenario::TimeoutRaceCompleted(512), 100);
+            assert!(
+                matches!(outcome, TransferOutcome::Transferred(512)),
+                "a transfer that finished before the cancel must not be reported as a timeout"
+            );
+            assert_eq!(cancels, 1);
+        }
+
+        #[test]
+        fn failed_cancel_retries_until_completion() {
+            let (outcome, waits, cancels) = run(Scenario::CancelFailedThenCompleted(256), 100);
+            assert!(matches!(outcome, TransferOutcome::Transferred(256)));
+            assert_eq!(cancels, 1);
+            assert_eq!(waits, 2);
+        }
+
+        #[test]
+        fn disconnect_reports_the_win32_error() {
+            let (outcome, _, _) = run(Scenario::Disconnect, 500);
+            assert!(matches!(
+                outcome,
+                TransferOutcome::Error(DeviceError::Windows(ERROR_DEVICE_REMOVED))
+            ));
+        }
+
+        #[test]
+        fn immediate_start_failure_reports_the_win32_error() {
+            let (outcome, _, _) = run(Scenario::ImmediateError(ERROR_ACCESS_DENIED), 500);
+            assert!(matches!(
+                outcome,
+                TransferOutcome::Error(DeviceError::Windows(ERROR_ACCESS_DENIED))
+            ));
         }
     }
 }

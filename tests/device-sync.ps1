@@ -27,8 +27,10 @@ namespace Screendeck {
     [StructLayout(LayoutKind.Sequential)] struct IfaceData { public int cbSize; public Guid guid; public int flags; public IntPtr reserved; }
     [StructLayout(LayoutKind.Sequential, Pack=1)] struct IfaceDesc { public byte length, type, number, alternate, pipes, klass, subclass, protocol, index; }
     // WINUSB_PIPE_INFORMATION is not a raw USB endpoint descriptor: PipeType is
-    // a 32-bit enum followed by the endpoint address (PipeId).
-    [StructLayout(LayoutKind.Sequential, Pack=1)] struct PipeInfo { public uint type; public byte address; public ushort maximumPacketSize; public byte interval; }
+    // a 32-bit enum followed by the endpoint address (PipeId). The Windows ABI
+    // pads the struct to 12 bytes; Pack=1 would shrink it to 8 and let
+    // WinUsb_QueryPipe write past the marshalled buffer (T1).
+    [StructLayout(LayoutKind.Sequential)] struct PipeInfo { public uint type; public byte address; public ushort maximumPacketSize; public byte interval; }
     [DllImport("setupapi.dll", SetLastError=true)] static extern IntPtr SetupDiGetClassDevs(ref Guid guid, IntPtr enumerator, IntPtr hwnd, uint flags);
     [DllImport("setupapi.dll", SetLastError=true)] static extern bool SetupDiEnumDeviceInterfaces(IntPtr set, IntPtr device, ref Guid guid, uint index, ref IfaceData data);
     [DllImport("setupapi.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr set, ref IfaceData data, IntPtr detail, uint size, out uint required, IntPtr device);
@@ -108,6 +110,21 @@ namespace Screendeck {
 }
 '@
 }
+
+# T1: assert the marshalled WINUSB_PIPE_INFORMATION layout matches the Windows
+# ABI (12 bytes) before any native call is made. Pack=1 would report 8 bytes
+# and WinUsb_QueryPipe could overwrite the tail of the marshalled buffer. The
+# nested type is resolved via reflection because the '+PipeInfo' type literal
+# is bound before Add-Type runs; the explicit [type] cast selects
+# Marshal.SizeOf(Type) instead of the object overload. PipeInfo is internal,
+# so both visibility flags are required.
+$pipeInfoType = [Screendeck.M3WinUsb].GetNestedType('PipeInfo', [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::NonPublic)
+if ($null -eq $pipeInfoType) { throw 'PipeInfo type not found after Add-Type.' }
+$pipeInfoSize = [Runtime.InteropServices.Marshal]::SizeOf([type]$pipeInfoType)
+if ($pipeInfoSize -ne 12) {
+    throw "WINUSB_PIPE_INFORMATION marshals to $pipeInfoSize bytes; expected 12. Endpoint enumeration is unsafe."
+}
+Write-Verbose "WINUSB_PIPE_INFORMATION marshals to $pipeInfoSize bytes (ABI-correct)"
 
 function Invoke-M3([byte] $Opcode, [uint32] $Sequence, [byte[]] $Payload = @()) {
     $reply = [Screendeck.M3WinUsb]::Exchange($Opcode, $Sequence, $Payload)
