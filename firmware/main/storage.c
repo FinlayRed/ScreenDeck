@@ -1215,20 +1215,34 @@ static void m3_sync_task(void *argument)
 
 void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bufsize)
 {
-    if (itf != 0 || s_rx_queue == NULL || buffer == NULL || bufsize == 0) return;
-    if (bufsize > M3_RX_PACKET_BYTES) {
-        ESP_LOGE(TAG, "M3_SYNC result=rx_frame_too_large bytes=%u", bufsize);
+    if (itf != 0 || s_rx_queue == NULL) return;
+
+    /* Buffered TinyUSB vendor endpoints notify the application with
+     * (buffer=NULL, bufsize=0); the received bytes must then be drained from
+     * the vendor FIFO. Keep the direct-buffer path for non-buffered builds. */
+    if (buffer != NULL && bufsize > 0) {
+        if (bufsize > M3_RX_PACKET_BYTES) {
+            ESP_LOGE(TAG, "M3_SYNC result=rx_frame_too_large bytes=%u", bufsize);
+            return;
+        }
+        m3_rx_packet_t packet = {.length = bufsize};
+        memcpy(packet.bytes, buffer, packet.length);
+        if (xQueueSend(s_rx_queue, &packet, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "M3_SYNC result=rx_queue_full");
+        }
         return;
     }
-    m3_rx_packet_t packet = {.length = bufsize};
-    memcpy(packet.bytes, buffer, packet.length);
-    if (xQueueSend(s_rx_queue, &packet, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "M3_SYNC result=rx_queue_full");
+
+    while (tud_vendor_n_available(itf) > 0) {
+        m3_rx_packet_t packet = {0};
+        const uint32_t available = tud_vendor_n_available(itf);
+        const uint32_t requested = available < M3_RX_PACKET_BYTES ? available : M3_RX_PACKET_BYTES;
+        packet.length = tud_vendor_n_read(itf, packet.bytes, requested);
+        if (packet.length == 0) break;
+        if (xQueueSend(s_rx_queue, &packet, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "M3_SYNC result=rx_queue_full");
+        }
     }
-    /* This TinyUSB fork mirrors callback bytes into its vendor RX FIFO before
-     * invoking us. We consume the callback buffer directly, so drain that
-     * duplicate FIFO or the OUT endpoint stops rearming after 2 KiB. */
-    tud_vendor_n_read_flush(0);
 }
 
 static void m3_usb_event_cb(tinyusb_event_t *event, void *argument)
