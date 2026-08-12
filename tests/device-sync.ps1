@@ -3,7 +3,8 @@
 [CmdletBinding()]
 param(
     [switch] $CommitTestBundle,
-    [switch] $ResumeTest
+    [switch] $ResumeTest,
+    [switch] $AllowDestructiveBundle
 )
 
 $ErrorActionPreference = 'Stop'
@@ -122,6 +123,12 @@ if (($caps -band 0x1F) -ne 0x1F) { throw "Unexpected M3 capability word: 0x$($ca
 $before = Invoke-M3 6 $sequence; $sequence++
 Write-Host "M3 HELLO ok capabilities=0x$($caps.ToString('X8')); generation=$before"
 if ($CommitTestBundle -and $ResumeTest) { throw 'Choose either -CommitTestBundle or -ResumeTest.' }
+# The commit test bundles a deliberately invalid M5UI payload (96 pseudo-random
+# bytes). Activating it can replace a working device UI with an unloadable one,
+# so it is disabled unless the operator explicitly opts in (see F3).
+if ($CommitTestBundle -and -not $AllowDestructiveBundle) {
+    throw 'Refusing to commit an invalid test bundle: this can replace the working device UI. Pass -AllowDestructiveBundle only on a sacrificial device, or wait for the F3 fix to build a valid bundle.'
+}
 
 if ($CommitTestBundle -or $ResumeTest) {
     [byte[]] $payload = 0..95 | ForEach-Object { [byte](($_ * 37 + 11) -band 0xFF) }

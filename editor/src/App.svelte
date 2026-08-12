@@ -22,11 +22,13 @@
   import Keyboard from "@lucide/svelte/icons/keyboard";
   import Layers3 from "@lucide/svelte/icons/layers-3";
   import MonitorUp from "@lucide/svelte/icons/monitor-up";
+  import Minus from "@lucide/svelte/icons/minus";
   import Play from "@lucide/svelte/icons/play";
   import Plus from "@lucide/svelte/icons/plus";
   import Pencil from "@lucide/svelte/icons/pencil";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import Save from "@lucide/svelte/icons/save";
+  import Square from "@lucide/svelte/icons/square";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import Upload from "@lucide/svelte/icons/upload";
   import Usb from "@lucide/svelte/icons/usb";
@@ -202,6 +204,28 @@
       try { await getCurrentWindow().destroy(); }
       catch (fallbackError) { setNotice("error", "Could not close Screendeck", `${String(error)}\n${String(fallbackError)}`); }
     }
+  }
+
+  async function minimizeWindow() {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    try { await getCurrentWindow().minimize(); }
+    catch (error) { setNotice("error", "Could not minimize Screendeck", String(error)); }
+  }
+
+  async function toggleMaximizeWindow() {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    try { await getCurrentWindow().toggleMaximize(); }
+    catch (error) { setNotice("error", "Could not resize Screendeck", String(error)); }
+  }
+
+  function requestApplicationClose() {
+    if (dirty) guardReplacement("close Screendeck", closeApplication);
+    else void closeApplication();
+  }
+
+  function titlebarDoubleClick(event: MouseEvent) {
+    if ((event.target as Element).closest("button, input, nav")) return;
+    void toggleMaximizeWindow();
   }
 
   async function resolveDirty(choice: "save" | "discard") {
@@ -1001,8 +1025,8 @@
 <svelte:window on:click={() => closeContextMenu()} on:blur={() => closeContextMenu()} on:contextmenu={(event) => { event.preventDefault(); closeContextMenu(); }} on:pointermove={moveButtonPointerDrag} on:pointerup={finishButtonPointerDrag} on:pointercancel={cancelButtonPointerDrag} on:keydown={globalKeydown} />
 
 <div class="app-shell">
-  <header class="topbar" inert={modalOpen}>
-    <div class="brand"><div class="brand-mark"><Layers3 size={17}/></div><span>Screendeck</span><span class="version">0.6.2</span></div>
+  <div class="topbar" role="banner" data-tauri-drag-region inert={modalOpen} on:dblclick={titlebarDoubleClick}>
+    <div class="brand" data-tauri-drag-region><div class="brand-mark" data-tauri-drag-region><Layers3 size={17}/></div><span data-tauri-drag-region>Screendeck</span><span class="version" data-tauri-drag-region>0.6.2</span></div>
     <div class="project-title"><input aria-label="Project name" bind:value={project.name} on:input={() => changed()} on:keydown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); setNotice("info", "Project title updated"); } }} /></div>
     <nav class="toolbar" aria-label="Project actions">
       <button class="icon-button" aria-label="New project" title="New project" on:click={newProject}><FilePlus2 size={17}/></button>
@@ -1017,7 +1041,12 @@
       <button class="sync-button sync-from" title="Replace the editor project with the active device profile" disabled={busy || !device.connected} on:click={importFromDevice}><Download size={16}/>From device</button>
       <button class="sync-button" title={blockingIssues.length ? "Resolve validation issues before syncing" : "Sync project to device"} disabled={busy || !device.connected || blockingIssues.length > 0} on:click={sync}><Upload size={16}/>{busy ? "Working…" : "Sync to device"}</button>
     </nav>
-  </header>
+    <div class="window-controls" aria-label="Window controls">
+      <button aria-label="Minimize" title="Minimize" on:click={minimizeWindow}><Minus size={16}/></button>
+      <button aria-label="Maximize or restore" title="Maximize or restore" on:click={toggleMaximizeWindow}><Square size={12}/></button>
+      <button class="window-close" aria-label="Close" title="Close" on:click={requestApplicationClose}><X size={17}/></button>
+    </div>
+  </div>
 
   <aside class="sidebar" inert={modalOpen}>
     <div class="section-title"><span>Profiles</span><button aria-label="Add profile" title="Add profile" on:click={addProfile}><Plus size={15}/></button></div>
