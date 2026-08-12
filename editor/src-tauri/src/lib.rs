@@ -22,6 +22,27 @@ const SCREENSAVER_MAX_FRAMES: u32 = SCREENSAVER_FPS * SCREENSAVER_MAX_SECONDS;
 const DEVICE_ICON_PIXELS: u16 = 149;
 const DEVICE_ICON_RADIUS: u16 = 12;
 
+/// Removes every staged file when dropped, independent of process spawn or
+/// conversion success, so an early `?` return can never leak source media into
+/// the temp directory (E12).
+struct TempGuard {
+    paths: Vec<PathBuf>,
+}
+
+impl TempGuard {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self { paths }
+    }
+}
+
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 #[tauri::command]
 fn validate_project(project: Project) -> compiler::CompileSummary {
     compiler::summarize(&project)
@@ -226,6 +247,46 @@ async fn upload_screensaver(path: String) -> Result<device::ScreensaverResult, S
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StartupInfo {
+    ffmpeg_available: bool,
+    ffmpeg_path: String,
+}
+
+#[tauri::command]
+fn startup_info() -> StartupInfo {
+    // E11: detect FFmpeg up front so the editor can disable conversion actions
+    // with an exact explanation instead of failing halfway through an import.
+    let path = ffmpeg_path();
+    let available = path.is_file()
+        || Command::new(&path)
+            .arg("-version")
+            .output()
+            .map(|result| result.status.success())
+            .unwrap_or(false);
+    StartupInfo {
+        ffmpeg_available: available,
+        ffmpeg_path: path.to_string_lossy().into_owned(),
+    }
+}
+
+#[tauri::command]
+async fn restore_bundle(path: String) -> Result<Project, String> {
+    // E13: open a compiled backup as an editable project. The decompiler
+    // validates the bundle structure; original source media is never stored in
+    // a bundle, so the restored project carries device-ready icons only.
+    tauri::async_runtime::spawn_blocking(move || {
+        let bundle = fs::read(&path).map_err(|error| format!("could not read backup: {error}"))?;
+        if bundle.len() > 16 * 1024 * 1024 {
+            return Err("backup exceeds the 16 MiB device bundle limit".into());
+        }
+        compiler::decompile(&bundle)
+    })
+    .await
+    .map_err(|error| format!("restore worker failed: {error}"))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct IconConversion {
     poster_data_url: String,
     animation_data_url: String,
@@ -242,6 +303,9 @@ async fn prepare_icon_animation(name: String, data_url: String) -> Result<IconCo
         let input = std::env::temp_dir().join(format!("screendeck-icon-{stamp}.{extension}"));
         let output = std::env::temp_dir().join(format!("screendeck-icon-{stamp}.mjpg"));
         fs::write(&input, source).map_err(|error| format!("could not stage animated icon: {error}"))?;
+        // E12: the guard removes staged media on every exit path, including a
+        // failed FFmpeg spawn and any early error return.
+        let _guard = TempGuard::new(vec![input.clone(), output.clone()]);
         let result = Command::new(ffmpeg_path())
             .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-threads", "1", "-i"])
             .arg(&input)
@@ -273,6 +337,9 @@ fn prepare_screensaver(path: &Path) -> Result<Vec<u8>, String> {
         .as_nanos();
     let output =
         std::env::temp_dir().join(format!("screendeck-{stamp}-{}.mjpeg", std::process::id()));
+    // E12: the guard removes staged output even when a later error return skips
+    // the explicit cleanup calls.
+    let _guard = TempGuard::new(vec![output.clone()]);
     let ffmpeg = ffmpeg_path();
     let video_filter = format!(
         "fps={SCREENSAVER_FPS},scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,transpose=clock,format=yuvj420p"
@@ -358,6 +425,8 @@ pub fn run() {
             load_workspace,
             clear_workspace,
             backup_bundle,
+            restore_bundle,
+            startup_info,
             device_status,
             exit_application,
             test_screensaver,
@@ -574,6 +643,38 @@ mod tests {
             structural_gate(&empty_page).is_err(),
             "a page without 32 buttons would crash the editor"
         );
+    }
+
+    #[test]
+    fn temp_guard_removes_staged_files_on_drop() {
+        // E12: staged media must be removed on every exit path, including
+        // early error returns, so the guard's Drop is the single cleanup path.
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("staged.mjpg");
+        std::fs::write(&file, b"jpeg").unwrap();
+        {
+            let _guard = TempGuard::new(vec![file.clone()]);
+        }
+        assert!(!file.exists(), "staged file survived the guard");
+    }
+
+    #[test]
+    fn compiled_backup_restores_an_editable_project() {
+        // E13: a local .sdb backup is validated and decompiled into an
+        // unsaved project carrying device-ready icons and no source media.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("backup.sdb");
+        let bundle = compiler::compile(&project()).unwrap();
+        std::fs::write(&path, &bundle).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() <= 16 * 1024 * 1024);
+        let restored = compiler::decompile(&bytes).unwrap();
+        assert_eq!(restored.profiles.len(), 1);
+        assert!(restored
+            .assets
+            .iter()
+            .all(|asset| asset.source_name.is_empty()));
+        assert!(model::validate(&restored).is_empty());
     }
 
     #[test]

@@ -38,6 +38,11 @@ export const prepareIconAnimation = (name: string, dataUrl: string): Promise<Ico
 export const saveArchive = (path: string, project: Project): Promise<void> => invoke("save_archive", { path, project });
 export const openArchive = (path: string): Promise<Project> => invoke("open_archive", { path });
 export const backupBundle = (path: string, project: Project): Promise<void> => invoke("backup_bundle", { path, project });
+export const restoreBundle = (path: string): Promise<Project> => invoke("restore_bundle", { path });
+export interface StartupInfo { ffmpegAvailable: boolean; ffmpegPath: string }
+export const startupInfo = (): Promise<StartupInfo> => native()
+  ? invoke("startup_info")
+  : Promise.resolve({ ffmpegAvailable: false, ffmpegPath: "" });
 export const saveWorkspace = (project: Project, preserveAssetData = false): Promise<void> => native()
   ? invoke("save_workspace", { project, preserveAssetData })
   : Promise.resolve((() => {

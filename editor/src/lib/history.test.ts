@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { describe, expect, it } from "vitest";
-import { createHistory, HISTORY_LIMIT, recordHistory, redoHistory, undoHistory } from "./history";
+import { coalesceHistory, createHistory, HISTORY_LIMIT, recordHistory, redoHistory, undoHistory } from "./history";
 
 describe("project history", () => {
   it("undoes, redoes, and clears redo after a branch", () => {
@@ -24,5 +24,15 @@ describe("project history", () => {
       history = recordHistory(history, { value });
     }
     expect(history.undo).toHaveLength(HISTORY_LIMIT);
+  });
+
+  it("coalesces rapid edits into one entry", () => {
+    let history = createHistory({ value: 0 });
+    history = coalesceHistory(history, { value: 1 });
+    history = coalesceHistory(history, { value: 2 });
+    expect(history.undo).toHaveLength(1);
+    expect(history.current.value).toBe(2);
+    history = undoHistory(history)!;
+    expect(history.current.value).toBe(0);
   });
 });

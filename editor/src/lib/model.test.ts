@@ -73,3 +73,32 @@ describe("starterProject", () => {
     expect(buttons).toEqual(original);
   });
 });
+
+import { snapshotProject } from "./model";
+
+describe("snapshotProject", () => {
+  it("shares immutable media assets across snapshots", () => {
+    const asset = { id: "a", name: "x", mediaType: "image/png", dataUrl: `data:image/png;base64,${"A".repeat(1_000_000)}` };
+    const project = {
+      schemaVersion: 3 as const,
+      name: "P",
+      screensaverTimeoutSeconds: 15,
+      brightnessPercent: 80,
+      orientation: "landscape" as const,
+      screensaverEnabled: true,
+      emptyButtonStyle: "grey" as const,
+      profiles: [{ id: "p", name: "D", pages: [] }],
+      macros: [],
+      assets: [asset],
+    };
+    const first = snapshotProject(project);
+    const second = snapshotProject({ ...project, name: "Q" });
+    // The media blob is referenced, never duplicated.
+    expect(first.assets[0]).toBe(asset);
+    expect(second.assets[0]).toBe(asset);
+    // Non-media structure is isolated so undo cannot leak edits.
+    expect(first.profiles).not.toBe(second.profiles);
+    expect(first.name).toBe("P");
+    expect(second.name).toBe("Q");
+  });
+});

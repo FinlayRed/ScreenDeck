@@ -547,6 +547,13 @@ The audit passed these checks:
   - E10: media imports capture profile/page identity before awaiting and resolve the destination in the current project afterwards; a missing destination fails cleanly instead of redirecting the result.
   - Verification: 31 Rust tests (2 new), clippy clean, rustfmt clean, svelte-check clean, 11 Vitest, Vite build clean.
 
+- **Phase 5 (2026-08-12):** Bounded media memory and packaging landed on `phase/5-media-memory-packaging`.
+  - E4: undo history now stores structural snapshots (`snapshotProject`) that share immutable asset objects instead of deep-cloning media, so history memory scales with unique media, not snapshot count; rapid title edits coalesce into one entry per typing burst. Vitest tests pin snapshot sharing and coalescing.
+  - E11: `startup_info` detects FFmpeg (sidecar then PATH); the editor disables animated-icon import and screensaver upload with an exact installation explanation when missing. README documents the pinned sidecar layout, licensing, checksum, and upgrade process.
+  - E12: a `TempGuard` whose Drop removes every staged file covers both conversion helpers, so failed spawns, early error returns, and successes all clean up.
+  - E13: `restore_bundle` validates and decompiles a local .sdb into an unsaved project with device-ready icons (no source media); the toolbar gains a Restore backup action.
+  - Verification: 33 Rust tests (2 new), clippy clean, rustfmt clean, svelte-check clean, 13 Vitest, Vite build clean.
+
 ## Completion checklist
 
 Update this list as fixes land:
@@ -559,21 +566,21 @@ Update this list as fixes land:
 - [x] F5 Download transaction cleanup
 - [x] E2 Symmetric project persistence
 - [x] E3 Atomic archive saving
-- [ ] E4 Bounded undo history
+- [x] E4 Bounded undo history
 - [x] E5 Transfer state isolation
 - [x] E6 True discard behavior
 - [x] E7 Bounded archive expansion
 - [x] E8 Nonblocking device polling
 - [x] E9 Bundle-size validation
 - [x] E10 Stable async import destination
-- [ ] E11 FFmpeg distribution
-- [ ] E12 Temporary-file cleanup
+- [x] E11 FFmpeg distribution
+- [x] E12 Temporary-file cleanup
 - [x] I1 Explicit status response
 - [x] I2 Reconnect-based commit verification
 - [x] I3 Compatible standalone conversion
 - [x] I4 Shared animation limits
 - [x] T1 Correct WinUSB smoke-test ABI
-- [ ] E13 Compiled-backup restore or relabeling
+- [x] E13 Compiled-backup restore or relabeling
 - [x] F6 Detach-safe download ownership
 - [x] F7 Full MJPEG validation and fallback
 - [ ] F8 Screensaver orientation

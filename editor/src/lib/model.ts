@@ -72,6 +72,20 @@ export function cloneProject(project: Project): Project {
   return structuredClone(project);
 }
 
+/** Structural snapshot for undo history (E4). The non-media structure
+ * (profiles, macros, buttons) is small and cloned so snapshots are isolated;
+ * the asset array is shared because asset media blobs are immutable once
+ * created. This keeps history memory proportional to unique media instead of
+ * multiplied by snapshot count. */
+export function snapshotProject(project: Project): Project {
+  return {
+    ...project,
+    profiles: structuredClone(project.profiles),
+    macros: structuredClone(project.macros),
+    assets: project.assets,
+  };
+}
+
 export function moveButton(buttons: Button[], sourceIndex: number, targetIndex: number): boolean {
   if (
     sourceIndex === targetIndex ||
