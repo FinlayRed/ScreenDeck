@@ -554,6 +554,8 @@ The audit passed these checks:
   - E13: `restore_bundle` validates and decompiles a local .sdb into an unsaved project with device-ready icons (no source media); the toolbar gains a Restore backup action.
   - Verification: 33 Rust tests (2 new), clippy clean, rustfmt clean, svelte-check clean, 13 Vitest, Vite build clean.
 
+- **F8 (2026-08-12):** Screensaver orientation landed on `fix/f8-screensaver-orientation`. The media task stores the 180-degree rotation flag from the bundle settings and mirrors each decoded RGB565 frame in place before presenting, so the screensaver matches the LVGL UI orientation without maintaining a second media file. Firmware builds clean.
+
 ## Completion checklist
 
 Update this list as fixes land:
@@ -583,7 +585,7 @@ Update this list as fixes land:
 - [x] E13 Compiled-backup restore or relabeling
 - [x] F6 Detach-safe download ownership
 - [x] F7 Full MJPEG validation and fallback
-- [ ] F8 Screensaver orientation
+- [x] F8 Screensaver orientation
 - [x] E14 Correct frame-limit diagnostic
 - [ ] Full editor verification passes
 - [ ] Fresh firmware build passes

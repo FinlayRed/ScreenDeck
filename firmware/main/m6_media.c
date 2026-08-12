@@ -185,6 +185,7 @@ static volatile bool s_page_change_requested;
 static volatile bool s_screensaver_requested;
 static uint32_t s_screensaver_idle_seconds = M5_DEFAULT_SCREENSAVER_IDLE_SECONDS;
 static uint32_t s_media_index_error;
+static bool s_media_flipped;
 static const uint32_t M5_MEDIA_CONTROL_TIMEOUT_MS = 30000;
 static uint8_t s_index_buffer[M5_INDEX_BUFFER_BYTES];
 static m5_macro_slot_t s_macro_slots[M5_MACRO_SLOTS];
@@ -669,6 +670,9 @@ static bool m5_load_ui_bundle(void)
     if (s_empty_button_style != 2) s_empty_button_style = 0;
     ESP_ERROR_CHECK(bsp_display_brightness_set(s_brightness_percent));
     lv_display_set_rotation(s_display, (header->settings & (1U << 8)) ? LV_DISPLAY_ROTATION_180 : LV_DISPLAY_ROTATION_0);
+    /* F8: remember the orientation so direct panel draws (screensaver) can
+     * mirror frames the same way LVGL rotates the UI. */
+    s_media_flipped = (header->settings & (1U << 8)) != 0;
     ESP_LOGI(TAG, "M6_UI bundle=loaded schema=3 profiles=%u pages=%u assets=%u macros=%u radials=%u bytes=%u",
              header->profile_count, header->page_count, header->asset_count, header->macro_count, header->radial_count, (unsigned) payload_size);
     return true;
@@ -1580,6 +1584,20 @@ static const uint8_t *m5_frame_bytes(uint32_t index, uint32_t *length)
     return s_media.read_buffer;
 }
 
+/* F8: the project can rotate the LVGL UI by 180 degrees, but the screensaver
+ * bypasses LVGL and draws straight to the panel. Mirror the decoded RGB565
+ * frame in place (a 180-degree rotation is a pixel-order reversal) so the
+ * screensaver matches the UI orientation. Costs one pass per frame only when
+ * the flipped orientation is active. */
+static void m5_flip_rgb565_180(uint16_t *frame, uint32_t pixels)
+{
+    for (uint32_t i = 0, j = pixels - 1; i < j; ++i, --j) {
+        const uint16_t value = frame[i];
+        frame[i] = frame[j];
+        frame[j] = value;
+    }
+}
+
 static bool m5_decode_and_draw(uint32_t index)
 {
     uint32_t input_size = 0;
@@ -1594,6 +1612,10 @@ static bool m5_decode_and_draw(uint32_t index)
                              s_media.panel_buffers[s_media.panel_buffer_index], M5_RGB565_BYTES,
                              &output_size) != ESP_OK || output_size != M5_RGB565_BYTES) {
         return false;
+    }
+    if (s_media_flipped) {
+        m5_flip_rgb565_180((uint16_t *) s_media.panel_buffers[s_media.panel_buffer_index],
+                           M5_PANEL_WIDTH * M5_PANEL_HEIGHT);
     }
     if (esp_lv_adapter_lock(1000) == ESP_OK) {
         const esp_err_t result = esp_lcd_panel_draw_bitmap(s_panel, 0, 0, M5_PANEL_WIDTH,
