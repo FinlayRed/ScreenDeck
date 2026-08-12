@@ -1,7 +1,7 @@
 # Screendeck code audit and remediation plan
 
-Date: 2026-08-12  
-Scope: editor, firmware, editor/firmware protocol, persistence, build scripts, and tests  
+Date: 2026-08-12
+Scope: editor, firmware, editor/firmware protocol, persistence, build scripts, and tests
 Status: audit complete, fixes not implemented
 
 ## Purpose
