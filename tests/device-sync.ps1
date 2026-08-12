@@ -107,7 +107,7 @@ namespace Screendeck {
     public static string DevicePath() { return Path(); }
     static uint U32(byte[] value, int offset) { return BitConverter.ToUInt32(value, offset); }
     static void Put(byte[] value, int offset, uint number) { Array.Copy(BitConverter.GetBytes(number), 0, value, offset, 4); }
-    public static uint[] Exchange(byte opcode, uint sequence, byte[] payload) {
+    static byte[] ExchangePayload(byte opcode, uint sequence, byte[] payload) {
       payload = payload ?? Array.Empty<byte>();
       var frame = new byte[20 + payload.Length];
       Put(frame, 0, 0x33434453); frame[4] = 1; frame[5] = opcode; Put(frame, 8, sequence); Put(frame, 12, (uint)payload.Length); Put(frame, 16, Crc32(payload));
@@ -131,12 +131,27 @@ namespace Screendeck {
             for (int i=0; i<read; i++) response.Add(packet[i]);
           }
           var bytes = response.ToArray();
-          if (U32(bytes, 0) != 0x33434453 || bytes[4] != 1 || bytes[5] != (byte)(opcode | 0x80) || U32(bytes, 8) != sequence || U32(bytes, 12) != 8) throw new InvalidOperationException("Malformed M3 response.");
-          var body = new byte[8]; Array.Copy(bytes, 20, body, 0, 8);
+          int bodySize = (int)U32(bytes, 12);
+          if (U32(bytes, 0) != 0x33434453 || bytes[4] != 1 || bytes[5] != (byte)(opcode | 0x80) || U32(bytes, 8) != sequence || bytes.Length < 20 + bodySize) throw new InvalidOperationException("Malformed M3 response.");
+          var body = new byte[bodySize]; Array.Copy(bytes, 20, body, 0, bodySize);
           if (U32(bytes, 16) != Crc32(body)) throw new InvalidOperationException("M3 response CRC mismatch (device=0x" + U32(bytes, 16).ToString("X8") + ", host=0x" + Crc32(body).ToString("X8") + ").");
-          return new uint[] { U32(body, 0), U32(body, 4) };
+          return body;
         } finally { WinUsb_Free(usb); }
       }
+    }
+    public static uint[] Exchange(byte opcode, uint sequence, byte[] payload) {
+      var body = ExchangePayload(opcode, sequence, payload);
+      if (body.Length != 8) throw new InvalidOperationException("M3 response is not a status/value pair.");
+      return new uint[] { U32(body, 0), U32(body, 4) };
+    }
+    public static uint Status(uint sequence) {
+      var body = ExchangePayload(6, sequence, Array.Empty<byte>());
+      if (body.Length == 36 || body.Length == 28) return U32(body, 8);
+      if (body.Length == 8) {
+        if (U32(body, 0) != 0) throw new InvalidOperationException("M3 STATUS failed: status=" + U32(body, 0));
+        return U32(body, 4);
+      }
+      throw new InvalidOperationException("Unsupported M3 STATUS payload size " + body.Length + ".");
     }
     public static byte[] Bundle(byte[] payload) {
       var bundle = new byte[16 + payload.Length];
@@ -174,7 +189,7 @@ $devicePath = [Screendeck.M3WinUsb]::DevicePath()
 Write-Verbose "M3 WinUSB path: $devicePath"
 $caps = Invoke-M3 1 $sequence; $sequence++
 if (($caps -band 0x1F) -ne 0x1F) { throw "Unexpected M3 capability word: 0x$($caps.ToString('X8'))" }
-$before = Invoke-M3 6 $sequence; $sequence++
+$before = [Screendeck.M3WinUsb]::Status($sequence); $sequence++
 Write-Host "M3 HELLO ok capabilities=0x$($caps.ToString('X8')); generation=$before"
 if ($CommitTestBundle -and $ResumeTest) { throw 'Choose either -CommitTestBundle or -ResumeTest.' }
 if ($RejectInvalidBundle -and $ResumeTest) { throw 'Choose either -RejectInvalidBundle or -ResumeTest.' }
@@ -238,7 +253,7 @@ if ($RejectInvalidBundle) {
     $rejected = $false
     try { $null = Invoke-M3 4 $sequence } catch { $rejected = $true }
     if (-not $rejected) { throw 'Invalid M5UI bundle was accepted by COMMIT.' }
-    $generationAfter = Invoke-M3 6 $sequence; $sequence++
+    $generationAfter = [Screendeck.M3WinUsb]::Status($sequence); $sequence++
     if ($generationAfter -ne $before) {
         throw "Invalid bundle activated: generation advanced from $before to $generationAfter."
     }

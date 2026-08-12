@@ -65,10 +65,12 @@ pub struct StatusDetails {
     pub protocol_version: u32,
     pub upload_open: bool,
     pub active_generation: u32,
+    pub active_bundle_crc32: u32,
     pub received_bytes: u32,
     pub total_bytes: u32,
     pub upload_crc32: u32,
     pub media_bytes: u32,
+    pub media_crc32: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -190,8 +192,8 @@ fn checked_response(
     Ok(value)
 }
 
-/// Parses a STATUS response: the v2 fixed struct (28-byte payload) or the
-/// legacy single-value payload (8 bytes) from older firmware.
+/// Parses STATUS v3 (artifact identities), v2, or the legacy single-value
+/// response from older firmware.
 fn parse_status_response(bytes: &[u8], sequence: u32) -> Result<StatusDetails, DeviceError> {
     if bytes.len() < 20
         || u32::from_le_bytes(bytes[0..4].try_into().unwrap()) != MAGIC
@@ -205,7 +207,7 @@ fn parse_status_response(bytes: &[u8], sequence: u32) -> Result<StatusDetails, D
         )));
     }
     let payload_size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    if (payload_size != 28 && payload_size != 8) || bytes.len() != 20 + payload_size {
+    if !matches!(payload_size, 36 | 28 | 8) || bytes.len() != 20 + payload_size {
         return Err(DeviceError::Protocol(format!(
             "unexpected status payload size {payload_size}"
         )));
@@ -215,15 +217,29 @@ fn parse_status_response(bytes: &[u8], sequence: u32) -> Result<StatusDetails, D
             "status response checksum mismatch".into(),
         ));
     }
-    if payload_size == 28 {
+    if payload_size == 36 {
         Ok(StatusDetails {
             protocol_version: u32::from_le_bytes(bytes[20..24].try_into().unwrap()),
             upload_open: bytes[24] & 1 != 0,
             active_generation: u32::from_le_bytes(bytes[28..32].try_into().unwrap()),
+            active_bundle_crc32: u32::from_le_bytes(bytes[32..36].try_into().unwrap()),
+            received_bytes: u32::from_le_bytes(bytes[36..40].try_into().unwrap()),
+            total_bytes: u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
+            upload_crc32: u32::from_le_bytes(bytes[44..48].try_into().unwrap()),
+            media_bytes: u32::from_le_bytes(bytes[48..52].try_into().unwrap()),
+            media_crc32: u32::from_le_bytes(bytes[52..56].try_into().unwrap()),
+        })
+    } else if payload_size == 28 {
+        Ok(StatusDetails {
+            protocol_version: u32::from_le_bytes(bytes[20..24].try_into().unwrap()),
+            upload_open: bytes[24] & 1 != 0,
+            active_generation: u32::from_le_bytes(bytes[28..32].try_into().unwrap()),
+            active_bundle_crc32: 0,
             received_bytes: u32::from_le_bytes(bytes[32..36].try_into().unwrap()),
             total_bytes: u32::from_le_bytes(bytes[36..40].try_into().unwrap()),
             upload_crc32: u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
             media_bytes: u32::from_le_bytes(bytes[44..48].try_into().unwrap()),
+            media_crc32: 0,
         })
     } else {
         // Legacy firmware: the value is the active generation when no upload
@@ -233,10 +249,12 @@ fn parse_status_response(bytes: &[u8], sequence: u32) -> Result<StatusDetails, D
             protocol_version: 1,
             upload_open: false,
             active_generation: u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            active_bundle_crc32: 0,
             received_bytes: 0,
             total_bytes: 0,
             upload_crc32: 0,
             media_bytes: 0,
+            media_crc32: 0,
         })
     }
 }
@@ -266,7 +284,7 @@ fn is_indeterminate_after_commit(error: &DeviceError) -> bool {
 /// After a lost COMMIT acknowledgement the device may be restarting 500 ms
 /// later. Close the old session, wait for re-enumeration, open a fresh
 /// session, and confirm the active generation advanced (I2).
-fn reconnect_and_verify(initial_generation: u32) -> Result<u32, DeviceError> {
+fn reconnect_and_verify(initial_generation: u32, expected_crc32: u32) -> Result<u32, DeviceError> {
     std::thread::sleep(std::time::Duration::from_millis(250));
     let mut session = None;
     for _ in 0..40 {
@@ -281,9 +299,16 @@ fn reconnect_and_verify(initial_generation: u32) -> Result<u32, DeviceError> {
     let mut session = session.ok_or(DeviceError::NotFound)?;
     checked_exchange(&mut session, HELLO, 1, &[], "capability query")?;
     let details = status_query(&mut session, 2)?;
-    if details.active_generation <= initial_generation {
+    if details.protocol_version < 3 {
         return Err(DeviceError::Protocol(
-            "commit acknowledgement was lost and the active generation did not advance".into(),
+            "commit acknowledgement was lost and this firmware cannot verify the active bundle identity".into(),
+        ));
+    }
+    if details.active_generation <= initial_generation
+        || details.active_bundle_crc32 != expected_crc32
+    {
+        return Err(DeviceError::Protocol(
+            "commit acknowledgement was lost and the expected bundle is not active".into(),
         ));
     }
     Ok(details.active_generation)
@@ -292,7 +317,10 @@ fn reconnect_and_verify(initial_generation: u32) -> Result<u32, DeviceError> {
 /// Media-commit variant of `reconnect_and_verify`: after a lost MEDIA_COMMIT
 /// acknowledgement, reconnect and confirm the active screensaver file size
 /// matches the uploaded stream (I2).
-fn reconnect_and_verify_media(expected_bytes: usize) -> Result<u32, DeviceError> {
+fn reconnect_and_verify_media(
+    expected_bytes: usize,
+    expected_crc32: u32,
+) -> Result<u32, DeviceError> {
     std::thread::sleep(std::time::Duration::from_millis(250));
     let mut session = None;
     for _ in 0..40 {
@@ -306,10 +334,15 @@ fn reconnect_and_verify_media(expected_bytes: usize) -> Result<u32, DeviceError>
     }
     let mut session = session.ok_or(DeviceError::NotFound)?;
     let details = status_query(&mut session, 2)?;
-    if details.media_bytes != expected_bytes as u32 {
+    if details.protocol_version < 3 {
+        return Err(DeviceError::Protocol(
+            "screensaver commit acknowledgement was lost and this firmware cannot verify the active media identity".into(),
+        ));
+    }
+    if details.media_bytes != expected_bytes as u32 || details.media_crc32 != expected_crc32 {
         return Err(DeviceError::Protocol(format!(
-            "screensaver commit acknowledgement was lost and the active file size {} does not match the uploaded {expected_bytes} bytes",
-            details.media_bytes
+            "screensaver commit acknowledgement was lost and the expected media is not active (bytes={}, crc={:08x})",
+            details.media_bytes, details.media_crc32
         )));
     }
     Ok(details.media_bytes)
@@ -319,15 +352,35 @@ fn reconnect_and_verify_media(expected_bytes: usize) -> Result<u32, DeviceError>
 mod status_tests {
     use super::*;
 
-    fn status_response_v2(sequence: u32) -> Vec<u8> {
+    fn status_response_v3(sequence: u32) -> Vec<u8> {
         let mut status = Vec::new();
-        status.extend_from_slice(&2u32.to_le_bytes());
+        status.extend_from_slice(&3u32.to_le_bytes());
         status.extend_from_slice(&1u32.to_le_bytes()); // upload open
         status.extend_from_slice(&7u32.to_le_bytes()); // active generation
+        status.extend_from_slice(&0xAABB_CCDDu32.to_le_bytes()); // active bundle CRC
         status.extend_from_slice(&4096u32.to_le_bytes());
         status.extend_from_slice(&8192u32.to_le_bytes());
         status.extend_from_slice(&0x1234_5678u32.to_le_bytes());
         status.extend_from_slice(&16_384u32.to_le_bytes()); // media bytes
+        status.extend_from_slice(&0xCAFE_BABEu32.to_le_bytes()); // media CRC
+        let mut response = Vec::new();
+        response.extend_from_slice(&MAGIC.to_le_bytes());
+        response.push(VERSION);
+        response.push(STATUS | 0x80);
+        response.extend_from_slice(&0u16.to_le_bytes());
+        response.extend_from_slice(&sequence.to_le_bytes());
+        response.extend_from_slice(&(status.len() as u32).to_le_bytes());
+        response.extend_from_slice(&crc32(&status).to_le_bytes());
+        response.extend_from_slice(&status);
+        response
+    }
+
+    fn status_response_v2(sequence: u32) -> Vec<u8> {
+        let fields = [2u32, 0, 5, 0, 0, 0, 12_000];
+        let status: Vec<u8> = fields
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
         let mut response = Vec::new();
         response.extend_from_slice(&MAGIC.to_le_bytes());
         response.push(VERSION);
@@ -341,15 +394,27 @@ mod status_tests {
     }
 
     #[test]
-    fn parses_v2_status_struct() {
-        let details = parse_status_response(&status_response_v2(9), 9).unwrap();
-        assert_eq!(details.protocol_version, 2);
+    fn parses_v3_status_struct() {
+        let details = parse_status_response(&status_response_v3(9), 9).unwrap();
+        assert_eq!(details.protocol_version, 3);
         assert!(details.upload_open);
         assert_eq!(details.active_generation, 7);
+        assert_eq!(details.active_bundle_crc32, 0xAABB_CCDD);
         assert_eq!(details.received_bytes, 4096);
         assert_eq!(details.total_bytes, 8192);
         assert_eq!(details.upload_crc32, 0x1234_5678);
         assert_eq!(details.media_bytes, 16_384);
+        assert_eq!(details.media_crc32, 0xCAFE_BABE);
+    }
+
+    #[test]
+    fn parses_v2_status_without_artifact_identity() {
+        let details = parse_status_response(&status_response_v2(4), 4).unwrap();
+        assert_eq!(details.protocol_version, 2);
+        assert_eq!(details.active_generation, 5);
+        assert_eq!(details.media_bytes, 12_000);
+        assert_eq!(details.active_bundle_crc32, 0);
+        assert_eq!(details.media_crc32, 0);
     }
 
     #[test]
@@ -376,8 +441,8 @@ mod status_tests {
 
     #[test]
     fn rejects_malformed_status_payloads() {
-        assert!(parse_status_response(&status_response_v2(9), 10).is_err()); // wrong sequence
-        let mut truncated = status_response_v2(9);
+        assert!(parse_status_response(&status_response_v3(9), 10).is_err()); // wrong sequence
+        let mut truncated = status_response_v3(9);
         truncated.truncate(24);
         assert!(parse_status_response(&truncated, 9).is_err());
     }
@@ -415,7 +480,7 @@ pub fn status() -> DeviceStatus {
             connected: true,
             generation: details.active_generation,
             capabilities,
-            detail: "SDC3 v2 · explicit status · resume · checksums · atomic activation".into(),
+            detail: "SDC3 v3 · verified commits · resume · checksums · atomic activation".into(),
         },
         Err(error) => DeviceStatus {
             connected: false,
@@ -539,7 +604,7 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
         // advanced on a fresh session.
         Err(error) if is_indeterminate_after_commit(&error) => {
             drop(session);
-            reconnect_and_verify(initial_generation)?
+            reconnect_and_verify(initial_generation, payload_crc)?
         }
         Err(error) => return Err(error),
     };
@@ -644,9 +709,10 @@ pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError
                 .into(),
         ));
     }
+    let media_crc32 = crc32(media);
     let mut begin = Vec::with_capacity(8);
     begin.extend_from_slice(&(media.len() as u32).to_le_bytes());
-    begin.extend_from_slice(&crc32(media).to_le_bytes());
+    begin.extend_from_slice(&media_crc32.to_le_bytes());
     let resumed_at = checked_exchange(
         &mut session,
         MEDIA_BEGIN,
@@ -729,7 +795,7 @@ pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError
         // I2: same reconnect-and-verify recovery as the bundle commit.
         Err(error) if is_indeterminate_after_commit(&error) => {
             drop(session);
-            reconnect_and_verify_media(media.len())?
+            reconnect_and_verify_media(media.len(), media_crc32)?
         }
         Err(error) => {
             return Err(DeviceError::Protocol(format!(

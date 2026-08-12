@@ -149,6 +149,8 @@ typedef struct {
     uint32_t received_bytes;
     uint32_t durable_bytes;
     uint32_t active_generation;
+    uint32_t active_bundle_crc32;
+    uint32_t active_media_crc32;
     uint32_t previous_generation;
     FILE *upload_file;
     uint8_t *upload_buffer;
@@ -477,6 +479,31 @@ static bool m3_validate_bundle_file(const char *path, uint32_t expected_bytes, u
     return crc == expected_crc && header.payload_crc32 == expected_crc;
 }
 
+static bool m3_file_crc32(const char *path, uint32_t maximum_bytes,
+                          uint32_t *bytes_out, uint32_t *crc_out)
+{
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) return false;
+    uint8_t block[512];
+    uint32_t bytes = 0;
+    uint32_t crc = UINT32_MAX;
+    size_t read;
+    while ((read = fread(block, 1, sizeof(block), file)) != 0) {
+        if (read > maximum_bytes - bytes) {
+            fclose(file);
+            return false;
+        }
+        bytes += (uint32_t) read;
+        crc = esp_crc32_le(crc, block, read);
+    }
+    const bool valid = ferror(file) == 0;
+    fclose(file);
+    if (!valid) return false;
+    *bytes_out = bytes;
+    *crc_out = crc;
+    return true;
+}
+
 /* Full pre-activation validation: the SDB envelope and CRC plus every inner
  * M5UI semantic (F3/F4). A bundle passes only when the runtime parser can
  * build a working UI from it, so an invalid but CRC-correct bundle can never
@@ -579,6 +606,7 @@ static void m3_find_active_pointer(void)
 {
     s_storage.active_bundle_valid = false;
     s_storage.active_generation = 0;
+    s_storage.active_bundle_crc32 = 0;
     s_storage.previous_generation = 0;
     s_active_bundle_path[0] = '\0';
     uint32_t limit = UINT32_MAX;
@@ -598,6 +626,7 @@ static void m3_find_active_pointer(void)
                                                  pointer.bundle_crc32);
         if (valid && valid_count == 0) {
             s_storage.active_generation = pointer.generation;
+            s_storage.active_bundle_crc32 = pointer.bundle_crc32;
             s_storage.active_bundle_valid = true;
             snprintf(s_active_bundle_path, sizeof(s_active_bundle_path), "%s", bundle_path);
             ++valid_count;
@@ -645,6 +674,10 @@ static bool m3_storage_init(void)
             }
         }
     }
+    uint32_t active_media_bytes = 0;
+    s_storage.active_media_crc32 = 0;
+    (void) m3_file_crc32(M3_MEDIA_FILE, M3_MAX_MEDIA_BYTES,
+                         &active_media_bytes, &s_storage.active_media_crc32);
     m3_find_active_pointer();
     if (!m3_upload_state_load()) {
         unlink(M3_STATE_FILE);
@@ -873,6 +906,7 @@ static void m3_handle_commit(const m3_frame_header_t *frame)
     unlink(M3_STATE_FILE);
     s_storage.previous_generation = s_storage.active_generation;
     s_storage.active_generation = generation;
+    s_storage.active_bundle_crc32 = s_storage.bundle_crc32;
     s_storage.active_bundle_valid = true;
     snprintf(s_active_bundle_path, sizeof(s_active_bundle_path), "%s", bundle_path);
     s_storage.upload_open = false;
@@ -1030,7 +1064,9 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
     }
 #endif
     const uint32_t uploaded = s_media_upload.total_bytes;
+    const uint32_t uploaded_crc32 = s_media_upload.crc32;
     s_media_upload = (m3_media_upload_t) {0};
+    s_storage.active_media_crc32 = uploaded_crc32;
     ESP_LOGI(TAG, "M3_MEDIA action=commit bytes=%u path=%s", uploaded, M3_MEDIA_FILE);
     m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_OK, uploaded);
 #ifdef M5_MEDIA_ENABLED
@@ -1042,28 +1078,32 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
 
 /* Explicit device status (I1): the legacy response packed a single value that
  * meant upload bytes while an upload was open and the active generation
- * otherwise. Editors must now parse this fixed struct so idle, partial,
- * resumed, committed, and aborted upload states decode unambiguously. */
+ * otherwise. Version 3 also identifies the active bundle and media by CRC so
+ * a reconnect can prove which artifact committed. */
 typedef struct __attribute__((packed)) {
     uint32_t version;
     uint32_t flags; /* bit 0: upload open */
     uint32_t active_generation;
+    uint32_t active_bundle_crc32;
     uint32_t received_bytes;
     uint32_t total_bytes;
     uint32_t upload_crc32;
     uint32_t media_bytes; /* size of the active screensaver file, 0 when absent */
-} m3_status_v2_t;
+    uint32_t media_crc32;
+} m3_status_v3_t;
 
 static void m3_send_status(uint8_t opcode, uint32_t sequence)
 {
-    m3_status_v2_t status = {
-        .version = 2,
+    m3_status_v3_t status = {
+        .version = 3,
         .flags = s_storage.upload_open ? 1U : 0U,
         .active_generation = s_storage.active_generation,
+        .active_bundle_crc32 = s_storage.active_bundle_crc32,
         .received_bytes = s_storage.received_bytes,
         .total_bytes = s_storage.total_bytes,
         .upload_crc32 = s_storage.upload_open ? s_storage.bundle_crc32 : 0,
         .media_bytes = 0,
+        .media_crc32 = s_storage.active_media_crc32,
     };
     struct stat media;
     if (stat(M3_MEDIA_FILE, &media) == 0 && media.st_size <= (off_t) M3_MAX_MEDIA_BYTES) {
