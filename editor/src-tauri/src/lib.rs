@@ -28,24 +28,40 @@ fn validate_project(project: Project) -> compiler::CompileSummary {
 }
 
 #[tauri::command]
-fn save_archive(path: String, project: Project) -> Result<(), String> {
-    archive::save(Path::new(&path), &project).map_err(|error| error.to_string())
+async fn save_archive(path: String, project: Project) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        archive::save(Path::new(&path), &project).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("save worker failed: {error}"))?
+}
+
+/// E2: reject malformed or unsafe structure, but load well-formed work in
+/// progress even when it exceeds device constraints (empty titles, extra
+/// profiles, oversized media). Deployability issues stay in the editor and
+/// block Sync, never Open or recovery.
+fn structural_gate(project: &Project) -> Result<(), String> {
+    if project.profiles.is_empty()
+        || project
+            .profiles
+            .iter()
+            .any(|profile| profile.pages.is_empty())
+    {
+        return Err("saved project has no profiles or an empty profile".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
-fn open_archive(path: String) -> Result<Project, String> {
-    let mut project = archive::open(Path::new(&path)).map_err(|error| error.to_string())?;
-    model::migrate(&mut project);
-    let issues = model::validate(&project);
-    if issues.is_empty() {
+async fn open_archive(path: String) -> Result<Project, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut project = archive::open(Path::new(&path)).map_err(|error| error.to_string())?;
+        model::migrate(&mut project);
+        structural_gate(&project)?;
         Ok(project)
-    } else {
-        Err(issues
-            .into_iter()
-            .map(|item| format!("{}: {}", item.path, item.message))
-            .collect::<Vec<_>>()
-            .join("; "))
-    }
+    })
+    .await
+    .map_err(|error| format!("open worker failed: {error}"))?
 }
 
 fn workspace_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -117,22 +133,44 @@ fn load_workspace(app: tauri::AppHandle) -> Result<Option<Project>, String> {
     let mut project: Project = serde_json::from_slice(&bytes)
         .map_err(|error| format!("saved workspace is invalid: {error}"))?;
     model::migrate(&mut project);
-    if model::validate(&project).is_empty() {
-        Ok(Some(project))
-    } else {
-        Err("saved workspace failed validation".into())
-    }
+    structural_gate(&project)?;
+    Ok(Some(project))
 }
 
 #[tauri::command]
-fn backup_bundle(path: String, project: Project) -> Result<(), String> {
-    let bundle = compiler::compile(&project).map_err(|error| error.to_string())?;
-    fs::write(path, bundle).map_err(|error| format!("could not write backup: {error}"))
+async fn clear_workspace(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = workspace_path(&app)?;
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("could not clear saved workspace: {error}")),
+        }
+    })
+    .await
+    .map_err(|error| format!("clear workspace worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn device_status() -> device::DeviceStatus {
-    device::status()
+async fn backup_bundle(path: String, project: Project) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bundle = compiler::compile(&project).map_err(|error| error.to_string())?;
+        fs::write(path, bundle).map_err(|error| format!("could not write backup: {error}"))
+    })
+    .await
+    .map_err(|error| format!("backup worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn device_status() -> device::DeviceStatus {
+    tauri::async_runtime::spawn_blocking(device::status)
+        .await
+        .unwrap_or_else(|error| device::DeviceStatus {
+            connected: false,
+            generation: 0,
+            capabilities: 0,
+            detail: format!("device status worker failed: {error}"),
+        })
 }
 
 #[tauri::command]
@@ -312,6 +350,7 @@ pub fn run() {
             open_archive,
             save_workspace,
             load_workspace,
+            clear_workspace,
             backup_bundle,
             device_status,
             exit_application,
@@ -466,6 +505,62 @@ mod tests {
             .iter()
             .any(|issue| issue.message.contains("16 MiB device limit")));
         assert!(compiler::compile(&source).is_err());
+    }
+
+    #[test]
+    fn archive_open_rejects_oversized_entries() {
+        // E7: a crafted archive whose project.json expands beyond the cap must
+        // be rejected with a clear limit error, before any unbounded read.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bomb.sdeck");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("project.json", options).unwrap();
+            std::io::Write::write_all(&mut zip, &vec![0u8; 9 * 1024 * 1024]).unwrap();
+            zip.finish().unwrap();
+        }
+        let error = archive::open(&path).unwrap_err();
+        assert!(matches!(error, archive::ArchiveError::Limit(_)));
+    }
+
+    #[test]
+    fn structural_gate_accepts_work_in_progress_but_rejects_unsafe_structure() {
+        // E2: empty titles and extra profiles are work in progress and must
+        // load; zero profiles would crash the editor UI and must be rejected.
+        let mut wip = project();
+        wip.name = "".into();
+        for index in 0..8 {
+            wip.profiles.push(model::Profile {
+                id: format!("wip-{index}"),
+                name: format!("Work {index}"),
+                pages: vec![model::Page {
+                    id: format!("wip-page-{index}"),
+                    name: "Main".into(),
+                    buttons: vec![
+                        model::Button {
+                            action: model::ActionKind::None,
+                            icon_id: None,
+                            image_fit: None,
+                            macro_id: None,
+                            radial: None,
+                        };
+                        32
+                    ],
+                }],
+            });
+        }
+        assert!(
+            structural_gate(&wip).is_ok(),
+            "9-profile work in progress must load"
+        );
+        wip.profiles.clear();
+        assert!(
+            structural_gate(&wip).is_err(),
+            "zero profiles are unsafe structure"
+        );
     }
 
     #[test]

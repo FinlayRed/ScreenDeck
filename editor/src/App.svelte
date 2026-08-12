@@ -33,7 +33,7 @@
   import Upload from "@lucide/svelte/icons/upload";
   import Usb from "@lucide/svelte/icons/usb";
   import X from "@lucide/svelte/icons/x";
-  import { backupBundle, deviceStatus, exitApplication, loadWorkspace, openArchive, prepareIconAnimation, saveArchive, saveWorkspace, syncFromDevice, syncProject, testScreensaver as testScreensaverOnDevice, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
+  import { backupBundle, clearWorkspace, deviceStatus, exitApplication, loadWorkspace, openArchive, prepareIconAnimation, saveArchive, saveWorkspace, syncFromDevice, syncProject, testScreensaver as testScreensaverOnDevice, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
   import type { CompileSummary, DeviceStatus } from "./lib/backend";
   import { CONSUMER_KEYS, KEYBOARD_KEYS, moveButton, starterProject } from "./lib/model";
   import type { ActionKind, Asset, Button, EmptyButtonStyle, Macro, MacroStep, Project, RadialSize } from "./lib/model";
@@ -110,6 +110,7 @@
   let keyboardMoveSource: number | null = null;
   let buttonClipboard: { button: Button; macros: Macro[] } | null = null;
   let devicePoll: ReturnType<typeof setInterval> | undefined;
+  let devicePolling = false;
   let removeCloseListener: (() => void) | undefined;
   let importing = false;
   let draggedButtonIndex: number | null = null;
@@ -233,7 +234,15 @@
     const pending = dirtyDialog;
     if (choice === "save" && !(await saveProject())) return;
     dirtyDialog = null;
+    if (choice === "discard") await discardRecovery();
     await pending.run();
+  }
+
+  // E6: a discarded or replaced project must not resurrect from the recovery
+  // workspace on the next launch. Cancel pending autosaves, then delete it.
+  async function discardRecovery() {
+    clearTimeout(autosaveTimer);
+    try { await clearWorkspace(); } catch (error) { /* non-fatal */ }
   }
 
   function queueWorkspaceSave(revision: number) {
@@ -287,11 +296,17 @@
   }
 
   async function refreshDevice() {
+    // E8: never overlap polls. A stalled device can hold the worker for the
+    // full HELLO + status timeouts; a second poll must not stack on top.
+    if (devicePolling) return;
+    devicePolling = true;
     try { device = await deviceStatus(); }
     catch (error) { device = { connected: false, generation: 0, capabilities: 0, detail: String(error) }; }
+    finally { devicePolling = false; }
   }
 
   async function replaceWithNewProject() {
+    await discardRecovery();
     project = starterProject(); projectRevision += 1; profileIndex = 0; pageIndex = 0; selectedButton = 0; projectPath = ""; dirty = false; lastSyncedFingerprint = ""; resetHistory(); setNotice("success", "New project created");
   }
 
@@ -301,7 +316,7 @@
     const path = await open({ title: "Open Screendeck project", filters: [{ name: "Screendeck project", extensions: ["sdeck"] }] });
     if (!path || Array.isArray(path)) return;
     busy = true;
-    try { project = await openArchive(path); projectRevision += 1; projectPath = path; profileIndex = 0; pageIndex = 0; selectedButton = 0; dirty = false; lastSyncedFingerprint = ""; resetHistory(); setNotice("success", `Opened ${path.split(/[\\/]/).pop()}`); }
+    try { project = await openArchive(path); await discardRecovery(); projectRevision += 1; projectPath = path; profileIndex = 0; pageIndex = 0; selectedButton = 0; dirty = false; lastSyncedFingerprint = ""; resetHistory(); setNotice("success", `Opened ${path.split(/[\\/]/).pop()}`); }
     catch (error) { setNotice("error", "Could not open project", String(error)); }
     finally { busy = false; }
   }
@@ -330,13 +345,22 @@
       ? summary.issues.filter((issue) => issue.severity === "error")
       : [];
     if (errors.length) { setNotice("error", "Cannot sync until validation issues are fixed", errors.map((issue) => `${issue.path}: ${issue.message}`).join("\n")); return; }
+    // E5: the invoke serializes the project snapshot at call time; edits made
+    // while the transfer runs must not be reported as synced. Capture the
+    // revision so the fingerprint only reflects the exact uploaded state.
+    const revision = projectRevision;
     busy = true;
     setNotice("progress", "Syncing project to device…");
     try {
       const result = await syncProject(project);
-      lastSyncedFingerprint = result.fingerprint;
-      summary = { ...summary, fingerprint: result.fingerprint };
-      setNotice("success", `Synced ${result.bytesSent.toLocaleString()} bytes · generation ${result.generation}${result.resumedAt ? ` · resumed at ${result.resumedAt}` : ""}`);
+      if (revision === projectRevision) {
+        lastSyncedFingerprint = result.fingerprint;
+        summary = { ...summary, fingerprint: result.fingerprint };
+        setNotice("success", `Synced ${result.bytesSent.toLocaleString()} bytes · generation ${result.generation}${result.resumedAt ? ` · resumed at ${result.resumedAt}` : ""}`);
+      } else {
+        lastSyncedFingerprint = "";
+        setNotice("warning", "Synced a previous revision of this project; the project changed while syncing", "Edit again and re-sync to push the current state.");
+      }
       await refreshDevice();
     } catch (error) { setNotice("error", "Sync failed", String(error)); }
     finally { busy = false; }
@@ -361,9 +385,19 @@
   }
 
   async function replaceFromDevice() {
+    // E5: the editor stays editable while the download runs; if the user
+    // changed the project meanwhile, replacing it would silently discard those
+    // edits, so refuse and ask them to retry instead.
+    const revision = projectRevision;
     busy = true; setNotice("progress", "Importing project from device…");
     try {
-      project = await syncFromDevice();
+      const imported = await syncFromDevice();
+      if (revision !== projectRevision) {
+        setNotice("warning", "The project changed while importing from the device", "The device project was not applied; try again to replace the current project.");
+        return;
+      }
+      await discardRecovery();
+      project = imported;
       projectRevision += 1;
       profileIndex = 0; pageIndex = 0; selectedButton = 0;
       projectPath = ""; dirty = true; await refreshValidation(); lastSyncedFingerprint = summary.fingerprint;
@@ -684,6 +718,11 @@
   async function importFiles(files: FileList | File[], targetButtonIndex = selectedButton) {
     if (importing) return;
     importing = true;
+    // E10: media conversion awaits file reads and FFmpeg. Capture the
+    // destination by identity now; after each await the result lands only on a
+    // profile/page/button that still exists in the current project, so switching
+    // pages or replacing the project can never redirect the import.
+    const destination = { profileId: profile.id, pageId: page.id, buttonIndex: targetButtonIndex };
     setNotice("progress", `Importing ${files.length} media file${files.length === 1 ? "" : "s"}…`);
     let imported = 0;
     let skipped = 0;
@@ -716,15 +755,23 @@
           bitmap.close();
           dataUrl = canvas.toDataURL("image/png");
         }
+        // Resolve the captured destination in the current project; never use
+        // the then-current reactive page implicitly.
+        const targetProfile = project.profiles.find((item) => item.id === destination.profileId);
+        const targetPage = targetProfile?.pages.find((item) => item.id === destination.pageId);
+        if (!targetProfile || !targetPage || destination.buttonIndex >= targetPage.buttons.length) {
+          failures.push(`${file.name}: the destination page no longer exists; retry the import`);
+          continue;
+        }
         const asset: Asset = {
-          id: crypto.randomUUID(), name: file.name.replace(/\.[^.]+$/, "") + ".png",
+          id: crypto.randomUUID(), name: file.name.replace(/\.[^/.]+$/, "") + ".png",
           mediaType: animated ? "image/jpeg" : "image/png", dataUrl, sourceName: file.name,
           sourceMediaType: file.type || "application/octet-stream", sourceDataUrl,
           animationDataUrl, animationFps
         };
         project.assets = [...project.assets, asset];
-        page.buttons[targetButtonIndex].iconId = asset.id;
-        page.buttons[targetButtonIndex].imageFit = "cover";
+        targetPage.buttons[destination.buttonIndex].iconId = asset.id;
+        targetPage.buttons[destination.buttonIndex].imageFit = "cover";
         imported += 1;
       } catch (error) {
         failures.push(`${file.name}: ${error}`);
@@ -1025,7 +1072,7 @@
 <svelte:window on:click={() => closeContextMenu()} on:blur={() => closeContextMenu()} on:contextmenu={(event) => { event.preventDefault(); closeContextMenu(); }} on:pointermove={moveButtonPointerDrag} on:pointerup={finishButtonPointerDrag} on:pointercancel={cancelButtonPointerDrag} on:keydown={globalKeydown} />
 
 <div class="app-shell">
-  <div class="topbar" role="banner" data-tauri-drag-region inert={modalOpen} on:dblclick={titlebarDoubleClick}>
+  <div class="topbar" role="banner" data-tauri-drag-region inert={modalOpen || busy} on:dblclick={titlebarDoubleClick}>
     <div class="brand" data-tauri-drag-region><div class="brand-mark" data-tauri-drag-region><Layers3 size={17}/></div><span data-tauri-drag-region>Screendeck</span><span class="version" data-tauri-drag-region>0.6.2</span></div>
     <div class="project-title"><input aria-label="Project name" bind:value={project.name} on:input={() => changed()} on:keydown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); setNotice("info", "Project title updated"); } }} /></div>
     <nav class="toolbar" aria-label="Project actions">
@@ -1048,7 +1095,7 @@
     </div>
   </div>
 
-  <aside class="sidebar" inert={modalOpen}>
+  <aside class="sidebar" inert={modalOpen || busy}>
     <div class="section-title"><span>Profiles</span><button aria-label="Add profile" title="Add profile" on:click={addProfile}><Plus size={15}/></button></div>
     <div class="tree">
       {#each project.profiles as item, pi}
@@ -1173,7 +1220,7 @@
     </div>
   {/if}
 
-  <main class="workspace" inert={modalOpen}>
+  <main class="workspace" inert={modalOpen || busy}>
     <div class="workspace-head">
       <div class="workspace-title"><span>{profile.name}</span><ChevronRight size={13}/><h1>{page.name}</h1></div>
       <div class="pager"><button aria-label="Previous page" on:click={() => pageIndex = Math.max(0, pageIndex - 1)} disabled={pageIndex === 0}><ChevronLeft size={16}/></button><span>{pageIndex + 1} / {profile.pages.length}</span><button aria-label="Next page" on:click={() => pageIndex = Math.min(profile.pages.length - 1, pageIndex + 1)} disabled={pageIndex === profile.pages.length - 1}><ChevronRight size={16}/></button></div>
@@ -1232,7 +1279,7 @@
     </section>
   </main>
 
-  <aside class="inspector" inert={modalOpen}>
+  <aside class="inspector" inert={modalOpen || busy}>
     <div class="inspector-tabs"><h2>Key settings</h2><span>Row {Math.floor(selectedButton / 8) + 1} · Column {(selectedButton % 8) + 1}</span></div>
     <div class="inspector-scroll">
       <label>Action<CustomSelect ariaLabel="Button action" value={button.action} options={ACTION_OPTIONS} onChange={(value) => updateButton("action", value)} /></label>

@@ -56,3 +56,6 @@ export const saveWorkspace = (project: Project, preserveAssetData = false): Prom
 export const loadWorkspace = (): Promise<Project | null> => native()
   ? invoke("load_workspace")
   : Promise.resolve(JSON.parse(localStorage.getItem("screendeck.workspace") ?? "null"));
+export const clearWorkspace = (): Promise<void> => native()
+  ? invoke("clear_workspace")
+  : Promise.resolve(localStorage.removeItem("screendeck.workspace"));

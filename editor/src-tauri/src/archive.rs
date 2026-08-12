@@ -21,6 +21,47 @@ pub enum ArchiveError {
     Json(#[from] serde_json::Error),
     #[error("asset '{0}' does not contain a valid data URL")]
     Asset(String),
+    #[error("project archive exceeds a safety limit: {0}")]
+    Limit(String),
+}
+
+/// E7: decompression bounds so a small crafted archive cannot consume
+/// unbounded memory or block the UI thread.
+const MAX_ARCHIVE_ENTRIES: usize = 2048;
+const MAX_PROJECT_JSON_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TOTAL_MEDIA_BYTES: u64 = 192 * 1024 * 1024;
+const MAX_COMPRESSION_RATIO: u64 = 100;
+const RATIO_FLOOR_BYTES: u64 = 4 * 1024 * 1024;
+
+fn read_entry_bounded(
+    file: &mut zip::read::ZipFile<'_>,
+    limit: u64,
+) -> Result<Vec<u8>, ArchiveError> {
+    if file.size() > limit {
+        return Err(ArchiveError::Limit(format!(
+            "entry '{}' expands to {} bytes; limit is {limit}",
+            file.name(),
+            file.size()
+        )));
+    }
+    if file.size() > RATIO_FLOOR_BYTES
+        && file.size() > file.compressed_size().saturating_mul(MAX_COMPRESSION_RATIO)
+    {
+        return Err(ArchiveError::Limit(format!(
+            "entry '{}' has an excessive compression ratio",
+            file.name()
+        )));
+    }
+    let mut bytes = Vec::with_capacity(file.size().min(1 << 20) as usize);
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(ArchiveError::Limit(format!(
+            "entry '{}' exceeds the {limit}-byte read limit",
+            file.name()
+        )));
+    }
+    Ok(bytes)
 }
 
 fn safe_name(value: &str) -> String {
@@ -200,17 +241,37 @@ pub fn save(path: &Path, project: &Project) -> Result<(), ArchiveError> {
 pub fn open(path: &Path) -> Result<Project, ArchiveError> {
     let file = File::open(path)?;
     let mut zip = ZipArchive::new(file)?;
-    let mut source = String::new();
-    zip.by_name("project.json")?.read_to_string(&mut source)?;
+    if zip.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(ArchiveError::Limit(format!(
+            "archive contains {} entries; limit is {MAX_ARCHIVE_ENTRIES}",
+            zip.len()
+        )));
+    }
+    let source: String;
+    {
+        let mut entry = zip.by_name("project.json")?;
+        let json = read_entry_bounded(&mut entry, MAX_PROJECT_JSON_BYTES)?;
+        source = String::from_utf8_lossy(&json).into_owned();
+    }
     let mut project: Project = serde_json::from_str(&source)?;
+    let mut total_media: u64 = 0;
     for asset in &mut project.assets {
         let path = format!(
             "assets/{}/device/{}",
             safe_name(&asset.id),
             safe_name(&asset.name)
         );
-        let mut bytes = Vec::new();
-        zip.by_name(&path)?.read_to_end(&mut bytes)?;
+        let bytes;
+        {
+            let mut entry = zip.by_name(&path)?;
+            bytes = read_entry_bounded(&mut entry, MAX_ENTRY_BYTES)?;
+        }
+        total_media += bytes.len() as u64;
+        if total_media > MAX_TOTAL_MEDIA_BYTES {
+            return Err(ArchiveError::Limit(format!(
+                "decoded media totals {total_media} bytes; limit is {MAX_TOTAL_MEDIA_BYTES}"
+            )));
+        }
         asset.data_url = format!(
             "data:{};base64,{}",
             asset.media_type,
@@ -222,8 +283,17 @@ pub fn open(path: &Path) -> Result<Project, ArchiveError> {
                 safe_name(&asset.id),
                 safe_name(&asset.source_name)
             );
-            let mut original = Vec::new();
-            zip.by_name(&original_path)?.read_to_end(&mut original)?;
+            let original;
+            {
+                let mut entry = zip.by_name(&original_path)?;
+                original = read_entry_bounded(&mut entry, MAX_ENTRY_BYTES)?;
+            }
+            total_media += original.len() as u64;
+            if total_media > MAX_TOTAL_MEDIA_BYTES {
+                return Err(ArchiveError::Limit(format!(
+                    "decoded media totals {total_media} bytes; limit is {MAX_TOTAL_MEDIA_BYTES}"
+                )));
+            }
             asset.source_data_url = format!(
                 "data:{};base64,{}",
                 asset.source_media_type,
@@ -232,8 +302,17 @@ pub fn open(path: &Path) -> Result<Project, ArchiveError> {
         }
         if asset.animation_fps != 0 {
             let animation_path = format!("assets/{}/device/animation.mjpg", safe_name(&asset.id));
-            let mut animation = Vec::new();
-            zip.by_name(&animation_path)?.read_to_end(&mut animation)?;
+            let animation;
+            {
+                let mut entry = zip.by_name(&animation_path)?;
+                animation = read_entry_bounded(&mut entry, MAX_ENTRY_BYTES)?;
+            }
+            total_media += animation.len() as u64;
+            if total_media > MAX_TOTAL_MEDIA_BYTES {
+                return Err(ArchiveError::Limit(format!(
+                    "decoded media totals {total_media} bytes; limit is {MAX_TOTAL_MEDIA_BYTES}"
+                )));
+            }
             asset.animation_data_url = format!(
                 "data:video/x-motion-jpeg;base64,{}",
                 STANDARD.encode(animation)

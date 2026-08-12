@@ -538,6 +538,15 @@ The audit passed these checks:
   - E14: the screensaver diagnostic now reports 1800 frames.
   - Verification: 29 Rust tests (7 new), clippy clean, rustfmt clean, firmware builds, PowerShell parser checks pass, T1 assertion verified, converter validated with ffprobe.
 
+- **Phase 4 (2026-08-12):** Editor persistence and state transitions landed on `phase/4-persistence-state`.
+  - E2: `open_archive` and `load_workspace` no longer reject projects on deployability issues; a structural gate rejects only unsafe shapes (no profiles or an empty profile). Empty titles, extra profiles, and oversized media load; Sync stays blocked by the validation summary.
+  - E5: transfers capture the starting revision. Upload reports its fingerprint only when the revision is unchanged; `From device` refuses to apply when the project changed mid-download; project-mutating regions are `inert` while busy.
+  - E6: new `clear_workspace` command; Discard, New, Open, and From-device replacements clear the recovery workspace (after cancelling pending autosaves) so discarded edits never resurrect.
+  - E7: archive reads are bounded (entry count 2048, project.json 8 MiB, per-entry 64 MiB, total media 192 MiB, compression ratio 100x) with a `take(limit+1)` reader, and archive open/save/backup run off the main thread. Regression test rejects an oversized-entry archive.
+  - E8: `device_status` (plus `open_archive`, `save_archive`, `backup_bundle`) moved to async worker commands; the status poll uses a 2 s timeout after discovery and the frontend never overlaps polls.
+  - E10: media imports capture profile/page identity before awaiting and resolve the destination in the current project afterwards; a missing destination fails cleanly instead of redirecting the result.
+  - Verification: 31 Rust tests (2 new), clippy clean, rustfmt clean, svelte-check clean, 11 Vitest, Vite build clean.
+
 ## Completion checklist
 
 Update this list as fixes land:
@@ -548,15 +557,15 @@ Update this list as fixes land:
 - [x] F3 Full pre-activation M5UI validation
 - [x] F4 Typed-table alignment validation
 - [x] F5 Download transaction cleanup
-- [ ] E2 Symmetric project persistence
+- [x] E2 Symmetric project persistence
 - [x] E3 Atomic archive saving
 - [ ] E4 Bounded undo history
-- [ ] E5 Transfer state isolation
-- [ ] E6 True discard behavior
-- [ ] E7 Bounded archive expansion
-- [ ] E8 Nonblocking device polling
+- [x] E5 Transfer state isolation
+- [x] E6 True discard behavior
+- [x] E7 Bounded archive expansion
+- [x] E8 Nonblocking device polling
 - [x] E9 Bundle-size validation
-- [ ] E10 Stable async import destination
+- [x] E10 Stable async import destination
 - [ ] E11 FFmpeg distribution
 - [ ] E12 Temporary-file cleanup
 - [x] I1 Explicit status response

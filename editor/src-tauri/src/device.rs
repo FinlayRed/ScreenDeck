@@ -20,6 +20,11 @@ const DOWNLOAD_BEGIN: u8 = 13;
 const DOWNLOAD_CHUNK: u8 = 14;
 const DOWNLOAD_END: u8 = 15;
 const DOWNLOAD_CAPABILITY: u32 = 0x100;
+const IO_TIMEOUT_MS: u32 = 5_000;
+/// Shorter bound for the periodic status poll: the device is already
+/// discovered, so a stalled session must not hold the worker for the full
+/// HELLO timeout on top of a status timeout (E8).
+const STATUS_TIMEOUT_MS: u32 = 2_000;
 const TEST_SCREENSAVER_CAPABILITY: u32 = 0x80;
 const MEDIA_BATCH_CAPABILITY: u32 = 0x40;
 const BUNDLE_BATCH_CAPABILITY: u32 = 0x200;
@@ -262,8 +267,9 @@ fn parse_status_response(bytes: &[u8], sequence: u32) -> Result<StatusDetails, D
 fn status_query(
     session: &mut transport::Session,
     sequence: u32,
+    timeout_ms: u32,
 ) -> Result<StatusDetails, DeviceError> {
-    let response = session.exchange(&frame(STATUS, sequence, &[]))?;
+    let response = session.exchange_with_timeout(&frame(STATUS, sequence, &[]), timeout_ms)?;
     parse_status_response(&response, sequence)
 }
 
@@ -298,7 +304,7 @@ fn reconnect_and_verify(initial_generation: u32, expected_crc32: u32) -> Result<
     }
     let mut session = session.ok_or(DeviceError::NotFound)?;
     checked_exchange(&mut session, HELLO, 1, &[], "capability query")?;
-    let details = status_query(&mut session, 2)?;
+    let details = status_query(&mut session, 2, IO_TIMEOUT_MS)?;
     if details.protocol_version < 3 {
         return Err(DeviceError::Protocol(
             "commit acknowledgement was lost and this firmware cannot verify the active bundle identity".into(),
@@ -333,7 +339,7 @@ fn reconnect_and_verify_media(
         }
     }
     let mut session = session.ok_or(DeviceError::NotFound)?;
-    let details = status_query(&mut session, 2)?;
+    let details = status_query(&mut session, 2, IO_TIMEOUT_MS)?;
     if details.protocol_version < 3 {
         return Err(DeviceError::Protocol(
             "screensaver commit acknowledgement was lost and this firmware cannot verify the active media identity".into(),
@@ -472,7 +478,7 @@ pub fn status() -> DeviceStatus {
                 "unsupported capability word 0x{capabilities:08X}"
             )));
         }
-        let details = status_query(&mut session, 2)?;
+        let details = status_query(&mut session, 2, STATUS_TIMEOUT_MS)?;
         Ok((capabilities, details))
     })();
     match result {
@@ -518,7 +524,7 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
             "device capabilities 0x{capabilities:08X} do not satisfy M4"
         )));
     }
-    let initial_generation = status_query(&mut session, 2)?.active_generation;
+    let initial_generation = status_query(&mut session, 2, IO_TIMEOUT_MS)?.active_generation;
     let payload_crc = u32::from_le_bytes(bundle[12..16].try_into().unwrap());
     let mut begin = Vec::with_capacity(8);
     begin.extend_from_slice(&(bundle.len() as u32).to_le_bytes());
@@ -818,6 +824,7 @@ pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError
 #[cfg(windows)]
 mod transport {
     use super::DeviceError;
+    use super::IO_TIMEOUT_MS;
     use std::{
         ffi::c_void,
         mem::{size_of, zeroed},
@@ -837,7 +844,6 @@ mod transport {
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 0x102;
     const WAIT_FAILED: u32 = 0xFFFF_FFFF;
-    const IO_TIMEOUT_MS: u32 = 5_000;
     const POST_CANCEL_WAIT_MS: u32 = 10_000;
     const CANCEL_RETRIES: u32 = 3;
 
