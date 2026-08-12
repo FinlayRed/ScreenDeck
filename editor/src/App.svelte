@@ -233,16 +233,23 @@
     if (!dirtyDialog) return;
     const pending = dirtyDialog;
     if (choice === "save" && !(await saveProject())) return;
+    if (choice === "discard" && !(await discardRecovery())) return;
     dirtyDialog = null;
-    if (choice === "discard") await discardRecovery();
     await pending.run();
   }
 
   // E6: a discarded or replaced project must not resurrect from the recovery
   // workspace on the next launch. Cancel pending autosaves, then delete it.
-  async function discardRecovery() {
+  async function discardRecovery(): Promise<boolean> {
     clearTimeout(autosaveTimer);
-    try { await clearWorkspace(); } catch (error) { /* non-fatal */ }
+    try {
+      await clearWorkspace();
+      lastWorkspaceAssets = undefined;
+      return true;
+    } catch (error) {
+      setNotice("error", "Could not discard recovery data", String(error));
+      return false;
+    }
   }
 
   function queueWorkspaceSave(revision: number) {
@@ -306,7 +313,7 @@
   }
 
   async function replaceWithNewProject() {
-    await discardRecovery();
+    if (!(await discardRecovery())) return;
     project = starterProject(); projectRevision += 1; profileIndex = 0; pageIndex = 0; selectedButton = 0; projectPath = ""; dirty = false; lastSyncedFingerprint = ""; resetHistory(); setNotice("success", "New project created");
   }
 
@@ -316,7 +323,7 @@
     const path = await open({ title: "Open Screendeck project", filters: [{ name: "Screendeck project", extensions: ["sdeck"] }] });
     if (!path || Array.isArray(path)) return;
     busy = true;
-    try { project = await openArchive(path); await discardRecovery(); projectRevision += 1; projectPath = path; profileIndex = 0; pageIndex = 0; selectedButton = 0; dirty = false; lastSyncedFingerprint = ""; resetHistory(); setNotice("success", `Opened ${path.split(/[\\/]/).pop()}`); }
+    try { const opened = await openArchive(path); if (!(await discardRecovery())) return; project = opened; projectRevision += 1; projectPath = path; profileIndex = 0; pageIndex = 0; selectedButton = 0; dirty = false; lastSyncedFingerprint = ""; resetHistory(); setNotice("success", `Opened ${path.split(/[\\/]/).pop()}`); }
     catch (error) { setNotice("error", "Could not open project", String(error)); }
     finally { busy = false; }
   }
@@ -396,7 +403,7 @@
         setNotice("warning", "The project changed while importing from the device", "The device project was not applied; try again to replace the current project.");
         return;
       }
-      await discardRecovery();
+      if (!(await discardRecovery())) return;
       project = imported;
       projectRevision += 1;
       profileIndex = 0; pageIndex = 0; selectedButton = 0;
@@ -719,14 +726,14 @@
     if (importing) return;
     importing = true;
     // E10: media conversion awaits file reads and FFmpeg. Capture the
-    // destination by identity now; after each await the result lands only on a
-    // profile/page/button that still exists in the current project, so switching
-    // pages or replacing the project can never redirect the import.
-    const destination = { profileId: profile.id, pageId: page.id, buttonIndex: targetButtonIndex };
+    // destination and project revision now. Converted assets are applied as one
+    // batch only if that exact editing session still owns the destination.
+    const destination = { profileId: profile.id, pageId: page.id, buttonIndex: targetButtonIndex, revision: projectRevision };
     setNotice("progress", `Importing ${files.length} media file${files.length === 1 ? "" : "s"}…`);
     let imported = 0;
     let skipped = 0;
     const failures: string[] = [];
+    const prepared: Asset[] = [];
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/") && !file.type.startsWith("video/")) { skipped += 1; continue; }
       try {
@@ -755,29 +762,35 @@
           bitmap.close();
           dataUrl = canvas.toDataURL("image/png");
         }
-        // Resolve the captured destination in the current project; never use
-        // the then-current reactive page implicitly.
-        const targetProfile = project.profiles.find((item) => item.id === destination.profileId);
-        const targetPage = targetProfile?.pages.find((item) => item.id === destination.pageId);
-        if (!targetProfile || !targetPage || destination.buttonIndex >= targetPage.buttons.length) {
-          failures.push(`${file.name}: the destination page no longer exists; retry the import`);
-          continue;
-        }
         const asset: Asset = {
           id: crypto.randomUUID(), name: file.name.replace(/\.[^/.]+$/, "") + ".png",
           mediaType: animated ? "image/jpeg" : "image/png", dataUrl, sourceName: file.name,
           sourceMediaType: file.type || "application/octet-stream", sourceDataUrl,
           animationDataUrl, animationFps
         };
-        project.assets = [...project.assets, asset];
-        targetPage.buttons[destination.buttonIndex].iconId = asset.id;
-        targetPage.buttons[destination.buttonIndex].imageFit = "cover";
+        prepared.push(asset);
         imported += 1;
       } catch (error) {
         failures.push(`${file.name}: ${error}`);
       }
     }
     importing = false;
+    if (imported && destination.revision !== projectRevision) {
+      failures.push("The project changed while media was being prepared; no imported media was applied.");
+      imported = 0;
+    }
+    if (imported) {
+      const targetProfile = project.profiles.find((item) => item.id === destination.profileId);
+      const targetPage = targetProfile?.pages.find((item) => item.id === destination.pageId);
+      if (!targetPage || destination.buttonIndex >= targetPage.buttons.length) {
+        failures.push("The destination page no longer exists; no imported media was applied.");
+        imported = 0;
+      } else {
+        project.assets = [...project.assets, ...prepared];
+        targetPage.buttons[destination.buttonIndex].iconId = prepared[prepared.length - 1].id;
+        targetPage.buttons[destination.buttonIndex].imageFit = "cover";
+      }
+    }
     if (imported) {
       selectedButton = targetButtonIndex;
       changed(`${imported} imported${skipped ? `, ${skipped} skipped` : ""}${failures.length ? `, ${failures.length} failed` : ""}`);

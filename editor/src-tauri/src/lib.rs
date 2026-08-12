@@ -41,13 +41,19 @@ async fn save_archive(path: String, project: Project) -> Result<(), String> {
 /// profiles, oversized media). Deployability issues stay in the editor and
 /// block Sync, never Open or recovery.
 fn structural_gate(project: &Project) -> Result<(), String> {
-    if project.profiles.is_empty()
-        || project
-            .profiles
-            .iter()
-            .any(|profile| profile.pages.is_empty())
-    {
-        return Err("saved project has no profiles or an empty profile".into());
+    if project.schema_version != 3 {
+        return Err("saved project uses an unsupported schema".into());
+    }
+    if project.profiles.is_empty() {
+        return Err("saved project has no profiles".into());
+    }
+    for profile in &project.profiles {
+        if profile.pages.is_empty() {
+            return Err("saved project contains an empty profile".into());
+        }
+        if profile.pages.iter().any(|page| page.buttons.len() != 32) {
+            return Err("saved project contains a page without exactly 32 buttons".into());
+        }
     }
     Ok(())
 }
@@ -560,6 +566,13 @@ mod tests {
         assert!(
             structural_gate(&wip).is_err(),
             "zero profiles are unsafe structure"
+        );
+
+        let mut empty_page = project();
+        empty_page.profiles[0].pages[0].buttons.clear();
+        assert!(
+            structural_gate(&empty_page).is_err(),
+            "a page without 32 buttons would crash the editor"
         );
     }
 
