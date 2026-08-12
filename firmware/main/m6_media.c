@@ -415,6 +415,7 @@ bool m5_ui_bundle_valid(FILE *file, long payload_offset, uint32_t payload_size)
      * scratch buffer (F4). */
     m5_ui_header_t header;
     if (payload_size < sizeof(header) ||
+        fseek(file, payload_offset, SEEK_SET) != 0 ||
         fread(&header, 1, sizeof(header), file) != sizeof(header)) {
         return false;
     }

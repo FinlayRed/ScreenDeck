@@ -25,9 +25,10 @@ void m5_media_start(lv_display_t *display);
 uint32_t m5_media_trigger_screensaver(void);
 void m5_hid_release_all(const char *reason);
 
-/* Side-effect-free structural validation of an SDB3 payload (M5UI). `file` is
- * positioned at the payload start; `payload_offset` is the byte offset of that
- * position from the file start, and `payload_size` bounds every read. Checks
+/* Side-effect-free structural validation of an SDB3 payload (M5UI).
+ * `payload_offset` is the payload's byte offset from the file start and
+ * `payload_size` bounds every read. The validator seeks to the payload before
+ * reading it. Checks
  * the M5UI magic, schema, table ranges, counts, references, assets, animation
  * streams, and typed-table alignment (F3/F4). Never allocates the payload and
  * never mutates media state. */
