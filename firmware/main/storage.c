@@ -78,6 +78,7 @@ typedef enum {
     M3_OP_TEST_SCREENSAVER = 12,
     M3_OP_DOWNLOAD_BEGIN = 13,
     M3_OP_DOWNLOAD_CHUNK = 14,
+    M3_OP_DOWNLOAD_END = 15,
 } m3_opcode_t;
 
 typedef enum {
@@ -148,6 +149,8 @@ typedef struct {
     uint32_t received_bytes;
     uint32_t durable_bytes;
     uint32_t active_generation;
+    uint32_t active_bundle_crc32;
+    uint32_t active_media_crc32;
     uint32_t previous_generation;
     FILE *upload_file;
     uint8_t *upload_buffer;
@@ -174,6 +177,7 @@ static lv_display_t *s_display;
 static char s_active_bundle_path[128];
 static FILE *s_download_file;
 static uint32_t s_download_offset;
+static uint32_t s_download_generation;
 
 const char *m3_active_bundle_path(void)
 {
@@ -475,6 +479,51 @@ static bool m3_validate_bundle_file(const char *path, uint32_t expected_bytes, u
     return crc == expected_crc && header.payload_crc32 == expected_crc;
 }
 
+static bool m3_file_crc32(const char *path, uint32_t maximum_bytes,
+                          uint32_t *bytes_out, uint32_t *crc_out)
+{
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) return false;
+    uint8_t block[512];
+    uint32_t bytes = 0;
+    uint32_t crc = UINT32_MAX;
+    size_t read;
+    while ((read = fread(block, 1, sizeof(block), file)) != 0) {
+        if (read > maximum_bytes - bytes) {
+            fclose(file);
+            return false;
+        }
+        bytes += (uint32_t) read;
+        crc = esp_crc32_le(crc, block, read);
+    }
+    const bool valid = ferror(file) == 0;
+    fclose(file);
+    if (!valid) return false;
+    *bytes_out = bytes;
+    *crc_out = crc;
+    return true;
+}
+
+/* Full pre-activation validation: the SDB envelope and CRC plus every inner
+ * M5UI semantic (F3/F4). A bundle passes only when the runtime parser can
+ * build a working UI from it, so an invalid but CRC-correct bundle can never
+ * be marked active. */
+static bool m3_bundle_fully_valid(const char *path, uint32_t expected_bytes, uint32_t expected_crc)
+{
+    if (!m3_validate_bundle_file(path, expected_bytes, expected_crc)) return false;
+#ifdef M5_MEDIA_ENABLED
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) return false;
+    const bool valid = m5_ui_bundle_valid(
+        file, sizeof(m3_bundle_header_t),
+        expected_bytes - (uint32_t) sizeof(m3_bundle_header_t));
+    fclose(file);
+    return valid;
+#else
+    return true;
+#endif
+}
+
 static bool m3_read_pointer(const char *path, m3_pointer_t *pointer)
 {
     return m3_read_exact(path, pointer, sizeof(*pointer)) &&
@@ -543,7 +592,8 @@ static void m3_cleanup_generations(void)
             uint32_t generation;
             if (!m3_parse_generation(entry->d_name, "bundle-", ".sdb", &generation) ||
                 generation == s_storage.active_generation ||
-                generation == s_storage.previous_generation) continue;
+                generation == s_storage.previous_generation ||
+                generation == s_download_generation) continue;
             char path[384];
             snprintf(path, sizeof(path), "%s/%s", M3_BUNDLES_DIR, entry->d_name);
             unlink(path);
@@ -556,6 +606,7 @@ static void m3_find_active_pointer(void)
 {
     s_storage.active_bundle_valid = false;
     s_storage.active_generation = 0;
+    s_storage.active_bundle_crc32 = 0;
     s_storage.previous_generation = 0;
     s_active_bundle_path[0] = '\0';
     uint32_t limit = UINT32_MAX;
@@ -571,10 +622,11 @@ static void m3_find_active_pointer(void)
         const bool valid = stat(bundle_path, &bundle) == 0 &&
                            bundle.st_size >= (off_t) sizeof(m3_bundle_header_t) &&
                            bundle.st_size <= M3_MAX_BUNDLE_BYTES &&
-                           m3_validate_bundle_file(bundle_path, (uint32_t) bundle.st_size,
-                                                   pointer.bundle_crc32);
+                           m3_bundle_fully_valid(bundle_path, (uint32_t) bundle.st_size,
+                                                 pointer.bundle_crc32);
         if (valid && valid_count == 0) {
             s_storage.active_generation = pointer.generation;
+            s_storage.active_bundle_crc32 = pointer.bundle_crc32;
             s_storage.active_bundle_valid = true;
             snprintf(s_active_bundle_path, sizeof(s_active_bundle_path), "%s", bundle_path);
             ++valid_count;
@@ -604,7 +656,28 @@ static bool m3_storage_init(void)
     if (stat(M3_MEDIA_FILE, &media) != 0 && stat(M3_MEDIA_BACKUP_FILE, &media) == 0 &&
         rename(M3_MEDIA_BACKUP_FILE, M3_MEDIA_FILE) == 0) {
         ESP_LOGW(TAG, "M3_MEDIA action=recover_previous");
+    } else if (stat(M3_MEDIA_FILE, &media) == 0) {
+        /* F7 boot rollback: if the active screensaver is present but cannot be
+         * decoded, restore the last good backup instead of playing nothing or
+         * crashing the indexer. */
+        bool media_valid = media.st_size >= 4 && media.st_size <= (off_t) M3_MAX_MEDIA_BYTES;
+#ifdef M5_MEDIA_ENABLED
+        media_valid = media_valid && m5_mjpeg_file_valid(M3_MEDIA_FILE);
+#endif
+        if (!media_valid) {
+            unlink(M3_MEDIA_FILE);
+            if (stat(M3_MEDIA_BACKUP_FILE, &media) == 0 &&
+                rename(M3_MEDIA_BACKUP_FILE, M3_MEDIA_FILE) == 0) {
+                ESP_LOGW(TAG, "M3_MEDIA action=restore_backup reason=invalid_active");
+            } else {
+                ESP_LOGW(TAG, "M3_MEDIA action=discard_invalid_active");
+            }
+        }
     }
+    uint32_t active_media_bytes = 0;
+    s_storage.active_media_crc32 = 0;
+    (void) m3_file_crc32(M3_MEDIA_FILE, M3_MAX_MEDIA_BYTES,
+                         &active_media_bytes, &s_storage.active_media_crc32);
     m3_find_active_pointer();
     if (!m3_upload_state_load()) {
         unlink(M3_STATE_FILE);
@@ -670,6 +743,17 @@ static void m3_send_payload(uint8_t opcode, uint32_t sequence, const void *paylo
     tud_vendor_n_write_flush(0);
 }
 
+static void m3_download_close(void)
+{
+    /* Only the M3 sync task owns the download stream. TinyUSB callbacks must
+     * never close it (see m3_usb_event_cb); they publish the connection change
+     * and the sync task performs the close on its next pass. */
+    if (s_download_file != NULL) fclose(s_download_file);
+    s_download_file = NULL;
+    s_download_offset = 0;
+    s_download_generation = 0;
+}
+
 static void m3_handle_download_chunk(const m3_frame_header_t *frame, const uint8_t *payload)
 {
     if (!s_storage.active_bundle_valid || s_download_file == NULL || frame->payload_size != sizeof(uint32_t)) {
@@ -678,6 +762,9 @@ static void m3_handle_download_chunk(const m3_frame_header_t *frame, const uint8
     uint32_t offset;
     memcpy(&offset, payload, sizeof(offset));
     if (offset != s_download_offset && fseek(s_download_file, (long) offset, SEEK_SET) != 0) {
+        /* The file position is unrecoverable; close the transaction so a
+         * retry starts from DOWNLOAD_BEGIN instead of a stale handle. */
+        m3_download_close();
         m3_send_response(M3_OP_DOWNLOAD_CHUNK, frame->sequence, M3_STATUS_IO, offset); return;
     }
     uint8_t chunk[M3_MAX_FRAME_PAYLOAD];
@@ -688,16 +775,24 @@ static void m3_handle_download_chunk(const m3_frame_header_t *frame, const uint8
 
 static void m3_handle_download_begin(const m3_frame_header_t *frame)
 {
-    if (s_download_file != NULL) fclose(s_download_file);
-    s_download_file = NULL;
-    s_download_offset = 0;
+    m3_download_close();
     struct stat info;
     if (!s_storage.active_bundle_valid || stat(s_active_bundle_path, &info) != 0 ||
         (s_download_file = fopen(s_active_bundle_path, "rb")) == NULL) {
         m3_send_response(M3_OP_DOWNLOAD_BEGIN, frame->sequence, M3_STATUS_BAD_STATE, 0);
         return;
     }
+    s_download_generation = s_storage.active_generation;
     m3_send_response(M3_OP_DOWNLOAD_BEGIN, frame->sequence, M3_STATUS_OK, (uint32_t) info.st_size);
+}
+
+static void m3_handle_download_end(const m3_frame_header_t *frame)
+{
+    /* Explicit end-of-download: the host read every byte, so release the file
+     * handle now. Without this, generation cleanup could unlink a file that
+     * remains open after two later commits (see F5). */
+    m3_download_close();
+    m3_send_response(M3_OP_DOWNLOAD_END, frame->sequence, M3_STATUS_OK, 0);
 }
 
 static void m3_handle_begin(const m3_frame_header_t *frame, const uint8_t *payload)
@@ -783,7 +878,7 @@ static void m3_handle_commit(const m3_frame_header_t *frame)
                               m3_bundle_upload_checkpoint();
     m3_bundle_upload_close();
     if (!checkpointed ||
-        !m3_validate_bundle_file(M3_STAGE_FILE, s_storage.total_bytes, s_storage.bundle_crc32)) {
+        !m3_bundle_fully_valid(M3_STAGE_FILE, s_storage.total_bytes, s_storage.bundle_crc32)) {
         m3_send_response(M3_OP_COMMIT, frame->sequence, M3_STATUS_BAD_BUNDLE, s_storage.received_bytes);
         return;
     }
@@ -811,6 +906,7 @@ static void m3_handle_commit(const m3_frame_header_t *frame)
     unlink(M3_STATE_FILE);
     s_storage.previous_generation = s_storage.active_generation;
     s_storage.active_generation = generation;
+    s_storage.active_bundle_crc32 = s_storage.bundle_crc32;
     s_storage.active_bundle_valid = true;
     snprintf(s_active_bundle_path, sizeof(s_active_bundle_path), "%s", bundle_path);
     s_storage.upload_open = false;
@@ -833,20 +929,21 @@ static bool m3_validate_mjpeg_file(const char *path, uint32_t expected_bytes, ui
     uint8_t block[512];
     uint32_t crc = UINT32_MAX;
     uint32_t bytes = 0;
-    uint8_t first[2] = {0};
-    uint8_t last[2] = {0};
     size_t read;
     while ((read = fread(block, 1, sizeof(block), file)) != 0) {
-        if (bytes == 0 && read >= 2) memcpy(first, block, 2);
-        for (size_t index = 0; index < read; ++index) {
-            last[0] = last[1]; last[1] = block[index];
-        }
         crc = esp_crc32_le(crc, block, read);
-        bytes += read;
+        bytes += (uint32_t) read;
     }
     fclose(file);
-    return bytes == expected_bytes && crc == expected_crc &&
-           first[0] == 0xFF && first[1] == 0xD8 && last[0] == 0xFF && last[1] == 0xD9;
+    if (bytes != expected_bytes || crc != expected_crc) return false;
+#ifdef M5_MEDIA_ENABLED
+    /* F7: byte count and CRC are not enough. Reject streams that cannot be
+     * decoded (marker-only, truncated, wrong-dimension, oversized, or
+     * over-count frames) before activation. */
+    return m5_mjpeg_file_valid(path);
+#else
+    return true;
+#endif
 }
 
 static void m3_handle_media_begin(const m3_frame_header_t *frame, const uint8_t *payload)
@@ -938,7 +1035,16 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
         m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_BAD_BUNDLE, s_media_upload.received_bytes); return;
     }
     /* FATFS cannot replace an existing name with rename. Preserve the last
-     * known-good file under a recovery name before activating the new one. */
+     * known-good file under a recovery name before activating the new one.
+     * The media task owns the active file, so quiesce it first and re-index
+     * after activation (F1); renames must never hit an open handle. */
+#ifdef M5_MEDIA_ENABLED
+    if (m5_media_control(M5_MEDIA_CTRL_QUIESCE, 30000) != 0) {
+        ESP_LOGE(TAG, "M3_MEDIA result=quiesce_failed");
+        m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes);
+        return;
+    }
+#endif
     unlink(M3_MEDIA_BACKUP_FILE);
     struct stat previous_media;
     const bool had_previous = stat(M3_MEDIA_FILE, &previous_media) == 0;
@@ -949,8 +1055,18 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
         if (had_previous) rename(M3_MEDIA_BACKUP_FILE, M3_MEDIA_FILE);
         m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes); return;
     }
+#ifdef M5_MEDIA_ENABLED
+    /* Resume playback from the new file so the pre-restart window never runs
+     * with a stale ready state. A failed re-index only disables playback; the
+     * boot recovery path can still restore the backup file. */
+    if (m5_media_control(M5_MEDIA_CTRL_RELOAD, 30000) != 0) {
+        ESP_LOGW(TAG, "M3_MEDIA result=reload_failed");
+    }
+#endif
     const uint32_t uploaded = s_media_upload.total_bytes;
+    const uint32_t uploaded_crc32 = s_media_upload.crc32;
     s_media_upload = (m3_media_upload_t) {0};
+    s_storage.active_media_crc32 = uploaded_crc32;
     ESP_LOGI(TAG, "M3_MEDIA action=commit bytes=%u path=%s", uploaded, M3_MEDIA_FILE);
     m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_OK, uploaded);
 #ifdef M5_MEDIA_ENABLED
@@ -958,6 +1074,42 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
                                         NULL, 4, NULL);
     if (restart_ok != pdPASS) ESP_LOGE(TAG, "M3_MEDIA result=restart_task_failed");
 #endif
+}
+
+/* Explicit device status (I1): the legacy response packed a single value that
+ * meant upload bytes while an upload was open and the active generation
+ * otherwise. Version 3 also identifies the active bundle and media by CRC so
+ * a reconnect can prove which artifact committed. */
+typedef struct __attribute__((packed)) {
+    uint32_t version;
+    uint32_t flags; /* bit 0: upload open */
+    uint32_t active_generation;
+    uint32_t active_bundle_crc32;
+    uint32_t received_bytes;
+    uint32_t total_bytes;
+    uint32_t upload_crc32;
+    uint32_t media_bytes; /* size of the active screensaver file, 0 when absent */
+    uint32_t media_crc32;
+} m3_status_v3_t;
+
+static void m3_send_status(uint8_t opcode, uint32_t sequence)
+{
+    m3_status_v3_t status = {
+        .version = 3,
+        .flags = s_storage.upload_open ? 1U : 0U,
+        .active_generation = s_storage.active_generation,
+        .active_bundle_crc32 = s_storage.active_bundle_crc32,
+        .received_bytes = s_storage.received_bytes,
+        .total_bytes = s_storage.total_bytes,
+        .upload_crc32 = s_storage.upload_open ? s_storage.bundle_crc32 : 0,
+        .media_bytes = 0,
+        .media_crc32 = s_storage.active_media_crc32,
+    };
+    struct stat media;
+    if (stat(M3_MEDIA_FILE, &media) == 0 && media.st_size <= (off_t) M3_MAX_MEDIA_BYTES) {
+        status.media_bytes = (uint32_t) media.st_size;
+    }
+    m3_send_payload(opcode, sequence, &status, sizeof(status));
 }
 
 static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *payload)
@@ -984,6 +1136,8 @@ static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *pay
         m3_handle_download_begin(frame);
     } else if (frame->opcode == M3_OP_DOWNLOAD_CHUNK) {
         m3_handle_download_chunk(frame, payload);
+    } else if (frame->opcode == M3_OP_DOWNLOAD_END) {
+        m3_handle_download_end(frame);
     } else if (frame->opcode == M3_OP_MEDIA_ABORT) {
         if (s_media_upload.file != NULL) fclose(s_media_upload.file);
         free(s_media_upload.write_buffer);
@@ -998,12 +1152,12 @@ static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *pay
 #endif
     } else if (frame->opcode == M3_OP_ABORT) {
         m3_bundle_upload_close();
+        m3_download_close();
         unlink(M3_STAGE_FILE); unlink(M3_STATE_FILE);
         s_storage.upload_open = false; s_storage.received_bytes = 0; s_storage.durable_bytes = 0;
         m3_send_response(M3_OP_ABORT, frame->sequence, M3_STATUS_OK, 0);
     } else if (frame->opcode == M3_OP_STATUS || frame->opcode == M3_OP_DIAG) {
-        m3_send_response(frame->opcode, frame->sequence, M3_STATUS_OK,
-                         s_storage.upload_open ? s_storage.received_bytes : s_storage.active_generation);
+        m3_send_status(frame->opcode, frame->sequence);
     } else {
         m3_send_response(frame->opcode, frame->sequence, M3_STATUS_BAD_FRAME, 0);
     }
@@ -1046,28 +1200,49 @@ static void m3_sync_task(void *argument)
     (void) argument;
     m3_rx_packet_t packet;
     while (true) {
-        if (xQueueReceive(s_rx_queue, &packet, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(s_rx_queue, &packet, pdMS_TO_TICKS(50)) == pdTRUE) {
             m3_feed_bytes(packet.bytes, packet.length);
+        }
+        /* Detach is published by the TinyUSB callback as a flag; the sync task
+         * owns the download stream and closes it here, never in the callback.
+         * The bounded queue wait keeps this check responsive without spinning. */
+        if (!s_usb_mounted && s_download_file != NULL) {
+            ESP_LOGW(TAG, "M3_SYNC result=download_cancelled reason=detach");
+            m3_download_close();
         }
     }
 }
 
 void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bufsize)
 {
-    if (itf != 0 || s_rx_queue == NULL || buffer == NULL || bufsize == 0) return;
-    if (bufsize > M3_RX_PACKET_BYTES) {
-        ESP_LOGE(TAG, "M3_SYNC result=rx_frame_too_large bytes=%u", bufsize);
+    if (itf != 0 || s_rx_queue == NULL) return;
+
+    /* Buffered TinyUSB vendor endpoints notify the application with
+     * (buffer=NULL, bufsize=0); the received bytes must then be drained from
+     * the vendor FIFO. Keep the direct-buffer path for non-buffered builds. */
+    if (buffer != NULL && bufsize > 0) {
+        if (bufsize > M3_RX_PACKET_BYTES) {
+            ESP_LOGE(TAG, "M3_SYNC result=rx_frame_too_large bytes=%u", bufsize);
+            return;
+        }
+        m3_rx_packet_t packet = {.length = bufsize};
+        memcpy(packet.bytes, buffer, packet.length);
+        if (xQueueSend(s_rx_queue, &packet, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "M3_SYNC result=rx_queue_full");
+        }
         return;
     }
-    m3_rx_packet_t packet = {.length = bufsize};
-    memcpy(packet.bytes, buffer, packet.length);
-    if (xQueueSend(s_rx_queue, &packet, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "M3_SYNC result=rx_queue_full");
+
+    while (tud_vendor_n_available(itf) > 0) {
+        m3_rx_packet_t packet = {0};
+        const uint32_t available = tud_vendor_n_available(itf);
+        const uint32_t requested = available < M3_RX_PACKET_BYTES ? available : M3_RX_PACKET_BYTES;
+        packet.length = tud_vendor_n_read(itf, packet.bytes, requested);
+        if (packet.length == 0) break;
+        if (xQueueSend(s_rx_queue, &packet, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "M3_SYNC result=rx_queue_full");
+        }
     }
-    /* This TinyUSB fork mirrors callback bytes into its vendor RX FIFO before
-     * invoking us. We consume the callback buffer directly, so drain that
-     * duplicate FIFO or the OUT endpoint stops rearming after 2 KiB. */
-    tud_vendor_n_read_flush(0);
 }
 
 static void m3_usb_event_cb(tinyusb_event_t *event, void *argument)
@@ -1081,9 +1256,8 @@ static void m3_usb_event_cb(tinyusb_event_t *event, void *argument)
         ESP_LOGI(TAG, "M3_USB state=mounted interfaces=keyboard,vendor_sync");
     } else if (event->id == TINYUSB_EVENT_DETACHED) {
         s_usb_mounted = false;
-        if (s_download_file != NULL) fclose(s_download_file);
-        s_download_file = NULL;
-        s_download_offset = 0;
+        /* The download stream is owned by the sync task; the callback only
+         * publishes the connection change (see m3_download_close). */
 #ifdef M5_MEDIA_ENABLED
         m5_hid_release_all("usb_detached");
 #endif

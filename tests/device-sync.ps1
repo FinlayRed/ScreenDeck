@@ -3,7 +3,9 @@
 [CmdletBinding()]
 param(
     [switch] $CommitTestBundle,
-    [switch] $ResumeTest
+    [switch] $ResumeTest,
+    [switch] $RejectInvalidBundle,
+    [switch] $AllowDestructiveBundle
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,8 +28,10 @@ namespace Screendeck {
     [StructLayout(LayoutKind.Sequential)] struct IfaceData { public int cbSize; public Guid guid; public int flags; public IntPtr reserved; }
     [StructLayout(LayoutKind.Sequential, Pack=1)] struct IfaceDesc { public byte length, type, number, alternate, pipes, klass, subclass, protocol, index; }
     // WINUSB_PIPE_INFORMATION is not a raw USB endpoint descriptor: PipeType is
-    // a 32-bit enum followed by the endpoint address (PipeId).
-    [StructLayout(LayoutKind.Sequential, Pack=1)] struct PipeInfo { public uint type; public byte address; public ushort maximumPacketSize; public byte interval; }
+    // a 32-bit enum followed by the endpoint address (PipeId). The Windows ABI
+    // pads the struct to 12 bytes; Pack=1 would shrink it to 8 and let
+    // WinUsb_QueryPipe write past the marshalled buffer (T1).
+    [StructLayout(LayoutKind.Sequential)] struct PipeInfo { public uint type; public byte address; public ushort maximumPacketSize; public byte interval; }
     [DllImport("setupapi.dll", SetLastError=true)] static extern IntPtr SetupDiGetClassDevs(ref Guid guid, IntPtr enumerator, IntPtr hwnd, uint flags);
     [DllImport("setupapi.dll", SetLastError=true)] static extern bool SetupDiEnumDeviceInterfaces(IntPtr set, IntPtr device, ref Guid guid, uint index, ref IfaceData data);
     [DllImport("setupapi.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr set, ref IfaceData data, IntPtr detail, uint size, out uint required, IntPtr device);
@@ -64,10 +68,46 @@ namespace Screendeck {
       foreach (byte value in data) { crc ^= value; for (int bit=0; bit<8; bit++) crc = (crc >> 1) ^ ((crc & 1) != 0 ? 0xedb88320u : 0u); }
       return ~crc;
     }
+    static void Put16(byte[] value, int offset, ushort number) { Array.Copy(BitConverter.GetBytes(number), 0, value, offset, 2); }
+    // A minimal structurally valid M5UI payload (schema 3): one profile, one
+    // page of 32 empty buttons, no assets, macros, or radials. Offsets are
+    // chosen to satisfy range and 2-byte alignment checks (F3/F4).
+    public static byte[] MinimalUiPayload() {
+      var payload = new byte[400];
+      Put(payload, 0, 0x4955354D); // magic 'MU5I'
+      Put16(payload, 4, 3);        // version
+      Put16(payload, 6, 72);       // header_bytes
+      Put16(payload, 8, 1);        // profile_count
+      Put16(payload, 10, 1);       // page_count
+      Put16(payload, 12, 0);       // asset_count
+      Put16(payload, 14, 32);      // buttons_per_page
+      Put16(payload, 16, 0);       // macro_count
+      Put16(payload, 18, 0);       // radial_count
+      Put(payload, 20, 0);         // step_count
+      Put(payload, 24, 72);        // profiles_offset
+      Put(payload, 28, 80);        // pages_offset
+      Put(payload, 32, 336);       // assets_offset (empty table)
+      Put(payload, 36, 336);       // button_macro_refs_offset
+      Put(payload, 40, 400);       // macro_descriptors_offset (empty)
+      Put(payload, 44, 400);       // macro_steps_offset (empty)
+      Put(payload, 48, 400);       // blob_offset
+      Put(payload, 52, 15);        // flags = screensaver idle seconds
+      Put(payload, 56, 400);       // radial_descriptors_offset (empty)
+      Put(payload, 60, 400);       // radial_items_offset (empty)
+      Put(payload, 64, 0);         // radial_item_count
+      Put(payload, 68, 592);       // settings: brightness 80 + screensaver enabled
+      Put16(payload, 72, 0); Put16(payload, 74, 1); Put(payload, 76, 0); // profile 0
+      for (int i = 0; i < 32; i++) {
+        int off = 80 + i * 8;
+        Put(payload, off, 0xFFFFFFFF); Put16(payload, off + 4, 0xFFFF); // empty button
+      }
+      for (int i = 0; i < 32; i++) Put16(payload, 336 + i * 2, 0xFFFF); // no macro refs
+      return payload;
+    }
     public static string DevicePath() { return Path(); }
     static uint U32(byte[] value, int offset) { return BitConverter.ToUInt32(value, offset); }
     static void Put(byte[] value, int offset, uint number) { Array.Copy(BitConverter.GetBytes(number), 0, value, offset, 4); }
-    public static uint[] Exchange(byte opcode, uint sequence, byte[] payload) {
+    static byte[] ExchangePayload(byte opcode, uint sequence, byte[] payload) {
       payload = payload ?? Array.Empty<byte>();
       var frame = new byte[20 + payload.Length];
       Put(frame, 0, 0x33434453); frame[4] = 1; frame[5] = opcode; Put(frame, 8, sequence); Put(frame, 12, (uint)payload.Length); Put(frame, 16, Crc32(payload));
@@ -91,12 +131,27 @@ namespace Screendeck {
             for (int i=0; i<read; i++) response.Add(packet[i]);
           }
           var bytes = response.ToArray();
-          if (U32(bytes, 0) != 0x33434453 || bytes[4] != 1 || bytes[5] != (byte)(opcode | 0x80) || U32(bytes, 8) != sequence || U32(bytes, 12) != 8) throw new InvalidOperationException("Malformed M3 response.");
-          var body = new byte[8]; Array.Copy(bytes, 20, body, 0, 8);
+          int bodySize = (int)U32(bytes, 12);
+          if (U32(bytes, 0) != 0x33434453 || bytes[4] != 1 || bytes[5] != (byte)(opcode | 0x80) || U32(bytes, 8) != sequence || bytes.Length < 20 + bodySize) throw new InvalidOperationException("Malformed M3 response.");
+          var body = new byte[bodySize]; Array.Copy(bytes, 20, body, 0, bodySize);
           if (U32(bytes, 16) != Crc32(body)) throw new InvalidOperationException("M3 response CRC mismatch (device=0x" + U32(bytes, 16).ToString("X8") + ", host=0x" + Crc32(body).ToString("X8") + ").");
-          return new uint[] { U32(body, 0), U32(body, 4) };
+          return body;
         } finally { WinUsb_Free(usb); }
       }
+    }
+    public static uint[] Exchange(byte opcode, uint sequence, byte[] payload) {
+      var body = ExchangePayload(opcode, sequence, payload);
+      if (body.Length != 8) throw new InvalidOperationException("M3 response is not a status/value pair.");
+      return new uint[] { U32(body, 0), U32(body, 4) };
+    }
+    public static uint Status(uint sequence) {
+      var body = ExchangePayload(6, sequence, Array.Empty<byte>());
+      if (body.Length == 36 || body.Length == 28) return U32(body, 8);
+      if (body.Length == 8) {
+        if (U32(body, 0) != 0) throw new InvalidOperationException("M3 STATUS failed: status=" + U32(body, 0));
+        return U32(body, 4);
+      }
+      throw new InvalidOperationException("Unsupported M3 STATUS payload size " + body.Length + ".");
     }
     public static byte[] Bundle(byte[] payload) {
       var bundle = new byte[16 + payload.Length];
@@ -107,6 +162,21 @@ namespace Screendeck {
 }
 '@
 }
+
+# T1: assert the marshalled WINUSB_PIPE_INFORMATION layout matches the Windows
+# ABI (12 bytes) before any native call is made. Pack=1 would report 8 bytes
+# and WinUsb_QueryPipe could overwrite the tail of the marshalled buffer. The
+# nested type is resolved via reflection because the '+PipeInfo' type literal
+# is bound before Add-Type runs; the explicit [type] cast selects
+# Marshal.SizeOf(Type) instead of the object overload. PipeInfo is internal,
+# so both visibility flags are required.
+$pipeInfoType = [Screendeck.M3WinUsb].GetNestedType('PipeInfo', [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::NonPublic)
+if ($null -eq $pipeInfoType) { throw 'PipeInfo type not found after Add-Type.' }
+$pipeInfoSize = [Runtime.InteropServices.Marshal]::SizeOf([type]$pipeInfoType)
+if ($pipeInfoSize -ne 12) {
+    throw "WINUSB_PIPE_INFORMATION marshals to $pipeInfoSize bytes; expected 12. Endpoint enumeration is unsafe."
+}
+Write-Verbose "WINUSB_PIPE_INFORMATION marshals to $pipeInfoSize bytes (ABI-correct)"
 
 function Invoke-M3([byte] $Opcode, [uint32] $Sequence, [byte[]] $Payload = @()) {
     $reply = [Screendeck.M3WinUsb]::Exchange($Opcode, $Sequence, $Payload)
@@ -119,12 +189,19 @@ $devicePath = [Screendeck.M3WinUsb]::DevicePath()
 Write-Verbose "M3 WinUSB path: $devicePath"
 $caps = Invoke-M3 1 $sequence; $sequence++
 if (($caps -band 0x1F) -ne 0x1F) { throw "Unexpected M3 capability word: 0x$($caps.ToString('X8'))" }
-$before = Invoke-M3 6 $sequence; $sequence++
+$before = [Screendeck.M3WinUsb]::Status($sequence); $sequence++
 Write-Host "M3 HELLO ok capabilities=0x$($caps.ToString('X8')); generation=$before"
 if ($CommitTestBundle -and $ResumeTest) { throw 'Choose either -CommitTestBundle or -ResumeTest.' }
+if ($RejectInvalidBundle -and $ResumeTest) { throw 'Choose either -RejectInvalidBundle or -ResumeTest.' }
+# -CommitTestBundle replaces the active UI with a minimal but fully loadable
+# M5UI bundle (F3). It no longer risks an unloadable device, but it still
+# overwrites the working configuration, so it stays explicitly opt-in.
+if ($CommitTestBundle -and -not $AllowDestructiveBundle) {
+    throw 'Refusing to commit a test bundle: it replaces the working device UI. Pass -AllowDestructiveBundle only on a sacrificial device.'
+}
 
 if ($CommitTestBundle -or $ResumeTest) {
-    [byte[]] $payload = 0..95 | ForEach-Object { [byte](($_ * 37 + 11) -band 0xFF) }
+    [byte[]] $payload = if ($CommitTestBundle) { [Screendeck.M3WinUsb]::MinimalUiPayload() } else { 0..95 | ForEach-Object { [byte](($_ * 37 + 11) -band 0xFF) } }
     [byte[]] $bundle = [Screendeck.M3WinUsb]::Bundle($payload)
     $bundleCrc = [Screendeck.M3WinUsb]::Crc32($payload)
     [byte[]] $begin = [byte[]](@([BitConverter]::GetBytes([uint32]$bundle.Length)) + @([BitConverter]::GetBytes([uint32]$bundleCrc)))
@@ -154,4 +231,31 @@ if ($CommitTestBundle -or $ResumeTest) {
         $generation = Invoke-M3 4 $sequence; $sequence++
         Write-Host "M3 COMMIT ok generation=$generation bytes=$($bundle.Length) payload_crc=0x$($bundleCrc.ToString('X8'))"
     }
+}
+
+if ($RejectInvalidBundle) {
+    # F3 negative test: a CRC-correct bundle whose M5UI payload is invalid must
+    # be rejected by COMMIT and must never advance the active generation.
+    [byte[]] $invalid = [Screendeck.M3WinUsb]::MinimalUiPayload()
+    $invalid[0] = 0xEE  # corrupt the M5UI magic; the SDB envelope CRC stays valid
+    [byte[]] $badBundle = [Screendeck.M3WinUsb]::Bundle($invalid)
+    $badCrc = [Screendeck.M3WinUsb]::Crc32($invalid)
+    [byte[]] $badBegin = [byte[]](@([BitConverter]::GetBytes([uint32]$badBundle.Length)) + @([BitConverter]::GetBytes([uint32]$badCrc)))
+    $offset = Invoke-M3 2 $sequence $badBegin; $sequence++
+    if ($offset -gt $badBundle.Length) { throw "Device resume offset exceeds invalid bundle size." }
+    if ($offset -lt $badBundle.Length) {
+        [byte[]] $chunk = $badBundle[$offset..($badBundle.Length - 1)]
+        $chunkCrc = [Screendeck.M3WinUsb]::Crc32($chunk)
+        [byte[]] $chunkPayload = [byte[]](@([BitConverter]::GetBytes([uint32]$offset)) + @([BitConverter]::GetBytes([uint32]$chunkCrc)) + @($chunk))
+        $received = Invoke-M3 3 $sequence $chunkPayload; $sequence++
+        if ($received -ne $badBundle.Length) { throw "M3 acknowledged $received bytes; expected $($badBundle.Length)." }
+    }
+    $rejected = $false
+    try { $null = Invoke-M3 4 $sequence } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Invalid M5UI bundle was accepted by COMMIT.' }
+    $generationAfter = [Screendeck.M3WinUsb]::Status($sequence); $sequence++
+    if ($generationAfter -ne $before) {
+        throw "Invalid bundle activated: generation advanced from $before to $generationAfter."
+    }
+    Write-Host "M3 NEGATIVE ok invalid_bundle=rejected generation=$before"
 }

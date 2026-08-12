@@ -2,7 +2,7 @@
 
 use crate::model::{
     validate, ActionKind, Asset, Button, Macro, MacroStep, Page, Profile, Project, RadialItem,
-    RadialMenu, StepKind, ValidationIssue, MAX_BUNDLE_BYTES,
+    RadialMenu, StepKind, ValidationIssue, ICON_MAX_FRAMES, ICON_MIN_FRAMES, MAX_BUNDLE_BYTES,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
@@ -278,28 +278,39 @@ fn compile_validated(project: &Project) -> Result<Vec<u8>, CompileError> {
         let static_offset = next_blob;
         next_blob += bytes.len();
         let mut animation_blob = None;
-        let (animation_offset, animation_length, animation_frames, animation_fps) =
-            if asset.animation_data_url.is_empty() {
-                (0usize, 0usize, 0u16, 0u8)
-            } else {
-                let (_, encoded) = asset
-                    .animation_data_url
-                    .split_once(',')
-                    .ok_or_else(|| CompileError::Asset(asset.name.clone()))?;
-                let animation = STANDARD
-                    .decode(encoded)
-                    .map_err(|_| CompileError::Asset(asset.name.clone()))?;
-                let frames = mjpeg_frame_count(&animation).ok_or_else(|| {
-                    CompileError::Invalid(format!(
-                        "animated icon '{}' is not a complete MJPEG stream",
+        let (animation_offset, animation_length, animation_frames, animation_fps) = if asset
+            .animation_data_url
+            .is_empty()
+        {
+            (0usize, 0usize, 0u16, 0u8)
+        } else {
+            let (_, encoded) = asset
+                .animation_data_url
+                .split_once(',')
+                .ok_or_else(|| CompileError::Asset(asset.name.clone()))?;
+            let animation = STANDARD
+                .decode(encoded)
+                .map_err(|_| CompileError::Asset(asset.name.clone()))?;
+            let frames = mjpeg_frame_count(&animation).ok_or_else(|| {
+                CompileError::Invalid(format!(
+                    "animated icon '{}' is not a complete MJPEG stream",
+                    asset.name
+                ))
+            })?;
+            // I4: the device accepts only 2..=120 frames per icon. A
+            // stream outside that range would sync successfully and then
+            // prevent the whole UI bundle from loading.
+            if !(ICON_MIN_FRAMES..=ICON_MAX_FRAMES).contains(&frames) {
+                return Err(CompileError::Invalid(format!(
+                        "animated icon '{}' has {frames} frames; the device accepts {ICON_MIN_FRAMES}..={ICON_MAX_FRAMES}",
                         asset.name
-                    ))
-                })?;
-                let offset = next_blob;
-                next_blob += animation.len();
-                animation_blob = Some(animation);
-                (offset, next_blob - offset, frames, asset.animation_fps)
-            };
+                    )));
+            }
+            let offset = next_blob;
+            next_blob += animation.len();
+            animation_blob = Some(animation);
+            (offset, next_blob - offset, frames, asset.animation_fps)
+        };
         payload.extend_from_slice(&(static_offset as u32).to_le_bytes());
         payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         payload.extend_from_slice(&(animation_offset as u32).to_le_bytes());
@@ -443,12 +454,20 @@ fn compile_validated(project: &Project) -> Result<Vec<u8>, CompileError> {
 }
 
 pub fn summarize(project: &Project) -> CompileSummary {
-    let issues = validate(project);
-    let bundle_bytes = if issues.is_empty() {
-        estimate_bundle_bytes(project)
-    } else {
-        0
-    };
+    let mut issues = validate(project);
+    // E9: keep validation and compilation on the same limit and size
+    // calculation, so an oversized project is blocked before Sync is enabled
+    // instead of failing only when the compiler runs.
+    let bundle_bytes = estimate_bundle_bytes(project);
+    if bundle_bytes > MAX_BUNDLE_BYTES {
+        issues.push(ValidationIssue {
+            path: String::new(),
+            message: format!(
+                "Project compiles to an estimated {bundle_bytes} bytes, above the 16 MiB device limit."
+            ),
+            severity: "error",
+        });
+    }
     CompileSummary {
         bundle_bytes,
         payload_crc32: 0,
@@ -619,10 +638,26 @@ pub fn decompile(bundle: &[u8]) -> Result<Project, String> {
         let image_n = u32_at(p, o + 4)? as usize;
         let anim_o = u32_at(p, o + 8)? as usize;
         let anim_n = u32_at(p, o + 12)? as usize;
+        let recorded_frames = u16_at(p, o + 16)?;
         let fps = *p.get(o + 19).ok_or("truncated asset")?;
         range(image_o, image_n, 1)?;
         if anim_n > 0 {
             range(anim_o, anim_n, 1)?;
+            // I4: mirror the firmware's animated-icon contract (2..=120 frames,
+            // matching the recorded count) so an incompatible bundle cannot be
+            // imported and re-synced.
+            let actual = mjpeg_frame_count(&p[anim_o..anim_o + anim_n])
+                .ok_or("animated icon is not a complete MJPEG stream")?;
+            if !(ICON_MIN_FRAMES..=ICON_MAX_FRAMES).contains(&actual) {
+                return Err(format!(
+                    "animated icon has {actual} frames; the device accepts {ICON_MIN_FRAMES}..={ICON_MAX_FRAMES}"
+                ));
+            }
+            if actual != recorded_frames {
+                return Err(format!(
+                    "animated icon frame count {actual} does not match the recorded count {recorded_frames}"
+                ));
+            }
         }
         let mime = if p.get(image_o..image_o + 2) == Some(&[0xff, 0xd8]) {
             "image/jpeg"

@@ -18,7 +18,13 @@ const MEDIA_COMMIT: u8 = 10;
 const TEST_SCREENSAVER: u8 = 12;
 const DOWNLOAD_BEGIN: u8 = 13;
 const DOWNLOAD_CHUNK: u8 = 14;
+const DOWNLOAD_END: u8 = 15;
 const DOWNLOAD_CAPABILITY: u32 = 0x100;
+const IO_TIMEOUT_MS: u32 = 5_000;
+/// Shorter bound for the periodic status poll: the device is already
+/// discovered, so a stalled session must not hold the worker for the full
+/// HELLO timeout on top of a status timeout (E8).
+const STATUS_TIMEOUT_MS: u32 = 2_000;
 const TEST_SCREENSAVER_CAPABILITY: u32 = 0x80;
 const MEDIA_BATCH_CAPABILITY: u32 = 0x40;
 const BUNDLE_BATCH_CAPABILITY: u32 = 0x200;
@@ -54,6 +60,24 @@ pub struct DeviceStatus {
     pub detail: String,
 }
 
+/// Explicit device status (I1). The legacy STATUS response packed a single
+/// value that meant upload bytes while an upload was open and the active
+/// generation otherwise; firmware v2 returns this fixed struct so idle,
+/// partial, resumed, committed, and aborted states decode unambiguously.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusDetails {
+    pub protocol_version: u32,
+    pub upload_open: bool,
+    pub active_generation: u32,
+    pub active_bundle_crc32: u32,
+    pub received_bytes: u32,
+    pub total_bytes: u32,
+    pub upload_crc32: u32,
+    pub media_bytes: u32,
+    pub media_crc32: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncResult {
@@ -81,7 +105,7 @@ fn status_detail(status: u32, value: u32) -> String {
             1 => "screensaver file is missing or cannot be opened".into(),
             2 => "screensaver file is empty or its size cannot be read".into(),
             3 => "screensaver MJPEG framing is malformed".into(),
-            4 => "screensaver contains more than 900 frames".into(),
+            4 => "screensaver contains more than 1800 frames".into(),
             5 => "screensaver could not be reopened for playback".into(),
             6 => "a screensaver frame exceeds the 2 MiB device limit".into(),
             7 => "device could not allocate the screensaver read buffer".into(),
@@ -173,6 +197,278 @@ fn checked_response(
     Ok(value)
 }
 
+/// Parses STATUS v3 (artifact identities), v2, or the legacy single-value
+/// response from older firmware.
+fn parse_status_response(bytes: &[u8], sequence: u32) -> Result<StatusDetails, DeviceError> {
+    if bytes.len() < 20
+        || u32::from_le_bytes(bytes[0..4].try_into().unwrap()) != MAGIC
+        || bytes[4] != VERSION
+        || bytes[5] != STATUS | 0x80
+        || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != sequence
+    {
+        return Err(DeviceError::Protocol(format!(
+            "unexpected status header ({} bytes)",
+            bytes.len()
+        )));
+    }
+    let payload_size = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    if !matches!(payload_size, 36 | 28 | 8) || bytes.len() != 20 + payload_size {
+        return Err(DeviceError::Protocol(format!(
+            "unexpected status payload size {payload_size}"
+        )));
+    }
+    if u32::from_le_bytes(bytes[16..20].try_into().unwrap()) != crc32(&bytes[20..]) {
+        return Err(DeviceError::Protocol(
+            "status response checksum mismatch".into(),
+        ));
+    }
+    if payload_size == 36 {
+        Ok(StatusDetails {
+            protocol_version: u32::from_le_bytes(bytes[20..24].try_into().unwrap()),
+            upload_open: bytes[24] & 1 != 0,
+            active_generation: u32::from_le_bytes(bytes[28..32].try_into().unwrap()),
+            active_bundle_crc32: u32::from_le_bytes(bytes[32..36].try_into().unwrap()),
+            received_bytes: u32::from_le_bytes(bytes[36..40].try_into().unwrap()),
+            total_bytes: u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
+            upload_crc32: u32::from_le_bytes(bytes[44..48].try_into().unwrap()),
+            media_bytes: u32::from_le_bytes(bytes[48..52].try_into().unwrap()),
+            media_crc32: u32::from_le_bytes(bytes[52..56].try_into().unwrap()),
+        })
+    } else if payload_size == 28 {
+        Ok(StatusDetails {
+            protocol_version: u32::from_le_bytes(bytes[20..24].try_into().unwrap()),
+            upload_open: bytes[24] & 1 != 0,
+            active_generation: u32::from_le_bytes(bytes[28..32].try_into().unwrap()),
+            active_bundle_crc32: 0,
+            received_bytes: u32::from_le_bytes(bytes[32..36].try_into().unwrap()),
+            total_bytes: u32::from_le_bytes(bytes[36..40].try_into().unwrap()),
+            upload_crc32: u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
+            media_bytes: u32::from_le_bytes(bytes[44..48].try_into().unwrap()),
+            media_crc32: 0,
+        })
+    } else {
+        // Legacy firmware: the value is the active generation when no upload
+        // is open; upload state is not distinguishable, so it is treated as
+        // the generation, matching the previous editor behaviour.
+        Ok(StatusDetails {
+            protocol_version: 1,
+            upload_open: false,
+            active_generation: u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            active_bundle_crc32: 0,
+            received_bytes: 0,
+            total_bytes: 0,
+            upload_crc32: 0,
+            media_bytes: 0,
+            media_crc32: 0,
+        })
+    }
+}
+
+fn status_query(
+    session: &mut transport::Session,
+    sequence: u32,
+    timeout_ms: u32,
+) -> Result<StatusDetails, DeviceError> {
+    let response = session.exchange_with_timeout(&frame(STATUS, sequence, &[]), timeout_ms)?;
+    parse_status_response(&response, sequence)
+}
+
+/// Returns true when an error after COMMIT is indeterminate: the device may
+/// have restarted or the link may have dropped mid-commit, so the caller must
+/// reconnect and verify instead of reporting a definite failure (I2).
+fn is_indeterminate_after_commit(error: &DeviceError) -> bool {
+    match error {
+        DeviceError::Protocol(message) => message.contains("timed out"),
+        DeviceError::Windows(code) => matches!(
+            *code,
+            31 | 57 | 109 | 121 | 995 | 1117 | 1167 // GEN_FAILURE, NO_SUCH_DEVICE, PIPE_BROKEN, SEMAPHORE_TIMEOUT, OPERATION_ABORTED, DEVICE_REMOVED, DEVICE_NOT_CONNECTED
+        ),
+        _ => false,
+    }
+}
+
+/// After a lost COMMIT acknowledgement the device may be restarting 500 ms
+/// later. Close the old session, wait for re-enumeration, open a fresh
+/// session, and confirm the active generation advanced (I2).
+fn reconnect_and_verify(initial_generation: u32, expected_crc32: u32) -> Result<u32, DeviceError> {
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let mut session = None;
+    for _ in 0..40 {
+        match transport::Session::open() {
+            Ok(opened) => {
+                session = Some(opened);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+        }
+    }
+    let mut session = session.ok_or(DeviceError::NotFound)?;
+    checked_exchange(&mut session, HELLO, 1, &[], "capability query")?;
+    let details = status_query(&mut session, 2, IO_TIMEOUT_MS)?;
+    if details.protocol_version < 3 {
+        return Err(DeviceError::Protocol(
+            "commit acknowledgement was lost and this firmware cannot verify the active bundle identity".into(),
+        ));
+    }
+    if details.active_generation <= initial_generation
+        || details.active_bundle_crc32 != expected_crc32
+    {
+        return Err(DeviceError::Protocol(
+            "commit acknowledgement was lost and the expected bundle is not active".into(),
+        ));
+    }
+    Ok(details.active_generation)
+}
+
+/// Media-commit variant of `reconnect_and_verify`: after a lost MEDIA_COMMIT
+/// acknowledgement, reconnect and confirm the active screensaver file size
+/// matches the uploaded stream (I2).
+fn reconnect_and_verify_media(
+    expected_bytes: usize,
+    expected_crc32: u32,
+) -> Result<u32, DeviceError> {
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let mut session = None;
+    for _ in 0..40 {
+        match transport::Session::open() {
+            Ok(opened) => {
+                session = Some(opened);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(500)),
+        }
+    }
+    let mut session = session.ok_or(DeviceError::NotFound)?;
+    let details = status_query(&mut session, 2, IO_TIMEOUT_MS)?;
+    if details.protocol_version < 3 {
+        return Err(DeviceError::Protocol(
+            "screensaver commit acknowledgement was lost and this firmware cannot verify the active media identity".into(),
+        ));
+    }
+    if details.media_bytes != expected_bytes as u32 || details.media_crc32 != expected_crc32 {
+        return Err(DeviceError::Protocol(format!(
+            "screensaver commit acknowledgement was lost and the expected media is not active (bytes={}, crc={:08x})",
+            details.media_bytes, details.media_crc32
+        )));
+    }
+    Ok(details.media_bytes)
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    fn status_response_v3(sequence: u32) -> Vec<u8> {
+        let mut status = Vec::new();
+        status.extend_from_slice(&3u32.to_le_bytes());
+        status.extend_from_slice(&1u32.to_le_bytes()); // upload open
+        status.extend_from_slice(&7u32.to_le_bytes()); // active generation
+        status.extend_from_slice(&0xAABB_CCDDu32.to_le_bytes()); // active bundle CRC
+        status.extend_from_slice(&4096u32.to_le_bytes());
+        status.extend_from_slice(&8192u32.to_le_bytes());
+        status.extend_from_slice(&0x1234_5678u32.to_le_bytes());
+        status.extend_from_slice(&16_384u32.to_le_bytes()); // media bytes
+        status.extend_from_slice(&0xCAFE_BABEu32.to_le_bytes()); // media CRC
+        let mut response = Vec::new();
+        response.extend_from_slice(&MAGIC.to_le_bytes());
+        response.push(VERSION);
+        response.push(STATUS | 0x80);
+        response.extend_from_slice(&0u16.to_le_bytes());
+        response.extend_from_slice(&sequence.to_le_bytes());
+        response.extend_from_slice(&(status.len() as u32).to_le_bytes());
+        response.extend_from_slice(&crc32(&status).to_le_bytes());
+        response.extend_from_slice(&status);
+        response
+    }
+
+    fn status_response_v2(sequence: u32) -> Vec<u8> {
+        let fields = [2u32, 0, 5, 0, 0, 0, 12_000];
+        let status: Vec<u8> = fields
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let mut response = Vec::new();
+        response.extend_from_slice(&MAGIC.to_le_bytes());
+        response.push(VERSION);
+        response.push(STATUS | 0x80);
+        response.extend_from_slice(&0u16.to_le_bytes());
+        response.extend_from_slice(&sequence.to_le_bytes());
+        response.extend_from_slice(&(status.len() as u32).to_le_bytes());
+        response.extend_from_slice(&crc32(&status).to_le_bytes());
+        response.extend_from_slice(&status);
+        response
+    }
+
+    #[test]
+    fn parses_v3_status_struct() {
+        let details = parse_status_response(&status_response_v3(9), 9).unwrap();
+        assert_eq!(details.protocol_version, 3);
+        assert!(details.upload_open);
+        assert_eq!(details.active_generation, 7);
+        assert_eq!(details.active_bundle_crc32, 0xAABB_CCDD);
+        assert_eq!(details.received_bytes, 4096);
+        assert_eq!(details.total_bytes, 8192);
+        assert_eq!(details.upload_crc32, 0x1234_5678);
+        assert_eq!(details.media_bytes, 16_384);
+        assert_eq!(details.media_crc32, 0xCAFE_BABE);
+    }
+
+    #[test]
+    fn parses_v2_status_without_artifact_identity() {
+        let details = parse_status_response(&status_response_v2(4), 4).unwrap();
+        assert_eq!(details.protocol_version, 2);
+        assert_eq!(details.active_generation, 5);
+        assert_eq!(details.media_bytes, 12_000);
+        assert_eq!(details.active_bundle_crc32, 0);
+        assert_eq!(details.media_crc32, 0);
+    }
+
+    #[test]
+    fn parses_legacy_status_value() {
+        // Legacy firmware: an 8-byte payload (status + value) whose value is
+        // the generation.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_le_bytes()); // status success
+        body.extend_from_slice(&42u32.to_le_bytes()); // value
+        let mut response = Vec::new();
+        response.extend_from_slice(&MAGIC.to_le_bytes());
+        response.push(VERSION);
+        response.push(STATUS | 0x80);
+        response.extend_from_slice(&0u16.to_le_bytes());
+        response.extend_from_slice(&3u32.to_le_bytes());
+        response.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        response.extend_from_slice(&crc32(&body).to_le_bytes());
+        response.extend_from_slice(&body);
+        let details = parse_status_response(&response, 3).unwrap();
+        assert_eq!(details.protocol_version, 1);
+        assert!(!details.upload_open);
+        assert_eq!(details.active_generation, 42);
+    }
+
+    #[test]
+    fn rejects_malformed_status_payloads() {
+        assert!(parse_status_response(&status_response_v3(9), 10).is_err()); // wrong sequence
+        let mut truncated = status_response_v3(9);
+        truncated.truncate(24);
+        assert!(parse_status_response(&truncated, 9).is_err());
+    }
+
+    #[test]
+    fn indeterminate_error_classification() {
+        assert!(is_indeterminate_after_commit(&DeviceError::Protocol(
+            "USB transfer timed out after 5 seconds".into()
+        )));
+        assert!(is_indeterminate_after_commit(&DeviceError::Windows(1117)));
+        assert!(is_indeterminate_after_commit(&DeviceError::Windows(109)));
+        assert!(!is_indeterminate_after_commit(&DeviceError::Windows(5)));
+        assert!(!is_indeterminate_after_commit(&DeviceError::Rejected {
+            operation: "commit bundle",
+            status: 4,
+            detail: "bundle validation failed".into(),
+        }));
+    }
+}
+
 pub fn status() -> DeviceStatus {
     let result = (|| {
         let mut session = transport::Session::open()?;
@@ -182,15 +478,15 @@ pub fn status() -> DeviceStatus {
                 "unsupported capability word 0x{capabilities:08X}"
             )));
         }
-        let generation = checked_exchange(&mut session, STATUS, 2, &[], "status query")?;
-        Ok((capabilities, generation))
+        let details = status_query(&mut session, 2, STATUS_TIMEOUT_MS)?;
+        Ok((capabilities, details))
     })();
     match result {
-        Ok((capabilities, generation)) => DeviceStatus {
+        Ok((capabilities, details)) => DeviceStatus {
             connected: true,
-            generation,
+            generation: details.active_generation,
             capabilities,
-            detail: "SDC3 v1 · resume · checksums · atomic activation".into(),
+            detail: "SDC3 v3 · verified commits · resume · checksums · atomic activation".into(),
         },
         Err(error) => DeviceStatus {
             connected: false,
@@ -228,7 +524,7 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
             "device capabilities 0x{capabilities:08X} do not satisfy M4"
         )));
     }
-    let initial_generation = checked_exchange(&mut session, STATUS, 2, &[], "status query")?;
+    let initial_generation = status_query(&mut session, 2, IO_TIMEOUT_MS)?.active_generation;
     let payload_crc = u32::from_le_bytes(bundle[12..16].try_into().unwrap());
     let mut begin = Vec::with_capacity(8);
     begin.extend_from_slice(&(bundle.len() as u32).to_le_bytes());
@@ -308,17 +604,13 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
     }
     let generation = match checked_exchange(&mut session, COMMIT, sequence, &[], "commit bundle") {
         Ok(value) => value,
-        Err(DeviceError::Protocol(message)) if message.contains("timed out") => {
-            thread::sleep(Duration::from_millis(250));
-            let observed =
-                checked_exchange(&mut session, STATUS, sequence + 1, &[], "verify commit")?;
-            if observed <= initial_generation {
-                return Err(DeviceError::Protocol(
-                    "commit acknowledgement was lost and the active generation did not advance"
-                        .into(),
-                ));
-            }
-            observed
+        // I2: the device restarts 500 ms after a durable commit, so a lost
+        // acknowledgement, disconnect, or pipe failure is indeterminate. Close
+        // the old session, wait for re-enumeration, and verify the generation
+        // advanced on a fresh session.
+        Err(error) if is_indeterminate_after_commit(&error) => {
+            drop(session);
+            reconnect_and_verify(initial_generation, payload_crc)?
         }
         Err(error) => return Err(error),
     };
@@ -367,6 +659,19 @@ pub fn download() -> Result<Vec<u8>, DeviceError> {
             "downloaded bundle failed validation".into(),
         ));
     }
+    // F5: close the device-side file handle with an explicit end marker so
+    // generation cleanup never unlinks an open file after later commits. A
+    // failed marker is non-fatal: the bundle is already received and validated,
+    // and the device releases the handle on the next download, detach, or
+    // commit anyway.
+    let _ = checked_exchange_with_timeout(
+        &mut session,
+        DOWNLOAD_END,
+        sequence,
+        &[],
+        "end download",
+        2_000,
+    );
     Ok(bundle)
 }
 
@@ -410,9 +715,10 @@ pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError
                 .into(),
         ));
     }
+    let media_crc32 = crc32(media);
     let mut begin = Vec::with_capacity(8);
     begin.extend_from_slice(&(media.len() as u32).to_le_bytes());
-    begin.extend_from_slice(&crc32(media).to_le_bytes());
+    begin.extend_from_slice(&media_crc32.to_le_bytes());
     let resumed_at = checked_exchange(
         &mut session,
         MEDIA_BEGIN,
@@ -483,15 +789,26 @@ pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError
             media.len()
         )));
     }
-    let committed = checked_exchange_with_timeout(
+    let committed = match checked_exchange_with_timeout(
         &mut session,
         MEDIA_COMMIT,
         sequence,
         &[],
         "commit screensaver",
         30_000,
-    )
-    .map_err(|error| DeviceError::Protocol(format!("screensaver commit: {error}")))?;
+    ) {
+        Ok(value) => value,
+        // I2: same reconnect-and-verify recovery as the bundle commit.
+        Err(error) if is_indeterminate_after_commit(&error) => {
+            drop(session);
+            reconnect_and_verify_media(media.len(), media_crc32)?
+        }
+        Err(error) => {
+            return Err(DeviceError::Protocol(format!(
+                "screensaver commit: {error}"
+            )));
+        }
+    };
     if committed as usize != media.len() {
         return Err(DeviceError::Protocol(format!(
             "device committed {committed} bytes; expected {}",
@@ -507,6 +824,7 @@ pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError
 #[cfg(windows)]
 mod transport {
     use super::DeviceError;
+    use super::IO_TIMEOUT_MS;
     use std::{
         ffi::c_void,
         mem::{size_of, zeroed},
@@ -521,8 +839,13 @@ mod transport {
     const OPEN_EXISTING: u32 = 3;
     const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
     const ERROR_IO_PENDING: u32 = 997;
+    const ERROR_OPERATION_ABORTED: u32 = 995;
+    const ERROR_NOT_FOUND: u32 = 1168;
     const WAIT_OBJECT_0: u32 = 0;
-    const IO_TIMEOUT_MS: u32 = 5_000;
+    const WAIT_TIMEOUT: u32 = 0x102;
+    const WAIT_FAILED: u32 = 0xFFFF_FFFF;
+    const POST_CANCEL_WAIT_MS: u32 = 10_000;
+    const CANCEL_RETRIES: u32 = 3;
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -697,31 +1020,6 @@ mod transport {
         DeviceError::Windows(unsafe { GetLastError() })
     }
 
-    unsafe fn await_io(
-        file: Handle,
-        started: i32,
-        overlapped: &mut Overlapped,
-        transferred: &mut u32,
-        timeout_ms: u32,
-    ) -> Result<(), DeviceError> {
-        if started == 0 && GetLastError() != ERROR_IO_PENDING {
-            return Err(last_error());
-        }
-        if started == 0 {
-            if WaitForSingleObject(overlapped.event, timeout_ms) != WAIT_OBJECT_0 {
-                CancelIoEx(file, overlapped);
-                return Err(DeviceError::Protocol(format!(
-                    "USB transfer timed out after {} seconds",
-                    timeout_ms / 1000
-                )));
-            }
-            if GetOverlappedResult(file, overlapped, transferred, 0) == 0 {
-                return Err(last_error());
-            }
-        }
-        Ok(())
-    }
-
     unsafe fn device_path() -> Result<Vec<u16>, DeviceError> {
         let set = DeviceSet(SetupDiGetClassDevsW(
             &INTERFACE_GUID,
@@ -767,6 +1065,203 @@ mod transport {
         let mut path = std::slice::from_raw_parts(start, length).to_vec();
         path.push(0);
         Ok(path)
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum IoDirection {
+        Read,
+        Write,
+    }
+
+    /// Owned, heap-allocated I/O operation. The `OVERLAPPED`, transfer buffer
+    /// and byte count all live here so Windows never touches stack memory
+    /// after cancellation (E1). A transfer is only freed after the kernel
+    /// reports completion or `ERROR_OPERATION_ABORTED`.
+    struct IoOperation {
+        overlapped: Overlapped,
+        direction: IoDirection,
+        buffer: Vec<u8>,
+        transferred: u32,
+        started: bool,
+    }
+
+    impl IoOperation {
+        fn new(direction: IoDirection, buffer: Vec<u8>, event: Handle) -> Box<Self> {
+            Box::new(Self {
+                overlapped: Overlapped {
+                    internal: 0,
+                    internal_high: 0,
+                    offset: 0,
+                    offset_high: 0,
+                    event,
+                },
+                direction,
+                buffer,
+                transferred: 0,
+                started: false,
+            })
+        }
+    }
+
+    /// Injectable Win32 seam for the transfer loop. The production `RealWin32`
+    /// calls the real WinUSB/kernel32 functions; tests substitute a scripted
+    /// mock to cover cancellation, racing completion, and disconnect paths.
+    trait Win32Io {
+        /// Starts a read or write. Nonzero return means synchronous completion.
+        fn start(&self, usb: Handle, pipe: u8, op: &mut IoOperation) -> i32;
+        fn last_error(&self) -> u32;
+        fn wait_for_object(&self, event: Handle, milliseconds: u32) -> u32;
+        fn cancel_io(&self, file: Handle, op: &mut IoOperation) -> i32;
+        /// Ok(transferred) or Err(win32 error).
+        fn get_overlapped_result(&self, file: Handle, op: &mut IoOperation) -> Result<u32, u32>;
+        fn reset_event(&self, event: Handle) -> i32;
+        fn abort_pipe(&self, usb: Handle, pipe: u8) -> i32;
+        fn reset_pipe(&self, usb: Handle, pipe: u8) -> i32;
+    }
+
+    struct RealWin32;
+
+    impl Win32Io for RealWin32 {
+        fn start(&self, usb: Handle, pipe: u8, op: &mut IoOperation) -> i32 {
+            unsafe {
+                match op.direction {
+                    IoDirection::Write => WinUsb_WritePipe(
+                        usb,
+                        pipe,
+                        op.buffer.as_ptr(),
+                        op.buffer.len() as u32,
+                        &mut op.transferred,
+                        &mut op.overlapped as *mut _ as *mut c_void,
+                    ),
+                    IoDirection::Read => WinUsb_ReadPipe(
+                        usb,
+                        pipe,
+                        op.buffer.as_mut_ptr(),
+                        op.buffer.len() as u32,
+                        &mut op.transferred,
+                        &mut op.overlapped as *mut _ as *mut c_void,
+                    ),
+                }
+            }
+        }
+        fn last_error(&self) -> u32 {
+            unsafe { GetLastError() }
+        }
+        fn wait_for_object(&self, event: Handle, milliseconds: u32) -> u32 {
+            unsafe { WaitForSingleObject(event, milliseconds) }
+        }
+        fn cancel_io(&self, file: Handle, op: &mut IoOperation) -> i32 {
+            unsafe { CancelIoEx(file, &mut op.overlapped) }
+        }
+        fn get_overlapped_result(&self, file: Handle, op: &mut IoOperation) -> Result<u32, u32> {
+            unsafe {
+                let mut transferred = 0u32;
+                if GetOverlappedResult(file, &mut op.overlapped, &mut transferred, 0) == 0 {
+                    Err(GetLastError())
+                } else {
+                    op.transferred = transferred;
+                    Ok(transferred)
+                }
+            }
+        }
+        fn reset_event(&self, event: Handle) -> i32 {
+            unsafe { ResetEvent(event) }
+        }
+        fn abort_pipe(&self, usb: Handle, pipe: u8) -> i32 {
+            unsafe { WinUsb_AbortPipe(usb, pipe) }
+        }
+        fn reset_pipe(&self, usb: Handle, pipe: u8) -> i32 {
+            unsafe { WinUsb_ResetPipe(usb, pipe) }
+        }
+    }
+
+    /// Outcome of `run_transfer`. `Stuck` means the kernel never reached a
+    /// terminal state with the operation, so the caller must leak the
+    /// operation object rather than free memory Windows may still access.
+    enum TransferOutcome {
+        Transferred(u32),
+        Error(DeviceError),
+        Stuck(DeviceError),
+    }
+
+    fn timeout_error(timeout_ms: u32) -> DeviceError {
+        DeviceError::Protocol(format!(
+            "USB transfer timed out after {} seconds",
+            timeout_ms / 1000
+        ))
+    }
+
+    /// Runs one transfer to a terminal state. Windows cancellation is
+    /// asynchronous, so on timeout the operation is cancelled and this helper
+    /// waits for the kernel to finish with it (`ERROR_OPERATION_ABORTED` or a
+    /// real byte count) before returning. The race where the transfer finishes
+    /// between the wait and the cancel is handled via `ERROR_NOT_FOUND`.
+    fn run_transfer(
+        win: &dyn Win32Io,
+        file: Handle,
+        usb: Handle,
+        pipe: u8,
+        op: &mut IoOperation,
+        timeout_ms: u32,
+    ) -> TransferOutcome {
+        op.transferred = 0;
+        op.started = false;
+        let started = win.start(usb, pipe, op);
+        if started == 0 && win.last_error() != ERROR_IO_PENDING {
+            return TransferOutcome::Error(DeviceError::Windows(win.last_error()));
+        }
+        if started == 0 && win.wait_for_object(op.overlapped.event, timeout_ms) != WAIT_OBJECT_0 {
+            return cancel_and_wait(win, file, op, timeout_ms);
+        }
+        match win.get_overlapped_result(file, op) {
+            Ok(transferred) => TransferOutcome::Transferred(transferred),
+            Err(ERROR_OPERATION_ABORTED) => TransferOutcome::Error(timeout_error(timeout_ms)),
+            Err(error) => TransferOutcome::Error(DeviceError::Windows(error)),
+        }
+    }
+
+    fn cancel_and_wait(
+        win: &dyn Win32Io,
+        file: Handle,
+        op: &mut IoOperation,
+        timeout_ms: u32,
+    ) -> TransferOutcome {
+        let mut cancelled = win.cancel_io(file, op) != 0;
+        if !cancelled && win.last_error() == ERROR_NOT_FOUND {
+            // The transfer completed between the wait and the cancel; read the
+            // bytes instead of treating the lost cancel as a failure.
+            return match win.get_overlapped_result(file, op) {
+                Ok(transferred) => TransferOutcome::Transferred(transferred),
+                Err(error) => TransferOutcome::Error(DeviceError::Windows(error)),
+            };
+        }
+        let mut retries = CANCEL_RETRIES;
+        loop {
+            match win.wait_for_object(op.overlapped.event, POST_CANCEL_WAIT_MS) {
+                WAIT_OBJECT_0 => break,
+                WAIT_TIMEOUT => {
+                    if retries == 0 {
+                        return TransferOutcome::Stuck(timeout_error(timeout_ms));
+                    }
+                    retries -= 1;
+                    cancelled = win.cancel_io(file, op) != 0;
+                    if !cancelled && win.last_error() == ERROR_NOT_FOUND {
+                        break;
+                    }
+                }
+                WAIT_FAILED => {
+                    return TransferOutcome::Stuck(DeviceError::Protocol(
+                        "USB completion wait failed".into(),
+                    ));
+                }
+                _ => unreachable!(),
+            }
+        }
+        match win.get_overlapped_result(file, op) {
+            Ok(transferred) => TransferOutcome::Transferred(transferred),
+            Err(ERROR_OPERATION_ABORTED) => TransferOutcome::Error(timeout_error(timeout_ms)),
+            Err(error) => TransferOutcome::Error(DeviceError::Windows(error)),
+        }
     }
 
     struct Connection {
@@ -836,38 +1331,31 @@ mod transport {
         }
 
         unsafe fn send(&mut self, frame: &[u8]) -> Result<(), DeviceError> {
-            let file = self.file.0;
-            let usb = self.usb.0;
-            let output = self.output;
-            if ResetEvent(self.write_event.0) == 0 {
-                return Err(last_error());
+            let win = RealWin32;
+            if win.reset_event(self.write_event.0) == 0 {
+                return Err(DeviceError::Windows(win.last_error()));
             }
-            let mut write_overlapped = Overlapped {
-                internal: 0,
-                internal_high: 0,
-                offset: 0,
-                offset_high: 0,
-                event: self.write_event.0,
-            };
-            let mut written = 0u32;
-            let write_started = WinUsb_WritePipe(
-                usb,
-                output,
-                frame.as_ptr(),
-                frame.len() as u32,
-                &mut written,
-                &mut write_overlapped as *mut _ as *mut c_void,
-            );
-            await_io(
-                file,
-                write_started,
-                &mut write_overlapped,
-                &mut written,
+            let mut op = IoOperation::new(IoDirection::Write, frame.to_vec(), self.write_event.0);
+            let transferred = match run_transfer(
+                &win,
+                self.file.0,
+                self.usb.0,
+                self.output,
+                &mut op,
                 IO_TIMEOUT_MS,
-            )?;
-            if written as usize != frame.len() {
+            ) {
+                TransferOutcome::Transferred(bytes) => bytes,
+                TransferOutcome::Error(error) => return Err(error),
+                TransferOutcome::Stuck(error) => {
+                    // Intentional leak: Windows may still reference the
+                    // operation, so the owned buffer must outlive the caller.
+                    let _ = Box::into_raw(op);
+                    return Err(error);
+                }
+            };
+            if transferred as usize != frame.len() {
                 return Err(DeviceError::Protocol(format!(
-                    "short USB write: {written}/{}",
+                    "short USB write: {transferred}/{}",
                     frame.len()
                 )));
             }
@@ -880,50 +1368,36 @@ mod transport {
             timeout_ms: u32,
         ) -> Result<Vec<u8>, DeviceError> {
             self.send(frame)?;
+            let win = RealWin32;
             let file = self.file.0;
             let usb = self.usb.0;
             let input = self.input;
-            let output = self.output;
             let mut response = Vec::with_capacity(1420);
             let mut expected = 20usize;
             while response.len() < expected {
-                let mut packet = [0u8; 512];
-                let mut read = 0u32;
-                if ResetEvent(self.read_event.0) == 0 {
-                    return Err(last_error());
+                if win.reset_event(self.read_event.0) == 0 {
+                    return Err(DeviceError::Windows(win.last_error()));
                 }
-                let mut read_overlapped = Overlapped {
-                    internal: 0,
-                    internal_high: 0,
-                    offset: 0,
-                    offset_high: 0,
-                    event: self.read_event.0,
+                let mut op = IoOperation::new(IoDirection::Read, vec![0u8; 512], self.read_event.0);
+                let read = match run_transfer(&win, file, usb, input, &mut op, timeout_ms) {
+                    TransferOutcome::Transferred(bytes) => bytes,
+                    TransferOutcome::Error(error) => {
+                        self.abort_and_reset_pipes(&win);
+                        return Err(error);
+                    }
+                    TransferOutcome::Stuck(error) => {
+                        // Intentional leak: Windows may still reference the
+                        // operation, so the owned buffer must outlive the
+                        // caller.
+                        let _ = Box::into_raw(op);
+                        self.abort_and_reset_pipes(&win);
+                        return Err(error);
+                    }
                 };
-                let read_started = WinUsb_ReadPipe(
-                    usb,
-                    input,
-                    packet.as_mut_ptr(),
-                    packet.len() as u32,
-                    &mut read,
-                    &mut read_overlapped as *mut _ as *mut c_void,
-                );
-                if let Err(error) = await_io(
-                    file,
-                    read_started,
-                    &mut read_overlapped,
-                    &mut read,
-                    timeout_ms,
-                ) {
-                    WinUsb_AbortPipe(usb, input);
-                    WinUsb_ResetPipe(usb, input);
-                    WinUsb_AbortPipe(usb, output);
-                    WinUsb_ResetPipe(usb, output);
-                    return Err(error);
-                }
                 if read == 0 {
                     return Err(DeviceError::Protocol("empty USB response".into()));
                 }
-                response.extend_from_slice(&packet[..read as usize]);
+                response.extend_from_slice(&op.buffer[..read as usize]);
                 if response.len() >= 20 {
                     expected =
                         20 + u32::from_le_bytes(response[12..16].try_into().unwrap()) as usize;
@@ -934,6 +1408,13 @@ mod transport {
             }
             response.truncate(expected);
             Ok(response)
+        }
+
+        unsafe fn abort_and_reset_pipes(&self, win: &RealWin32) {
+            win.abort_pipe(self.usb.0, self.input);
+            win.reset_pipe(self.usb.0, self.input);
+            win.abort_pipe(self.usb.0, self.output);
+            win.reset_pipe(self.usb.0, self.output);
         }
     }
 
@@ -955,6 +1436,205 @@ mod transport {
             timeout_ms: u32,
         ) -> Result<Vec<u8>, DeviceError> {
             unsafe { self.0.exchange(frame, timeout_ms) }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::cell::Cell;
+
+        const ERROR_ACCESS_DENIED: u32 = 5;
+        const ERROR_DEVICE_REMOVED: u32 = 1117;
+
+        /// Scripted Win32 layer for exercising the transfer loop without a
+        /// physical device. Each scenario drives exactly the call sequence the
+        /// production `RealWin32` would produce for that hardware outcome.
+        enum Scenario {
+            /// Completed synchronously with N bytes.
+            ImmediateSuccess(u32),
+            /// Started pending, signalled, N bytes.
+            PendingSuccess(u32),
+            /// Pending, wait timed out, cancel accepted, aborted.
+            TimeoutAborted,
+            /// Pending, wait timed out, but the transfer finished before the
+            /// cancel landed (cancel reports ERROR_NOT_FOUND).
+            TimeoutRaceCompleted(u32),
+            /// Pending, wait timed out, cancel denied, transfer completes on
+            /// the follow-up wait.
+            CancelFailedThenCompleted(u32),
+            /// Signalled, but completion reports a device-removal error.
+            Disconnect,
+            /// Start failed immediately with a Win32 error.
+            ImmediateError(u32),
+        }
+
+        struct MockWin32 {
+            scenario: Scenario,
+            wait_calls: Cell<u32>,
+            cancel_calls: Cell<u32>,
+            last_error: Cell<u32>,
+        }
+
+        impl MockWin32 {
+            fn new(scenario: Scenario) -> Self {
+                Self {
+                    scenario,
+                    wait_calls: Cell::new(0),
+                    cancel_calls: Cell::new(0),
+                    last_error: Cell::new(0),
+                }
+            }
+        }
+
+        impl Win32Io for MockWin32 {
+            fn start(&self, _usb: Handle, _pipe: u8, op: &mut IoOperation) -> i32 {
+                match self.scenario {
+                    Scenario::ImmediateSuccess(bytes) => {
+                        op.transferred = bytes;
+                        1
+                    }
+                    Scenario::ImmediateError(error) => {
+                        self.last_error.set(error);
+                        0
+                    }
+                    _ => {
+                        self.last_error.set(ERROR_IO_PENDING);
+                        0
+                    }
+                }
+            }
+            fn last_error(&self) -> u32 {
+                self.last_error.get()
+            }
+            fn wait_for_object(&self, _event: Handle, _milliseconds: u32) -> u32 {
+                let call = self.wait_calls.get();
+                self.wait_calls.set(call + 1);
+                match self.scenario {
+                    Scenario::PendingSuccess(_) | Scenario::Disconnect => WAIT_OBJECT_0,
+                    Scenario::TimeoutAborted
+                    | Scenario::TimeoutRaceCompleted(_)
+                    | Scenario::CancelFailedThenCompleted(_) => {
+                        if call == 0 {
+                            WAIT_TIMEOUT
+                        } else {
+                            WAIT_OBJECT_0
+                        }
+                    }
+                    _ => WAIT_OBJECT_0,
+                }
+            }
+            fn cancel_io(&self, _file: Handle, _op: &mut IoOperation) -> i32 {
+                let call = self.cancel_calls.get();
+                self.cancel_calls.set(call + 1);
+                match self.scenario {
+                    Scenario::TimeoutAborted => 1,
+                    Scenario::TimeoutRaceCompleted(_) => {
+                        self.last_error.set(ERROR_NOT_FOUND);
+                        0
+                    }
+                    Scenario::CancelFailedThenCompleted(_) => {
+                        self.last_error.set(ERROR_ACCESS_DENIED);
+                        0
+                    }
+                    _ => 1,
+                }
+            }
+            fn get_overlapped_result(
+                &self,
+                _file: Handle,
+                op: &mut IoOperation,
+            ) -> Result<u32, u32> {
+                match self.scenario {
+                    Scenario::ImmediateSuccess(bytes)
+                    | Scenario::PendingSuccess(bytes)
+                    | Scenario::TimeoutRaceCompleted(bytes)
+                    | Scenario::CancelFailedThenCompleted(bytes) => {
+                        op.transferred = bytes;
+                        Ok(bytes)
+                    }
+                    Scenario::TimeoutAborted => Err(ERROR_OPERATION_ABORTED),
+                    Scenario::Disconnect => Err(ERROR_DEVICE_REMOVED),
+                    Scenario::ImmediateError(_) => Err(self.last_error.get()),
+                }
+            }
+            fn reset_event(&self, _event: Handle) -> i32 {
+                1
+            }
+            fn abort_pipe(&self, _usb: Handle, _pipe: u8) -> i32 {
+                1
+            }
+            fn reset_pipe(&self, _usb: Handle, _pipe: u8) -> i32 {
+                1
+            }
+        }
+
+        fn run(scenario: Scenario, timeout_ms: u32) -> (TransferOutcome, u32, u32) {
+            let win = MockWin32::new(scenario);
+            let event = null_mut();
+            let mut op = IoOperation::new(IoDirection::Read, vec![0u8; 512], event);
+            let outcome = run_transfer(&win, null_mut(), null_mut(), 0x81, &mut op, timeout_ms);
+            (outcome, win.wait_calls.get(), win.cancel_calls.get())
+        }
+
+        #[test]
+        fn synchronous_completion_reports_bytes() {
+            let (outcome, _, _) = run(Scenario::ImmediateSuccess(96), 500);
+            assert!(matches!(outcome, TransferOutcome::Transferred(96)));
+        }
+
+        #[test]
+        fn pending_completion_reports_bytes() {
+            let (outcome, waits, _) = run(Scenario::PendingSuccess(128), 500);
+            assert!(matches!(outcome, TransferOutcome::Transferred(128)));
+            assert_eq!(waits, 1);
+        }
+
+        #[test]
+        fn timeout_cancels_and_waits_for_terminal_state() {
+            let (outcome, waits, cancels) = run(Scenario::TimeoutAborted, 100);
+            assert!(matches!(
+                outcome,
+                TransferOutcome::Error(DeviceError::Protocol(_))
+            ));
+            assert_eq!(cancels, 1, "timeout must cancel exactly once");
+            assert_eq!(waits, 2, "must wait again after cancellation");
+        }
+
+        #[test]
+        fn completion_racing_cancellation_keeps_the_bytes() {
+            let (outcome, _, cancels) = run(Scenario::TimeoutRaceCompleted(512), 100);
+            assert!(
+                matches!(outcome, TransferOutcome::Transferred(512)),
+                "a transfer that finished before the cancel must not be reported as a timeout"
+            );
+            assert_eq!(cancels, 1);
+        }
+
+        #[test]
+        fn failed_cancel_retries_until_completion() {
+            let (outcome, waits, cancels) = run(Scenario::CancelFailedThenCompleted(256), 100);
+            assert!(matches!(outcome, TransferOutcome::Transferred(256)));
+            assert_eq!(cancels, 1);
+            assert_eq!(waits, 2);
+        }
+
+        #[test]
+        fn disconnect_reports_the_win32_error() {
+            let (outcome, _, _) = run(Scenario::Disconnect, 500);
+            assert!(matches!(
+                outcome,
+                TransferOutcome::Error(DeviceError::Windows(ERROR_DEVICE_REMOVED))
+            ));
+        }
+
+        #[test]
+        fn immediate_start_failure_reports_the_win32_error() {
+            let (outcome, _, _) = run(Scenario::ImmediateError(ERROR_ACCESS_DENIED), 500);
+            assert!(matches!(
+                outcome,
+                TransferOutcome::Error(DeviceError::Windows(ERROR_ACCESS_DENIED))
+            ));
         }
     }
 }

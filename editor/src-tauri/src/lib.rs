@@ -22,30 +22,73 @@ const SCREENSAVER_MAX_FRAMES: u32 = SCREENSAVER_FPS * SCREENSAVER_MAX_SECONDS;
 const DEVICE_ICON_PIXELS: u16 = 149;
 const DEVICE_ICON_RADIUS: u16 = 12;
 
+/// Removes every staged file when dropped, independent of process spawn or
+/// conversion success, so an early `?` return can never leak source media into
+/// the temp directory (E12).
+struct TempGuard {
+    paths: Vec<PathBuf>,
+}
+
+impl TempGuard {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self { paths }
+    }
+}
+
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 #[tauri::command]
 fn validate_project(project: Project) -> compiler::CompileSummary {
     compiler::summarize(&project)
 }
 
 #[tauri::command]
-fn save_archive(path: String, project: Project) -> Result<(), String> {
-    archive::save(Path::new(&path), &project).map_err(|error| error.to_string())
+async fn save_archive(path: String, project: Project) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        archive::save(Path::new(&path), &project).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("save worker failed: {error}"))?
+}
+
+/// E2: reject malformed or unsafe structure, but load well-formed work in
+/// progress even when it exceeds device constraints (empty titles, extra
+/// profiles, oversized media). Deployability issues stay in the editor and
+/// block Sync, never Open or recovery.
+fn structural_gate(project: &Project) -> Result<(), String> {
+    if project.schema_version != 3 {
+        return Err("saved project uses an unsupported schema".into());
+    }
+    if project.profiles.is_empty() {
+        return Err("saved project has no profiles".into());
+    }
+    for profile in &project.profiles {
+        if profile.pages.is_empty() {
+            return Err("saved project contains an empty profile".into());
+        }
+        if profile.pages.iter().any(|page| page.buttons.len() != 32) {
+            return Err("saved project contains a page without exactly 32 buttons".into());
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
-fn open_archive(path: String) -> Result<Project, String> {
-    let mut project = archive::open(Path::new(&path)).map_err(|error| error.to_string())?;
-    model::migrate(&mut project);
-    let issues = model::validate(&project);
-    if issues.is_empty() {
+async fn open_archive(path: String) -> Result<Project, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut project = archive::open(Path::new(&path)).map_err(|error| error.to_string())?;
+        model::migrate(&mut project);
+        structural_gate(&project)?;
         Ok(project)
-    } else {
-        Err(issues
-            .into_iter()
-            .map(|item| format!("{}: {}", item.path, item.message))
-            .collect::<Vec<_>>()
-            .join("; "))
-    }
+    })
+    .await
+    .map_err(|error| format!("open worker failed: {error}"))?
 }
 
 fn workspace_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -90,13 +133,20 @@ fn save_workspace(
     let bytes = serde_json::to_vec(&project)
         .map_err(|error| format!("could not serialize workspace: {error}"))?;
     let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes).map_err(|error| format!("could not save workspace: {error}"))?;
-    fs::rename(&temporary, &path)
-        .or_else(|_| {
-            let _ = fs::remove_file(&path);
-            fs::rename(&temporary, &path)
-        })
-        .map_err(|error| format!("could not activate saved workspace: {error}"))
+    let write_result = (|| -> Result<(), String> {
+        let mut file = std::fs::File::create(&temporary)
+            .map_err(|error| format!("could not save workspace: {error}"))?;
+        std::io::Write::write_all(&mut file, &bytes)
+            .map_err(|error| format!("could not save workspace: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("could not flush saved workspace: {error}"))?;
+        archive::atomic_replace(&path, &temporary)
+            .map_err(|error| format!("could not activate saved workspace: {error}"))
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write_result
 }
 
 #[tauri::command]
@@ -110,22 +160,44 @@ fn load_workspace(app: tauri::AppHandle) -> Result<Option<Project>, String> {
     let mut project: Project = serde_json::from_slice(&bytes)
         .map_err(|error| format!("saved workspace is invalid: {error}"))?;
     model::migrate(&mut project);
-    if model::validate(&project).is_empty() {
-        Ok(Some(project))
-    } else {
-        Err("saved workspace failed validation".into())
-    }
+    structural_gate(&project)?;
+    Ok(Some(project))
 }
 
 #[tauri::command]
-fn backup_bundle(path: String, project: Project) -> Result<(), String> {
-    let bundle = compiler::compile(&project).map_err(|error| error.to_string())?;
-    fs::write(path, bundle).map_err(|error| format!("could not write backup: {error}"))
+async fn clear_workspace(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = workspace_path(&app)?;
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("could not clear saved workspace: {error}")),
+        }
+    })
+    .await
+    .map_err(|error| format!("clear workspace worker failed: {error}"))?
 }
 
 #[tauri::command]
-fn device_status() -> device::DeviceStatus {
-    device::status()
+async fn backup_bundle(path: String, project: Project) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bundle = compiler::compile(&project).map_err(|error| error.to_string())?;
+        fs::write(path, bundle).map_err(|error| format!("could not write backup: {error}"))
+    })
+    .await
+    .map_err(|error| format!("backup worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn device_status() -> device::DeviceStatus {
+    tauri::async_runtime::spawn_blocking(device::status)
+        .await
+        .unwrap_or_else(|error| device::DeviceStatus {
+            connected: false,
+            generation: 0,
+            capabilities: 0,
+            detail: format!("device status worker failed: {error}"),
+        })
 }
 
 #[tauri::command]
@@ -175,6 +247,46 @@ async fn upload_screensaver(path: String) -> Result<device::ScreensaverResult, S
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StartupInfo {
+    ffmpeg_available: bool,
+    ffmpeg_path: String,
+}
+
+#[tauri::command]
+fn startup_info() -> StartupInfo {
+    // E11: detect FFmpeg up front so the editor can disable conversion actions
+    // with an exact explanation instead of failing halfway through an import.
+    let path = ffmpeg_path();
+    let available = path.is_file()
+        || Command::new(&path)
+            .arg("-version")
+            .output()
+            .map(|result| result.status.success())
+            .unwrap_or(false);
+    StartupInfo {
+        ffmpeg_available: available,
+        ffmpeg_path: path.to_string_lossy().into_owned(),
+    }
+}
+
+#[tauri::command]
+async fn restore_bundle(path: String) -> Result<Project, String> {
+    // E13: open a compiled backup as an editable project. The decompiler
+    // validates the bundle structure; original source media is never stored in
+    // a bundle, so the restored project carries device-ready icons only.
+    tauri::async_runtime::spawn_blocking(move || {
+        let bundle = fs::read(&path).map_err(|error| format!("could not read backup: {error}"))?;
+        if bundle.len() > 16 * 1024 * 1024 {
+            return Err("backup exceeds the 16 MiB device bundle limit".into());
+        }
+        compiler::decompile(&bundle)
+    })
+    .await
+    .map_err(|error| format!("restore worker failed: {error}"))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct IconConversion {
     poster_data_url: String,
     animation_data_url: String,
@@ -191,6 +303,9 @@ async fn prepare_icon_animation(name: String, data_url: String) -> Result<IconCo
         let input = std::env::temp_dir().join(format!("screendeck-icon-{stamp}.{extension}"));
         let output = std::env::temp_dir().join(format!("screendeck-icon-{stamp}.mjpg"));
         fs::write(&input, source).map_err(|error| format!("could not stage animated icon: {error}"))?;
+        // E12: the guard removes staged media on every exit path, including a
+        // failed FFmpeg spawn and any early error return.
+        let _guard = TempGuard::new(vec![input.clone(), output.clone()]);
         let result = Command::new(ffmpeg_path())
             .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-threads", "1", "-i"])
             .arg(&input)
@@ -222,6 +337,9 @@ fn prepare_screensaver(path: &Path) -> Result<Vec<u8>, String> {
         .as_nanos();
     let output =
         std::env::temp_dir().join(format!("screendeck-{stamp}-{}.mjpeg", std::process::id()));
+    // E12: the guard removes staged output even when a later error return skips
+    // the explicit cleanup calls.
+    let _guard = TempGuard::new(vec![output.clone()]);
     let ffmpeg = ffmpeg_path();
     let video_filter = format!(
         "fps={SCREENSAVER_FPS},scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,transpose=clock,format=yuvj420p"
@@ -305,7 +423,10 @@ pub fn run() {
             open_archive,
             save_workspace,
             load_workspace,
+            clear_workspace,
             backup_bundle,
+            restore_bundle,
+            startup_info,
             device_status,
             exit_application,
             test_screensaver,
@@ -373,6 +494,215 @@ mod tests {
                 style
             );
         }
+    }
+
+    fn animated_asset_with(frames: u16) -> model::Asset {
+        // A frame is a marker-only JPEG: the compiler and firmware both count
+        // SOI/EOI pairs, and compile-level validation is structural.
+        let mut stream = Vec::new();
+        for _ in 0..frames {
+            stream.extend_from_slice(&[0xff, 0xd8, 0xff, 0xd9]);
+        }
+        model::Asset {
+            id: "anim".into(),
+            name: "anim.mjpg".into(),
+            media_type: "image/png".into(),
+            data_url: "data:image/png;base64,REVWSUNF".into(),
+            source_name: String::new(),
+            source_media_type: String::new(),
+            source_data_url: String::new(),
+            animation_data_url: format!(
+                "data:video/x-motion-jpeg;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(stream)
+            ),
+            animation_fps: 15,
+        }
+    }
+
+    #[test]
+    fn animated_icon_frame_count_matches_device_contract() {
+        // I4: the device accepts only 2..=120 complete frames. Compilation and
+        // decompilation must agree so a crafted bundle cannot sync and then
+        // prevent the UI bundle from loading.
+        let mut one_frame = project();
+        one_frame.assets.push(animated_asset_with(1));
+        assert!(compiler::compile(&one_frame).is_err());
+
+        let mut too_many = project();
+        too_many.assets.push(animated_asset_with(121));
+        assert!(compiler::compile(&too_many).is_err());
+
+        let mut valid = project();
+        valid.assets.push(animated_asset_with(2));
+        valid.profiles[0].pages[0].buttons[0].icon_id = Some("anim".into());
+        let bundle = compiler::compile(&valid).unwrap();
+        let restored = compiler::decompile(&bundle).unwrap();
+        assert_eq!(restored.assets[0].animation_fps, 15);
+    }
+
+    #[test]
+    fn decompile_rejects_animation_frame_count_mismatch() {
+        let mut valid = project();
+        valid.assets.push(animated_asset_with(2));
+        valid.profiles[0].pages[0].buttons[0].icon_id = Some("anim".into());
+        let mut bundle = compiler::compile(&valid).unwrap();
+        // Asset table starts after the SDB header; the frame_count field is at
+        // asset offset 16 within the 20-byte m5_ui_asset_t.
+        let assets_offset = u32::from_le_bytes(bundle[32..36].try_into().unwrap()) as usize;
+        bundle[16 + assets_offset + 16..16 + assets_offset + 18]
+            .copy_from_slice(&3u16.to_le_bytes());
+        let payload_crc = compiler::crc32(&bundle[16..]);
+        bundle[12..16].copy_from_slice(&payload_crc.to_le_bytes());
+        assert!(compiler::decompile(&bundle).is_err());
+    }
+
+    #[test]
+    fn summarize_reports_oversized_bundle_as_blocking() {
+        // E9: validation and compilation share the 16 MiB limit, so Sync is
+        // blocked before a too-large project ever reaches the device.
+        let mut source = project();
+        // 23 MiB of base64 'A' decodes to ~17.25 MiB, above the 16 MiB limit.
+        let blob = "A".repeat(23 * 1024 * 1024);
+        source.assets.push(model::Asset {
+            id: "huge".into(),
+            name: "huge.png".into(),
+            media_type: "image/png".into(),
+            data_url: format!("data:image/png;base64,{blob}"),
+            source_name: String::new(),
+            source_media_type: String::new(),
+            source_data_url: String::new(),
+            animation_data_url: String::new(),
+            animation_fps: 0,
+        });
+        let summary = compiler::summarize(&source);
+        assert!(summary
+            .issues
+            .iter()
+            .any(|issue| issue.message.contains("16 MiB device limit")));
+        assert!(compiler::compile(&source).is_err());
+    }
+
+    #[test]
+    fn archive_open_rejects_oversized_entries() {
+        // E7: a crafted archive whose project.json expands beyond the cap must
+        // be rejected with a clear limit error, before any unbounded read.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bomb.sdeck");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("project.json", options).unwrap();
+            std::io::Write::write_all(&mut zip, &vec![0u8; 9 * 1024 * 1024]).unwrap();
+            zip.finish().unwrap();
+        }
+        let error = archive::open(&path).unwrap_err();
+        assert!(matches!(error, archive::ArchiveError::Limit(_)));
+    }
+
+    #[test]
+    fn structural_gate_accepts_work_in_progress_but_rejects_unsafe_structure() {
+        // E2: empty titles and extra profiles are work in progress and must
+        // load; zero profiles would crash the editor UI and must be rejected.
+        let mut wip = project();
+        wip.name = "".into();
+        for index in 0..8 {
+            wip.profiles.push(model::Profile {
+                id: format!("wip-{index}"),
+                name: format!("Work {index}"),
+                pages: vec![model::Page {
+                    id: format!("wip-page-{index}"),
+                    name: "Main".into(),
+                    buttons: vec![
+                        model::Button {
+                            action: model::ActionKind::None,
+                            icon_id: None,
+                            image_fit: None,
+                            macro_id: None,
+                            radial: None,
+                        };
+                        32
+                    ],
+                }],
+            });
+        }
+        assert!(
+            structural_gate(&wip).is_ok(),
+            "9-profile work in progress must load"
+        );
+        wip.profiles.clear();
+        assert!(
+            structural_gate(&wip).is_err(),
+            "zero profiles are unsafe structure"
+        );
+
+        let mut empty_page = project();
+        empty_page.profiles[0].pages[0].buttons.clear();
+        assert!(
+            structural_gate(&empty_page).is_err(),
+            "a page without 32 buttons would crash the editor"
+        );
+    }
+
+    #[test]
+    fn temp_guard_removes_staged_files_on_drop() {
+        // E12: staged media must be removed on every exit path, including
+        // early error returns, so the guard's Drop is the single cleanup path.
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("staged.mjpg");
+        std::fs::write(&file, b"jpeg").unwrap();
+        {
+            let _guard = TempGuard::new(vec![file.clone()]);
+        }
+        assert!(!file.exists(), "staged file survived the guard");
+    }
+
+    #[test]
+    fn compiled_backup_restores_an_editable_project() {
+        // E13: a local .sdb backup is validated and decompiled into an
+        // unsaved project carrying device-ready icons and no source media.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("backup.sdb");
+        let bundle = compiler::compile(&project()).unwrap();
+        std::fs::write(&path, &bundle).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() <= 16 * 1024 * 1024);
+        let restored = compiler::decompile(&bytes).unwrap();
+        assert_eq!(restored.profiles.len(), 1);
+        assert!(restored
+            .assets
+            .iter()
+            .all(|asset| asset.source_name.is_empty()));
+        assert!(model::validate(&restored).is_empty());
+    }
+
+    #[test]
+    fn minimal_bundle_layout_matches_smoke_test_fixture() {
+        // The device-sync.ps1 -CommitTestBundle fixture (MinimalUiPayload)
+        // hardcodes these offsets, and the firmware validator
+        // (m5_ui_bundle_valid) accepts the bundle only while they hold. Pin
+        // the fixture against the compiler's reference emit.
+        let mut minimal = project();
+        minimal.macros.clear();
+        for button in &mut minimal.profiles[0].pages[0].buttons {
+            button.action = model::ActionKind::None;
+            button.macro_id = None;
+        }
+        let bundle = compiler::compile(&minimal).unwrap();
+        let payload = &bundle[16..];
+        assert_eq!(u16::from_le_bytes(payload[6..8].try_into().unwrap()), 72);
+        assert_eq!(u16::from_le_bytes(payload[14..16].try_into().unwrap()), 32);
+        assert_eq!(u32::from_le_bytes(payload[24..28].try_into().unwrap()), 72);
+        assert_eq!(u32::from_le_bytes(payload[28..32].try_into().unwrap()), 80);
+        assert_eq!(u32::from_le_bytes(payload[32..36].try_into().unwrap()), 336);
+        assert_eq!(u32::from_le_bytes(payload[36..40].try_into().unwrap()), 336);
+        assert_eq!(u32::from_le_bytes(payload[40..44].try_into().unwrap()), 400);
+        assert_eq!(u32::from_le_bytes(payload[44..48].try_into().unwrap()), 400);
+        assert_eq!(u32::from_le_bytes(payload[48..52].try_into().unwrap()), 400);
+        assert_eq!(u32::from_le_bytes(payload[56..60].try_into().unwrap()), 400);
+        assert_eq!(u32::from_le_bytes(payload[60..64].try_into().unwrap()), 400);
+        assert_eq!(u32::from_le_bytes(payload[64..68].try_into().unwrap()), 0);
     }
 
     #[test]
@@ -594,6 +924,48 @@ mod tests {
         let restored = archive::open(&path).unwrap();
         assert_eq!(restored.name, "Round trip");
         assert!(model::validate(&restored).is_empty());
+    }
+
+    #[test]
+    fn failed_archive_save_preserves_the_previous_archive() {
+        // E3: a failure at any stage (here: invalid asset base64 during
+        // decoding) must leave the previous archive byte-for-byte intact and
+        // must not leave a staging file behind.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("media.sdeck");
+        let mut good = project();
+        good.assets.push(model::Asset {
+            id: "asset-1".into(),
+            name: "icon.png".into(),
+            media_type: "image/png".into(),
+            data_url: "data:image/png;base64,REVWSUNF".into(),
+            source_name: String::new(),
+            source_media_type: String::new(),
+            source_data_url: String::new(),
+            animation_data_url: String::new(),
+            animation_fps: 0,
+        });
+        archive::save(&path, &good).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let mut broken = good.clone();
+        broken.assets[0].data_url = "data:image/png;base64,!!!not-base64!!!".into();
+        assert!(archive::save(&path, &broken).is_err());
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "previous archive changed"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "media.sdeck")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "staging files left behind: {leftovers:?}"
+        );
     }
 
     #[test]

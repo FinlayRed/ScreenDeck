@@ -4,6 +4,7 @@
   import { onDestroy, onMount, tick } from "svelte";
   import { flip } from "svelte/animate";
   import Archive from "@lucide/svelte/icons/archive";
+  import ArchiveRestore from "@lucide/svelte/icons/archive-restore";
   import Check from "@lucide/svelte/icons/check";
   import ChevronLeft from "@lucide/svelte/icons/chevron-left";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
@@ -22,20 +23,22 @@
   import Keyboard from "@lucide/svelte/icons/keyboard";
   import Layers3 from "@lucide/svelte/icons/layers-3";
   import MonitorUp from "@lucide/svelte/icons/monitor-up";
+  import Minus from "@lucide/svelte/icons/minus";
   import Play from "@lucide/svelte/icons/play";
   import Plus from "@lucide/svelte/icons/plus";
   import Pencil from "@lucide/svelte/icons/pencil";
   import RefreshCw from "@lucide/svelte/icons/refresh-cw";
   import Save from "@lucide/svelte/icons/save";
+  import Square from "@lucide/svelte/icons/square";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import Upload from "@lucide/svelte/icons/upload";
   import Usb from "@lucide/svelte/icons/usb";
   import X from "@lucide/svelte/icons/x";
-  import { backupBundle, deviceStatus, exitApplication, loadWorkspace, openArchive, prepareIconAnimation, saveArchive, saveWorkspace, syncFromDevice, syncProject, testScreensaver as testScreensaverOnDevice, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
+  import { backupBundle, clearWorkspace, deviceStatus, exitApplication, loadWorkspace, openArchive, prepareIconAnimation, restoreBundle, saveArchive, saveWorkspace, startupInfo, syncFromDevice, syncProject, testScreensaver as testScreensaverOnDevice, uploadScreensaver as uploadScreensaverToDevice, validateProject } from "./lib/backend";
   import type { CompileSummary, DeviceStatus } from "./lib/backend";
-  import { CONSUMER_KEYS, KEYBOARD_KEYS, moveButton, starterProject } from "./lib/model";
+  import { CONSUMER_KEYS, KEYBOARD_KEYS, moveButton, snapshotProject, starterProject } from "./lib/model";
   import type { ActionKind, Asset, Button, EmptyButtonStyle, Macro, MacroStep, Project, RadialSize } from "./lib/model";
-  import { createHistory, recordHistory, redoHistory, undoHistory } from "./lib/history";
+  import { coalesceHistory, createHistory, recordHistory, redoHistory, undoHistory } from "./lib/history";
   import { radialDirection, radialGridOffset } from "./lib/radial";
   import CustomSelect from "./lib/CustomSelect.svelte";
 
@@ -102,12 +105,14 @@
   let dialogInvoker: HTMLElement | null = null;
   let deleteCancel: HTMLButtonElement | null = null;
   let dirtyCancel: HTMLButtonElement | null = null;
-  let history = createHistory(project);
+  let history = createHistory(project, snapshotProject);
   let historyApplying = false;
   let gridActiveIndex = 0;
   let keyboardMoveSource: number | null = null;
   let buttonClipboard: { button: Button; macros: Macro[] } | null = null;
   let devicePoll: ReturnType<typeof setInterval> | undefined;
+  let devicePolling = false;
+  let ffmpegAvailable = true;
   let removeCloseListener: (() => void) | undefined;
   let importing = false;
   let draggedButtonIndex: number | null = null;
@@ -138,23 +143,33 @@
     notice = { kind, message, detail };
   }
 
-  function changed(message = "Unsaved changes") {
+  let lastChangeAt = 0;
+  let lastChangeCoalescible = false;
+  function changed(message = "Unsaved changes", coalesce = false) {
     project = { ...project };
-    if (!historyApplying) history = recordHistory(history, project);
+    // E4: rapid text edits collapse into one undo step per typing burst.
+    if (!historyApplying) {
+      history = (coalesce && lastChangeCoalescible && Date.now() - lastChangeAt < 800)
+        ? coalesceHistory(history, project)
+        : recordHistory(history, project);
+    }
+    lastChangeAt = Date.now();
+    lastChangeCoalescible = coalesce;
     summary = { ...summary, payloadCrc32: 0, fingerprint: "" };
     projectRevision += 1;
     dirty = true;
     setNotice("info", message);
   }
 
-  function resetHistory() { history = createHistory(project); }
+  function resetHistory() { history = createHistory(project, snapshotProject); lastChangeCoalescible = false; }
 
   function applyHistory(direction: "undo" | "redo") {
     const next = direction === "undo" ? undoHistory(history) : redoHistory(history);
     if (!next) return;
     history = next;
+    lastChangeCoalescible = false;
     historyApplying = true;
-    project = structuredClone(next.current);
+    project = next.clone(next.current);
     profileIndex = Math.min(profileIndex, project.profiles.length - 1);
     pageIndex = Math.min(pageIndex, project.profiles[profileIndex].pages.length - 1);
     selectedButton = Math.min(selectedButton, project.profiles[profileIndex].pages[pageIndex].buttons.length - 1);
@@ -204,12 +219,49 @@
     }
   }
 
+  async function minimizeWindow() {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    try { await getCurrentWindow().minimize(); }
+    catch (error) { setNotice("error", "Could not minimize Screendeck", String(error)); }
+  }
+
+  async function toggleMaximizeWindow() {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    try { await getCurrentWindow().toggleMaximize(); }
+    catch (error) { setNotice("error", "Could not resize Screendeck", String(error)); }
+  }
+
+  function requestApplicationClose() {
+    if (dirty) guardReplacement("close Screendeck", closeApplication);
+    else void closeApplication();
+  }
+
+  function titlebarDoubleClick(event: MouseEvent) {
+    if ((event.target as Element).closest("button, input, nav")) return;
+    void toggleMaximizeWindow();
+  }
+
   async function resolveDirty(choice: "save" | "discard") {
     if (!dirtyDialog) return;
     const pending = dirtyDialog;
     if (choice === "save" && !(await saveProject())) return;
+    if (choice === "discard" && !(await discardRecovery())) return;
     dirtyDialog = null;
     await pending.run();
+  }
+
+  // E6: a discarded or replaced project must not resurrect from the recovery
+  // workspace on the next launch. Cancel pending autosaves, then delete it.
+  async function discardRecovery(): Promise<boolean> {
+    clearTimeout(autosaveTimer);
+    try {
+      await clearWorkspace();
+      lastWorkspaceAssets = undefined;
+      return true;
+    } catch (error) {
+      setNotice("error", "Could not discard recovery data", String(error));
+      return false;
+    }
   }
 
   function queueWorkspaceSave(revision: number) {
@@ -263,11 +315,17 @@
   }
 
   async function refreshDevice() {
+    // E8: never overlap polls. A stalled device can hold the worker for the
+    // full HELLO + status timeouts; a second poll must not stack on top.
+    if (devicePolling) return;
+    devicePolling = true;
     try { device = await deviceStatus(); }
     catch (error) { device = { connected: false, generation: 0, capabilities: 0, detail: String(error) }; }
+    finally { devicePolling = false; }
   }
 
   async function replaceWithNewProject() {
+    if (!(await discardRecovery())) return;
     project = starterProject(); projectRevision += 1; profileIndex = 0; pageIndex = 0; selectedButton = 0; projectPath = ""; dirty = false; lastSyncedFingerprint = ""; resetHistory(); setNotice("success", "New project created");
   }
 
@@ -277,7 +335,7 @@
     const path = await open({ title: "Open Screendeck project", filters: [{ name: "Screendeck project", extensions: ["sdeck"] }] });
     if (!path || Array.isArray(path)) return;
     busy = true;
-    try { project = await openArchive(path); projectRevision += 1; projectPath = path; profileIndex = 0; pageIndex = 0; selectedButton = 0; dirty = false; lastSyncedFingerprint = ""; resetHistory(); setNotice("success", `Opened ${path.split(/[\\/]/).pop()}`); }
+    try { const opened = await openArchive(path); if (!(await discardRecovery())) return; project = opened; projectRevision += 1; projectPath = path; profileIndex = 0; pageIndex = 0; selectedButton = 0; dirty = false; lastSyncedFingerprint = ""; resetHistory(); setNotice("success", `Opened ${path.split(/[\\/]/).pop()}`); }
     catch (error) { setNotice("error", "Could not open project", String(error)); }
     finally { busy = false; }
   }
@@ -301,18 +359,51 @@
     catch (error) { setNotice("error", "Backup failed", String(error)); }
   }
 
+  async function restoreFromBackup() {
+    // E13: a compiled backup is device-ready icons plus settings; original
+    // source media was never stored, so the restored project is unsaved.
+    const path = await open({ title: "Restore compiled backup", filters: [{ name: "Screendeck bundle", extensions: ["sdb"] }] });
+    if (!path || Array.isArray(path)) return;
+    const revision = projectRevision;
+    busy = true;
+    setNotice("progress", "Restoring compiled backup…");
+    try {
+      const restored = await restoreBundle(path);
+      if (revision !== projectRevision) {
+        setNotice("warning", "The project changed while restoring; the backup was not applied", "Try again to replace the current project.");
+        return;
+      }
+      if (!(await discardRecovery())) return;
+      project = restored;
+      projectRevision += 1;
+      profileIndex = 0; pageIndex = 0; selectedButton = 0;
+      projectPath = ""; dirty = true; lastSyncedFingerprint = ""; resetHistory();
+      setNotice("success", `Restored backup: ${project.profiles.length} profile${project.profiles.length === 1 ? "" : "s"}, ${project.assets.length} icon${project.assets.length === 1 ? "" : "s"}, ${project.macros.length} macro${project.macros.length === 1 ? "" : "s"}`, "Original source media is not stored in a compiled backup; icons are restored as device-ready images.");
+    } catch (error) { setNotice("error", "Restore failed", String(error)); }
+    finally { busy = false; }
+  }
+
   async function sync() {
     const errors = validatedRevision === projectRevision
       ? summary.issues.filter((issue) => issue.severity === "error")
       : [];
     if (errors.length) { setNotice("error", "Cannot sync until validation issues are fixed", errors.map((issue) => `${issue.path}: ${issue.message}`).join("\n")); return; }
+    // E5: the invoke serializes the project snapshot at call time; edits made
+    // while the transfer runs must not be reported as synced. Capture the
+    // revision so the fingerprint only reflects the exact uploaded state.
+    const revision = projectRevision;
     busy = true;
     setNotice("progress", "Syncing project to device…");
     try {
       const result = await syncProject(project);
-      lastSyncedFingerprint = result.fingerprint;
-      summary = { ...summary, fingerprint: result.fingerprint };
-      setNotice("success", `Synced ${result.bytesSent.toLocaleString()} bytes · generation ${result.generation}${result.resumedAt ? ` · resumed at ${result.resumedAt}` : ""}`);
+      if (revision === projectRevision) {
+        lastSyncedFingerprint = result.fingerprint;
+        summary = { ...summary, fingerprint: result.fingerprint };
+        setNotice("success", `Synced ${result.bytesSent.toLocaleString()} bytes · generation ${result.generation}${result.resumedAt ? ` · resumed at ${result.resumedAt}` : ""}`);
+      } else {
+        lastSyncedFingerprint = "";
+        setNotice("warning", "Synced a previous revision of this project; the project changed while syncing", "Edit again and re-sync to push the current state.");
+      }
       await refreshDevice();
     } catch (error) { setNotice("error", "Sync failed", String(error)); }
     finally { busy = false; }
@@ -337,9 +428,19 @@
   }
 
   async function replaceFromDevice() {
+    // E5: the editor stays editable while the download runs; if the user
+    // changed the project meanwhile, replacing it would silently discard those
+    // edits, so refuse and ask them to retry instead.
+    const revision = projectRevision;
     busy = true; setNotice("progress", "Importing project from device…");
     try {
-      project = await syncFromDevice();
+      const imported = await syncFromDevice();
+      if (revision !== projectRevision) {
+        setNotice("warning", "The project changed while importing from the device", "The device project was not applied; try again to replace the current project.");
+        return;
+      }
+      if (!(await discardRecovery())) return;
+      project = imported;
       projectRevision += 1;
       profileIndex = 0; pageIndex = 0; selectedButton = 0;
       projectPath = ""; dirty = true; await refreshValidation(); lastSyncedFingerprint = summary.fingerprint;
@@ -660,10 +761,15 @@
   async function importFiles(files: FileList | File[], targetButtonIndex = selectedButton) {
     if (importing) return;
     importing = true;
+    // E10: media conversion awaits file reads and FFmpeg. Capture the
+    // destination and project revision now. Converted assets are applied as one
+    // batch only if that exact editing session still owns the destination.
+    const destination = { profileId: profile.id, pageId: page.id, buttonIndex: targetButtonIndex, revision: projectRevision };
     setNotice("progress", `Importing ${files.length} media file${files.length === 1 ? "" : "s"}…`);
     let imported = 0;
     let skipped = 0;
     const failures: string[] = [];
+    const prepared: Asset[] = [];
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/") && !file.type.startsWith("video/")) { skipped += 1; continue; }
       try {
@@ -674,6 +780,12 @@
           reader.readAsDataURL(file);
         });
         const animated = file.type === "image/gif" || file.type === "image/webp" || file.type.startsWith("video/");
+        // E11: animated conversion needs FFmpeg; disable the action up front
+        // with an exact explanation instead of failing mid-import.
+        if (animated && !ffmpegAvailable) {
+          failures.push(`${file.name}: animated icons and videos need FFmpeg. Install it or place ffmpeg.exe beside the Screendeck app.`);
+          continue;
+        }
         let dataUrl: string;
         let animationDataUrl = "";
         let animationFps = 0;
@@ -693,20 +805,34 @@
           dataUrl = canvas.toDataURL("image/png");
         }
         const asset: Asset = {
-          id: crypto.randomUUID(), name: file.name.replace(/\.[^.]+$/, "") + ".png",
+          id: crypto.randomUUID(), name: file.name.replace(/\.[^/.]+$/, "") + ".png",
           mediaType: animated ? "image/jpeg" : "image/png", dataUrl, sourceName: file.name,
           sourceMediaType: file.type || "application/octet-stream", sourceDataUrl,
           animationDataUrl, animationFps
         };
-        project.assets = [...project.assets, asset];
-        page.buttons[targetButtonIndex].iconId = asset.id;
-        page.buttons[targetButtonIndex].imageFit = "cover";
+        prepared.push(asset);
         imported += 1;
       } catch (error) {
         failures.push(`${file.name}: ${error}`);
       }
     }
     importing = false;
+    if (imported && destination.revision !== projectRevision) {
+      failures.push("The project changed while media was being prepared; no imported media was applied.");
+      imported = 0;
+    }
+    if (imported) {
+      const targetProfile = project.profiles.find((item) => item.id === destination.profileId);
+      const targetPage = targetProfile?.pages.find((item) => item.id === destination.pageId);
+      if (!targetPage || destination.buttonIndex >= targetPage.buttons.length) {
+        failures.push("The destination page no longer exists; no imported media was applied.");
+        imported = 0;
+      } else {
+        project.assets = [...project.assets, ...prepared];
+        targetPage.buttons[destination.buttonIndex].iconId = prepared[prepared.length - 1].id;
+        targetPage.buttons[destination.buttonIndex].imageFit = "cover";
+      }
+    }
     if (imported) {
       selectedButton = targetButtonIndex;
       changed(`${imported} imported${skipped ? `, ${skipped} skipped` : ""}${failures.length ? `, ${failures.length} failed` : ""}`);
@@ -980,6 +1106,12 @@
 
   restoreWorkspace();
   refreshDevice();
+  void startupInfo().then((info) => {
+    ffmpegAvailable = info.ffmpegAvailable;
+    if (!info.ffmpegAvailable) {
+      setNotice("warning", "FFmpeg is not installed; animated icons and screensaver upload are disabled", `Place ffmpeg.exe beside the Screendeck app or add it to PATH. ${info.ffmpegPath}`);
+    }
+  });
   devicePoll = setInterval(() => { if (!busy) void refreshDevice(); }, 5000);
   onMount(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -1001,9 +1133,9 @@
 <svelte:window on:click={() => closeContextMenu()} on:blur={() => closeContextMenu()} on:contextmenu={(event) => { event.preventDefault(); closeContextMenu(); }} on:pointermove={moveButtonPointerDrag} on:pointerup={finishButtonPointerDrag} on:pointercancel={cancelButtonPointerDrag} on:keydown={globalKeydown} />
 
 <div class="app-shell">
-  <header class="topbar" inert={modalOpen}>
-    <div class="brand"><div class="brand-mark"><Layers3 size={17}/></div><span>Screendeck</span><span class="version">0.6.2</span></div>
-    <div class="project-title"><input aria-label="Project name" bind:value={project.name} on:input={() => changed()} on:keydown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); setNotice("info", "Project title updated"); } }} /></div>
+  <div class="topbar" role="banner" data-tauri-drag-region inert={modalOpen || busy} on:dblclick={titlebarDoubleClick}>
+    <div class="brand" data-tauri-drag-region><div class="brand-mark" data-tauri-drag-region><Layers3 size={17}/></div><span data-tauri-drag-region>Screendeck</span><span class="version" data-tauri-drag-region>0.6.2</span></div>
+    <div class="project-title"><input aria-label="Project name" bind:value={project.name} on:input={() => changed("", true)} on:keydown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); setNotice("info", "Project title updated"); } }} /></div>
     <nav class="toolbar" aria-label="Project actions">
       <button class="icon-button" aria-label="New project" title="New project" on:click={newProject}><FilePlus2 size={17}/></button>
       <button class="icon-button" aria-label="Open project" title="Open project" on:click={openProject}><FolderOpen size={17}/></button>
@@ -1011,15 +1143,21 @@
       <button class="icon-button" aria-label="Undo" title="Undo (Ctrl+Z)" disabled={!history.undo.length} on:click={() => applyHistory("undo")}><Undo2 size={17}/></button>
       <button class="icon-button" aria-label="Redo" title="Redo (Ctrl+Y)" disabled={!history.redo.length} on:click={() => applyHistory("redo")}><Redo2 size={17}/></button>
       <button class="icon-button" aria-label="Export compiled backup" title="Export compiled backup" on:click={backup}><Archive size={17}/></button>
+      <button class="icon-button" aria-label="Restore compiled backup" title="Restore compiled backup as an editable project" on:click={restoreFromBackup}><ArchiveRestore size={17}/></button>
       <div class="divider"></div>
-      <button class="icon-button" title="Upload screensaver image or video" disabled={busy || !device.connected} on:click={uploadScreensaver}><MonitorUp size={17}/></button>
+      <button class="icon-button" title={ffmpegAvailable ? "Upload screensaver image or video" : "Upload screensaver is disabled: FFmpeg is not installed. Place ffmpeg.exe beside the Screendeck app or add it to PATH."} disabled={busy || !device.connected || !ffmpegAvailable} on:click={uploadScreensaver}><MonitorUp size={17}/></button>
       <button class="icon-button" title="Test screensaver on device" disabled={busy || !device.connected} on:click={testScreensaver}><Play size={17}/></button>
       <button class="sync-button sync-from" title="Replace the editor project with the active device profile" disabled={busy || !device.connected} on:click={importFromDevice}><Download size={16}/>From device</button>
       <button class="sync-button" title={blockingIssues.length ? "Resolve validation issues before syncing" : "Sync project to device"} disabled={busy || !device.connected || blockingIssues.length > 0} on:click={sync}><Upload size={16}/>{busy ? "Working…" : "Sync to device"}</button>
     </nav>
-  </header>
+    <div class="window-controls" aria-label="Window controls">
+      <button aria-label="Minimize" title="Minimize" on:click={minimizeWindow}><Minus size={16}/></button>
+      <button aria-label="Maximize or restore" title="Maximize or restore" on:click={toggleMaximizeWindow}><Square size={12}/></button>
+      <button class="window-close" aria-label="Close" title="Close" on:click={requestApplicationClose}><X size={17}/></button>
+    </div>
+  </div>
 
-  <aside class="sidebar" inert={modalOpen}>
+  <aside class="sidebar" inert={modalOpen || busy}>
     <div class="section-title"><span>Profiles</span><button aria-label="Add profile" title="Add profile" on:click={addProfile}><Plus size={15}/></button></div>
     <div class="tree">
       {#each project.profiles as item, pi}
@@ -1144,7 +1282,7 @@
     </div>
   {/if}
 
-  <main class="workspace" inert={modalOpen}>
+  <main class="workspace" inert={modalOpen || busy}>
     <div class="workspace-head">
       <div class="workspace-title"><span>{profile.name}</span><ChevronRight size={13}/><h1>{page.name}</h1></div>
       <div class="pager"><button aria-label="Previous page" on:click={() => pageIndex = Math.max(0, pageIndex - 1)} disabled={pageIndex === 0}><ChevronLeft size={16}/></button><span>{pageIndex + 1} / {profile.pages.length}</span><button aria-label="Next page" on:click={() => pageIndex = Math.min(profile.pages.length - 1, pageIndex + 1)} disabled={pageIndex === profile.pages.length - 1}><ChevronRight size={16}/></button></div>
@@ -1203,7 +1341,7 @@
     </section>
   </main>
 
-  <aside class="inspector" inert={modalOpen}>
+  <aside class="inspector" inert={modalOpen || busy}>
     <div class="inspector-tabs"><h2>Key settings</h2><span>Row {Math.floor(selectedButton / 8) + 1} · Column {(selectedButton % 8) + 1}</span></div>
     <div class="inspector-scroll">
       <label>Action<CustomSelect ariaLabel="Button action" value={button.action} options={ACTION_OPTIONS} onChange={(value) => updateButton("action", value)} /></label>
