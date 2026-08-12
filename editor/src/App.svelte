@@ -144,27 +144,30 @@
   }
 
   let lastChangeAt = 0;
+  let lastChangeCoalescible = false;
   function changed(message = "Unsaved changes", coalesce = false) {
     project = { ...project };
     // E4: rapid text edits collapse into one undo step per typing burst.
     if (!historyApplying) {
-      history = (coalesce && Date.now() - lastChangeAt < 800)
+      history = (coalesce && lastChangeCoalescible && Date.now() - lastChangeAt < 800)
         ? coalesceHistory(history, project)
         : recordHistory(history, project);
     }
     lastChangeAt = Date.now();
+    lastChangeCoalescible = coalesce;
     summary = { ...summary, payloadCrc32: 0, fingerprint: "" };
     projectRevision += 1;
     dirty = true;
     setNotice("info", message);
   }
 
-  function resetHistory() { history = createHistory(project, snapshotProject); }
+  function resetHistory() { history = createHistory(project, snapshotProject); lastChangeCoalescible = false; }
 
   function applyHistory(direction: "undo" | "redo") {
     const next = direction === "undo" ? undoHistory(history) : redoHistory(history);
     if (!next) return;
     history = next;
+    lastChangeCoalescible = false;
     historyApplying = true;
     project = next.clone(next.current);
     profileIndex = Math.min(profileIndex, project.profiles.length - 1);
@@ -370,7 +373,7 @@
         setNotice("warning", "The project changed while restoring; the backup was not applied", "Try again to replace the current project.");
         return;
       }
-      await discardRecovery();
+      if (!(await discardRecovery())) return;
       project = restored;
       projectRevision += 1;
       profileIndex = 0; pageIndex = 0; selectedButton = 0;

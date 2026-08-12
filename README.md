@@ -38,25 +38,25 @@ The UART USB port handles flashing and logs. The separate USB-OTG port carries H
 
 See [editor/README.md](editor/README.md) and [firmware/README.md](firmware/README.md) for details.
 
-## FFmpeg distribution
+## FFmpeg runtime
 
-Animated icons and screensaver conversion require FFmpeg (E11). The editor looks for it, in order, at:
+Animated icons and screensaver conversion require FFmpeg. The installer does not currently bundle it. The editor looks for it, in order, at:
 
-1. `editor/src-tauri/resources/ffmpeg/<arch>/ffmpeg.exe` (the packaged sidecar)
+1. `ffmpeg.exe` beside the installed Screendeck executable
 2. `ffmpeg` on `PATH`
 
-If FFmpeg is missing, the editor disables animated-icon import and screensaver upload and explains how to install it.
+If FFmpeg is missing, the editor disables animated-icon import and screensaver upload and shows these installation options. Static icons and every non-conversion feature remain available.
 
-### Bundling a sidecar (recommended)
+### Future bundled distribution
 
-To ship conversion features on clean machines, drop a Windows build of FFmpeg into the resources directory before packaging:
+Bundling FFmpeg requires adding a pinned Windows binary to the Tauri bundle configuration and installing it beside the application executable, where the existing runtime lookup will find it. Before doing that:
 
-- `editor/src-tauri/resources/ffmpeg/x64/ffmpeg.exe`
-- `editor/src-tauri/resources/ffmpeg/arm64/ffmpeg.exe`
+- Record the exact source, version, architecture, and SHA-256 checksum.
+- Include the applicable FFmpeg GPL or LGPL license files.
+- Verify the checksum during packaging.
+- Test the NSIS installer on a machine without system FFmpeg.
 
-Use a pinned, ABI-stable Windows build (for example a release from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) or [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)) and record the exact version, SHA-256 checksum, and the FFmpeg GPL/LGPL license in this section. Verify the checksum in CI or a packaging script before committing the binary, and record the upgrade date when replacing it. Reproducible conversions depend on the pinned build, so changing it must be a deliberate, documented step.
-
-Until binaries are committed, the sidecar layout and the runtime lookup already exist; only the resources directory is empty by design.
+Do not add an unpinned download or silently fetch an executable at runtime.
 
 ## License
 
