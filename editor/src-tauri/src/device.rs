@@ -502,7 +502,7 @@ pub fn test_screensaver() -> Result<(), DeviceError> {
     let capabilities = checked_exchange(&mut session, HELLO, 1, &[], "capability query")?;
     if capabilities & TEST_SCREENSAVER_CAPABILITY == 0 {
         return Err(DeviceError::Protocol(
-            "device firmware does not support screensaver testing; flash the latest M5 firmware first".into(),
+            "device firmware does not support screensaver testing; flash the latest firmware first".into(),
         ));
     }
     checked_exchange_with_timeout(
@@ -711,7 +711,7 @@ pub fn upload_screensaver(media: &[u8]) -> Result<ScreensaverResult, DeviceError
         .map_err(|error| DeviceError::Protocol(format!("screensaver capability query: {error}")))?;
     if capabilities & 0x20 == 0 {
         return Err(DeviceError::Protocol(
-            "device firmware does not support screensaver upload; flash the M5 firmware first"
+            "device firmware does not support screensaver upload; flash the latest firmware first"
                 .into(),
         ));
     }

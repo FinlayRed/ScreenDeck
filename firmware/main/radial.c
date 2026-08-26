@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "m6_radial.h"
+#include "radial.h"
 #include <stdlib.h>
 
-#define M6_RADIUS 116
-#define M6_EDGE_PAD 12
-#define M6_DEAD_ZONE 24
-#define M6_COMMIT_RADIUS 68
+#define RADIUS 116
+#define EDGE_PAD 12
+#define DEAD_ZONE 24
+#define COMMIT_RADIUS 68
 
 /* Clockwise from up, Q10 vectors. Selection is maximum dot product: no
  * atan2, division or square root in the touch hot path. */
@@ -19,25 +19,25 @@ static int16_t clamp16(int32_t value, int16_t low, int16_t high)
     return (int16_t) (value < low ? low : value > high ? high : value);
 }
 
-m6_radial_geometry_t m6_radial_place(m6_point_t origin, uint16_t width, uint16_t height, uint8_t size)
+radial_geometry_t radial_place(point_t origin, uint16_t width, uint16_t height, uint8_t size)
 {
-    uint16_t radius = M6_RADIUS;
-    if (width < 2 * (radius + M6_EDGE_PAD)) radius = (width - 2 * M6_EDGE_PAD) / 2;
-    if (height < 2 * (radius + M6_EDGE_PAD)) radius = (height - 2 * M6_EDGE_PAD) / 2;
+    uint16_t radius = RADIUS;
+    if (width < 2 * (radius + EDGE_PAD)) radius = (width - 2 * EDGE_PAD) / 2;
+    if (height < 2 * (radius + EDGE_PAD)) radius = (height - 2 * EDGE_PAD) / 2;
     if (radius < 48) radius = 48;
-    return (m6_radial_geometry_t) {
-        .center = {clamp16(origin.x, radius + M6_EDGE_PAD, width - radius - M6_EDGE_PAD),
-                   clamp16(origin.y, radius + M6_EDGE_PAD, height - radius - M6_EDGE_PAD)},
-        .radius = radius, .dead_zone = radius < 75 ? radius * 32 / 100 : M6_DEAD_ZONE,
-        .commit_radius = radius < 95 ? radius * 72 / 100 : M6_COMMIT_RADIUS, .size = size,
+    return (radial_geometry_t) {
+        .center = {clamp16(origin.x, radius + EDGE_PAD, width - radius - EDGE_PAD),
+                   clamp16(origin.y, radius + EDGE_PAD, height - radius - EDGE_PAD)},
+        .radius = radius, .dead_zone = radius < 75 ? radius * 32 / 100 : DEAD_ZONE,
+        .commit_radius = radius < 95 ? radius * 72 / 100 : COMMIT_RADIUS, .size = size,
     };
 }
 
-m6_radial_selection_t m6_radial_select(const m6_radial_geometry_t *g, m6_point_t point, int8_t previous)
+radial_selection_t radial_select(const radial_geometry_t *g, point_t point, int8_t previous)
 {
     const int32_t dx = point.x - g->center.x, dy = point.y - g->center.y;
     const uint32_t distance2 = dx * dx + dy * dy;
-    if (distance2 <= (uint32_t) g->dead_zone * g->dead_zone) return (m6_radial_selection_t) {-1, false};
+    if (distance2 <= (uint32_t) g->dead_zone * g->dead_zone) return (radial_selection_t) {-1, false};
     const int16_t (*vectors)[2] = g->size == 4 ? directions4 : g->size == 6 ? directions6 : directions8;
     int8_t best = 0;
     int32_t best_score = INT32_MIN;
@@ -51,13 +51,13 @@ m6_radial_selection_t m6_radial_select(const m6_radial_geometry_t *g, m6_point_t
         const int32_t length_approx = abs(dx) > abs(dy) ? abs(dx) + abs(dy) / 2 : abs(dy) + abs(dx) / 2;
         if (best_score - old_score < length_approx * 140) best = previous;
     }
-    return (m6_radial_selection_t) {best, committed};
+    return (radial_selection_t) {best, committed};
 }
 
-m6_point_t m6_radial_item_position(const m6_radial_geometry_t *g, uint8_t index)
+point_t radial_item_position(const radial_geometry_t *g, uint8_t index)
 {
     const int16_t (*vectors)[2] = g->size == 4 ? directions4 : g->size == 6 ? directions6 : directions8;
     const int32_t orbit = g->radius * 72 / 100;
-    return (m6_point_t) {g->center.x + vectors[index][0] * orbit / 1024,
+    return (point_t) {g->center.x + vectors[index][0] * orbit / 1024,
                          g->center.y + vectors[index][1] * orbit / 1024};
 }

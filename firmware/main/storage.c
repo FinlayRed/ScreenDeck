@@ -30,8 +30,8 @@
 #include "tinyusb.h"
 #include "tinyusb_default_config.h"
 
-#ifdef M5_MEDIA_ENABLED
-#include "m6_media.h"
+#ifdef MEDIA_ENABLED
+#include "media.h"
 #endif
 
 static const char *TAG = "m3";
@@ -184,7 +184,7 @@ const char *m3_active_bundle_path(void)
     return s_active_bundle_path[0] != '\0' ? s_active_bundle_path : NULL;
 }
 
-#ifdef M5_MEDIA_ENABLED
+#ifdef MEDIA_ENABLED
 static void m3_restart_after_commit(void *argument)
 {
     (void) argument;
@@ -511,10 +511,10 @@ static bool m3_file_crc32(const char *path, uint32_t maximum_bytes,
 static bool m3_bundle_fully_valid(const char *path, uint32_t expected_bytes, uint32_t expected_crc)
 {
     if (!m3_validate_bundle_file(path, expected_bytes, expected_crc)) return false;
-#ifdef M5_MEDIA_ENABLED
+#ifdef MEDIA_ENABLED
     FILE *file = fopen(path, "rb");
     if (file == NULL) return false;
-    const bool valid = m5_ui_bundle_valid(
+    const bool valid = ui_bundle_valid(
         file, sizeof(m3_bundle_header_t),
         expected_bytes - (uint32_t) sizeof(m3_bundle_header_t));
     fclose(file);
@@ -661,8 +661,8 @@ static bool m3_storage_init(void)
          * decoded, restore the last good backup instead of playing nothing or
          * crashing the indexer. */
         bool media_valid = media.st_size >= 4 && media.st_size <= (off_t) M3_MAX_MEDIA_BYTES;
-#ifdef M5_MEDIA_ENABLED
-        media_valid = media_valid && m5_mjpeg_file_valid(M3_MEDIA_FILE);
+#ifdef MEDIA_ENABLED
+        media_valid = media_valid && mjpeg_file_valid(M3_MEDIA_FILE);
 #endif
         if (!media_valid) {
             unlink(M3_MEDIA_FILE);
@@ -915,7 +915,7 @@ static void m3_handle_commit(const m3_frame_header_t *frame)
     m3_cleanup_generations();
     ESP_LOGI(TAG, "M3_SYNC action=commit generation=%u bundle=%s", generation, bundle_name);
     m3_send_response(M3_OP_COMMIT, frame->sequence, M3_STATUS_OK, generation);
-#ifdef M5_MEDIA_ENABLED
+#ifdef MEDIA_ENABLED
     BaseType_t restart_ok = xTaskCreate(m3_restart_after_commit, "bundle_restart", 2048,
                                         NULL, 4, NULL);
     if (restart_ok != pdPASS) ESP_LOGE(TAG, "M3_SYNC result=restart_task_failed");
@@ -936,11 +936,11 @@ static bool m3_validate_mjpeg_file(const char *path, uint32_t expected_bytes, ui
     }
     fclose(file);
     if (bytes != expected_bytes || crc != expected_crc) return false;
-#ifdef M5_MEDIA_ENABLED
+#ifdef MEDIA_ENABLED
     /* F7: byte count and CRC are not enough. Reject streams that cannot be
      * decoded (marker-only, truncated, wrong-dimension, oversized, or
      * over-count frames) before activation. */
-    return m5_mjpeg_file_valid(path);
+    return mjpeg_file_valid(path);
 #else
     return true;
 #endif
@@ -1038,8 +1038,8 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
      * known-good file under a recovery name before activating the new one.
      * The media task owns the active file, so quiesce it first and re-index
      * after activation (F1); renames must never hit an open handle. */
-#ifdef M5_MEDIA_ENABLED
-    if (m5_media_control(M5_MEDIA_CTRL_QUIESCE, 30000) != 0) {
+#ifdef MEDIA_ENABLED
+    if (media_control(MEDIA_CTRL_QUIESCE, 30000) != 0) {
         ESP_LOGE(TAG, "M3_MEDIA result=quiesce_failed");
         m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes);
         return;
@@ -1055,11 +1055,11 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
         if (had_previous) rename(M3_MEDIA_BACKUP_FILE, M3_MEDIA_FILE);
         m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes); return;
     }
-#ifdef M5_MEDIA_ENABLED
+#ifdef MEDIA_ENABLED
     /* Resume playback from the new file so the pre-restart window never runs
      * with a stale ready state. A failed re-index only disables playback; the
      * boot recovery path can still restore the backup file. */
-    if (m5_media_control(M5_MEDIA_CTRL_RELOAD, 30000) != 0) {
+    if (media_control(MEDIA_CTRL_RELOAD, 30000) != 0) {
         ESP_LOGW(TAG, "M3_MEDIA result=reload_failed");
     }
 #endif
@@ -1069,7 +1069,7 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
     s_storage.active_media_crc32 = uploaded_crc32;
     ESP_LOGI(TAG, "M3_MEDIA action=commit bytes=%u path=%s", uploaded, M3_MEDIA_FILE);
     m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_OK, uploaded);
-#ifdef M5_MEDIA_ENABLED
+#ifdef MEDIA_ENABLED
     BaseType_t restart_ok = xTaskCreate(m3_restart_after_commit, "media_restart", 2048,
                                         NULL, 4, NULL);
     if (restart_ok != pdPASS) ESP_LOGE(TAG, "M3_MEDIA result=restart_task_failed");
@@ -1143,9 +1143,9 @@ static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *pay
         free(s_media_upload.write_buffer);
         unlink(M3_MEDIA_STAGE_FILE); s_media_upload = (m3_media_upload_t) {0};
         m3_send_response(M3_OP_MEDIA_ABORT, frame->sequence, M3_STATUS_OK, 0);
-#ifdef M5_MEDIA_ENABLED
+#ifdef MEDIA_ENABLED
     } else if (frame->opcode == M3_OP_TEST_SCREENSAVER) {
-        const uint32_t media_error = m5_media_trigger_screensaver();
+        const uint32_t media_error = media_trigger_screensaver();
         m3_send_response(M3_OP_TEST_SCREENSAVER, frame->sequence,
                          media_error == 0 ? M3_STATUS_OK : M3_STATUS_MEDIA_UNAVAILABLE,
                          media_error);
@@ -1250,16 +1250,16 @@ static void m3_usb_event_cb(tinyusb_event_t *event, void *argument)
     (void) argument;
     if (event->id == TINYUSB_EVENT_ATTACHED) {
         s_usb_mounted = true;
-#ifdef M5_MEDIA_ENABLED
-        m5_hid_release_all("usb_attached");
+#ifdef MEDIA_ENABLED
+        hid_release_all("usb_attached");
 #endif
         ESP_LOGI(TAG, "M3_USB state=mounted interfaces=keyboard,vendor_sync");
     } else if (event->id == TINYUSB_EVENT_DETACHED) {
         s_usb_mounted = false;
         /* The download stream is owned by the sync task; the callback only
          * publishes the connection change (see m3_download_close). */
-#ifdef M5_MEDIA_ENABLED
-        m5_hid_release_all("usb_detached");
+#ifdef MEDIA_ENABLED
+        hid_release_all("usb_detached");
 #endif
         ESP_LOGW(TAG, "M3_USB state=unmounted transfer_resume=%u", s_storage.upload_open);
     }
@@ -1318,11 +1318,11 @@ void app_main(void)
         ESP_ERROR_CHECK(esp_lv_adapter_lock(UINT32_MAX));
         m3_recovery_ui();
         esp_lv_adapter_unlock();
-#ifdef M5_MEDIA_ENABLED
-        m5_media_start(s_display);
+#ifdef MEDIA_ENABLED
+        media_start(s_display);
 #endif
     }
-#ifdef M5_MEDIA_ENABLED
+#ifdef MEDIA_ENABLED
     ESP_LOGI(TAG, "M3_COMPLETE sd_ready=%u active_bundle=%u hid_output=macro_runtime msc=disabled",
 #else
     ESP_LOGI(TAG, "M3_COMPLETE sd_ready=%u active_bundle=%u hid_output=disabled msc=disabled",

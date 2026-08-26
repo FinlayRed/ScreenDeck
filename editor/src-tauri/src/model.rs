@@ -11,7 +11,7 @@ pub const MAX_STEPS: usize = 64;
 pub const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Shared animated-icon contract, mirrored by the firmware
-/// (firmware/main/m6_media.h: M5_ICON_FPS / M5_ICON_MAX_FRAMES). The device
+/// (firmware/main/media.h: ICON_FPS / ICON_MAX_FRAMES). The device
 /// accepts only complete MJPEG streams with 2..=120 frames at 15 FPS.
 pub const ICON_FPS: u8 = 15;
 pub const ICON_MIN_FRAMES: u16 = 2;

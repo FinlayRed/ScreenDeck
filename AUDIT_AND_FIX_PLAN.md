@@ -54,7 +54,7 @@ The timeout path calls `CancelIoEx` and returns immediately. Windows cancellatio
 
 ### F1. Screensaver replacement renames an open FatFs file
 
-**Evidence:** `firmware/main/m6_media.c:1165`, `firmware/main/storage.c:940-950`, and `firmware/sdkconfig.defaults:19-20`.
+**Evidence:** `firmware/main/media.c:1165`, `firmware/main/storage.c:940-950`, and `firmware/sdkconfig.defaults:19-20`.
 
 The media task retains `screensaver.mjpg` in `s_media.file`, including when the file is preloaded. The sync task deletes the backup and renames the live file during `MEDIA_COMMIT`. FatFs file locking is disabled. Renaming an open file can fail or corrupt the volume.
 
@@ -77,7 +77,7 @@ The media task retains `screensaver.mjpg` in `s_media.file`, including when the 
 
 ### F2. `TEST_SCREENSAVER` races the background indexer
 
-**Evidence:** `firmware/main/storage.c:993-997` and `firmware/main/m6_media.c:1116-1250,1308,1513-1529`.
+**Evidence:** `firmware/main/storage.c:993-997` and `firmware/main/media.c:1116-1250,1308,1513-1529`.
 
 The sync task directly resets and frees global media state while the media task may be indexing the same file and buffers. A test request soon after boot can cause two simultaneous index passes, use-after-free, corrupt frame tables, false errors, or a crash.
 
@@ -91,13 +91,13 @@ The sync task directly resets and frees global media state while the media task 
 
 ### F3. Firmware activates bundles before validating the M5UI payload
 
-**Evidence:** `firmware/main/storage.c:458-475,571-580,779-821`, `firmware/main/m6_media.c:361-425`, and `tests/device-sync.ps1:127-155`.
+**Evidence:** `firmware/main/storage.c:458-475,571-580,779-821`, `firmware/main/media.c:361-425`, and `tests/device-sync.ps1:127-155`.
 
 Storage validates only the SDB envelope and payload CRC. It marks the generation active before the runtime parser checks M5UI magic, offsets, counts, references, assets, and animation streams. An invalid but CRC-correct bundle reports success, restarts, and replaces the working UI without selecting the previous valid generation.
 
 **Fix plan:**
 
-1. Extract the M5UI structural validator from `m5_load_ui_bundle` into a side-effect-free validator that can operate on a file or bounded buffer.
+1. Extract the M5UI structural validator from `load_ui_bundle` into a side-effect-free validator that can operate on a file or bounded buffer.
 2. Validate both the SDB envelope and all inner M5UI semantics before writing the active pointer.
 3. Keep activation separate from validation.
 4. At boot, treat a generation as valid only when both layers pass.
@@ -112,7 +112,7 @@ Storage validates only the SDB envelope and payload CRC. It marks the generation
 
 ### F4. Unaligned M5UI offsets can cause a boot panic
 
-**Evidence:** `firmware/main/m6_media.c:367-410,925`.
+**Evidence:** `firmware/main/media.c:367-410,925`.
 
 Range checks do not enforce alignment before byte offsets are cast to typed pointers. An odd `button_macro_refs_offset` produces an unaligned `uint16_t` load on ESP32-P4 and can create a restart loop after promotion. Other typed tables need equivalent alignment checks.
 
@@ -300,7 +300,7 @@ After a timeout, the editor waits 250 ms and sends `STATUS` through the same con
 
 ### I3. The standalone converter emits incompatible screensavers
 
-**Evidence:** `scripts/convert-media.ps1:29-30` and `firmware/main/m6_media.c:45,47,49,54-55,1230-1232`.
+**Evidence:** `scripts/convert-media.ps1:29-30` and `firmware/main/media.c:45,47,49,54-55,1230-1232`.
 
 The script produces 1280x720 at 30 frames per input second. Firmware requires 720x1280, presents at 60 FPS, limits streams to 1,800 frames, and limits frame and file sizes.
 
@@ -310,7 +310,7 @@ The script produces 1280x720 at 30 frames per input second. Firmware requires 72
 
 ### I4. Editor and firmware disagree on animated-icon frame counts
 
-**Evidence:** `editor/src-tauri/src/model.rs:305-309`, `editor/src-tauri/src/compiler.rs:292-301`, and `firmware/main/m6_media.c:61,317-337`.
+**Evidence:** `editor/src-tauri/src/model.rs:305-309`, `editor/src-tauri/src/compiler.rs:292-301`, and `firmware/main/media.c:61,317-337`.
 
 The editor accepts any non-empty complete MJPEG stream; firmware accepts only 2 through 120 frames. A crafted or legacy project can sync successfully and prevent the full UI bundle from loading.
 
@@ -350,7 +350,7 @@ The TinyUSB callback can close and clear `s_download_file` while the sync task i
 
 ### F7. `MEDIA_COMMIT` accepts non-decodable MJPEG
 
-**Evidence:** `firmware/main/storage.c:829-850,921-959`, `firmware/main/m6_media.c:1116-1245`, and recovery at `firmware/main/storage.c:603-607`.
+**Evidence:** `firmware/main/storage.c:829-850,921-959`, `firmware/main/media.c:1116-1245`, and recovery at `firmware/main/storage.c:603-607`.
 
 Commit checks only byte count, CRC, the first SOI marker, and the final EOI marker. The four bytes `FF D8 FF D9` pass but cannot be decoded at 720x1280. Recovery restores the backup only when active media is missing, not when it is invalid.
 
@@ -360,7 +360,7 @@ Commit checks only byte count, CRC, the first SOI marker, and the final EOI mark
 
 ### F8. Flipped orientation does not apply to screensavers
 
-**Evidence:** `firmware/main/m6_media.c:442-446,1281-1289`.
+**Evidence:** `firmware/main/media.c:442-446,1281-1289`.
 
 The project setting rotates LVGL by 180 degrees, but screensaver frames bypass LVGL and draw directly to the panel.
 
@@ -372,7 +372,7 @@ The project setting rotates LVGL by 180 degrees, but screensaver frames bypass L
 
 ### E14. The screensaver limit diagnostic is stale
 
-**Evidence:** `editor/src-tauri/src/device.rs:84` reports 900 frames; `firmware/main/m6_media.c:47,1143-1153` enforces 1,800.
+**Evidence:** `editor/src-tauri/src/device.rs:84` reports 900 frames; `firmware/main/media.c:47,1143-1153` enforces 1,800.
 
 **Fix plan:** replace the message with 1,800 and derive future messages from the shared media contract where possible.
 
@@ -506,7 +506,7 @@ The audit passed these checks:
 - ESP-IDF and the vendor submodule worktree were unavailable, so the firmware was not rebuilt locally.
 - Physical WinUSB, upload resume, restart, SD-card, and power-loss tests were not run.
 - Five hardware or FFmpeg tests remain ignored.
-- The ignored video test lacks `.m5_sample.mp4`.
+- The ignored video test lacks `.sample.mp4`.
 - Destructive malformed-archive, disk-full, and invalid-device-commit reproductions were assessed from code paths rather than executed against user data or hardware.
 
 ## Progress log
@@ -514,7 +514,7 @@ The audit passed these checks:
 - **Phase 0 (2026-08-12):** Baseline protected on `phase/0-baseline`. The four pre-existing editor diffs and this document are committed. The destructive `-CommitTestBundle` smoke test now refuses to run without `-AllowDestructiveBundle` (F3 will replace it with a valid-bundle test). Baseline checks re-recorded: 13 Rust tests (5 ignored), 11 Vitest, svelte-check clean, Vite build clean, clippy clean across targets, rustfmt clean, firmware builds under ESP-IDF v5.5.5 (previously unavailable).
 - **Phase 1 (2026-08-12):** Memory and filesystem safety fixes landed on `phase/1-memory-filesystem-safety`.
   - E1: WinUSB transfers now run through an owned heap `IoOperation` (OVERLAPPED, buffer, byte count). `run_transfer` cancels on timeout and waits for the kernel to reach a terminal state (`ERROR_OPERATION_ABORTED` or a real byte count) before the allocation is freed; the completion-racing-cancellation case is handled via `ERROR_NOT_FOUND`; a genuinely stuck operation is leaked rather than freed. The Win32 layer is injectable (`Win32Io`); seven mock tests cover success, pending completion, timeout+cancel, racing completion, failed cancel, disconnect, and immediate failure.
-  - F1: media task owns all screensaver handles and buffers. New control queue (`M5_MEDIA_CTRL_QUIESCE/RELOAD/TEST`) serializes cross-task requests. `MEDIA_COMMIT` quiesces the media task (with acknowledgement) before renaming, then reloads after activation.
+  - F1: media task owns all screensaver handles and buffers. New control queue (`MEDIA_CTRL_QUIESCE/RELOAD/TEST`) serializes cross-task requests. `MEDIA_COMMIT` quiesces the media task (with acknowledgement) before renaming, then reloads after activation.
   - F2: `TEST_SCREENSAVER` now routes through the control queue; indexing, reload, playback, and test transitions are serialized in the media task.
   - F5: explicit download transaction. `DOWNLOAD_END` opcode (15) added; firmware closes the stream on end, terminal error, detach, and abort; the editor sends `DOWNLOAD_END` after the final chunk; generation cleanup skips the open download generation.
   - F6: the TinyUSB detach callback only publishes the connection change; the sync task closes the download stream on its next bounded wait.
@@ -523,9 +523,9 @@ The audit passed these checks:
   - Verification: 20 Rust tests (7 new), clippy clean, rustfmt clean, firmware builds, PowerShell parser checks pass, T1 assertion verified at runtime.
 
 - **Phase 2 (2026-08-12):** Transactional activation landed on `phase/2-transactional-activation`.
-  - F3: `m5_ui_bundle_valid` extracted as a side-effect-free, file-based M5UI validator (magic, schema, counts, offsets, references, assets, animation streams). Both `COMMIT` and boot pointer selection now require the full SDB + M5UI validation (`m3_bundle_fully_valid`), so a CRC-correct but invalid bundle can never be marked active. The smoke test now commits a minimal valid bundle and gains `-RejectInvalidBundle`, which expects rejection and confirms the generation does not advance.
+  - F3: `ui_bundle_valid` extracted as a side-effect-free, file-based M5UI validator (magic, schema, counts, offsets, references, assets, animation streams). Both `COMMIT` and boot pointer selection now require the full SDB + M5UI validation (`m3_bundle_fully_valid`), so a CRC-correct but invalid bundle can never be marked active. The smoke test now commits a minimal valid bundle and gains `-RejectInvalidBundle`, which expects rejection and confirms the generation does not advance.
   - F4: every typed-table offset is alignment-checked (`_Alignof`) in the validator, the in-memory loader additionally rejects odd `button_macro_refs_offset`, and table parsing copies into aligned locals instead of casting file bytes.
-  - F7: `m5_mjpeg_file_valid` validates complete frame boundaries, count (<=1800), per-frame size (<=2 MiB), and every frame decoding to 720x1280 before activation and at boot; boot now restores the backup when the active file is present but undecodable.
+  - F7: `mjpeg_file_valid` validates complete frame boundaries, count (<=1800), per-frame size (<=2 MiB), and every frame decoding to 720x1280 before activation and at boot; boot now restores the backup when the active file is present but undecodable.
   - E3: archive saves build in a uniquely named temp file, `sync_all`, then atomically replace via `MoveFileExW` (Windows) so no earlier failure can destroy the previous archive; the same pattern applies to workspace persistence. A regression test injects a mid-save failure and asserts the previous archive stays byte-identical with no staging leftovers.
   - Verification: 22 Rust tests (2 new), clippy clean, rustfmt clean, firmware builds, PowerShell parser checks pass, T1 assertion verified.
 

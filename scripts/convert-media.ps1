@@ -29,7 +29,7 @@ $common = @('-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-threads', 
             '-map_metadata', '-1', '-fflags', '+bitexact', '-flags:v', '+bitexact', '-an', '-sn', '-dn')
 
 # Device media contract (mirrors the editor converter and the firmware parser
-# in m5_index_mjpeg / m5_mjpeg_file_valid): 720x1280 portrait MJPEG at 60 FPS,
+# in index_mjpeg / mjpeg_file_valid): 720x1280 portrait MJPEG at 60 FPS,
 # at most 1800 frames (30 s), total stream <= 16 MiB, each frame <= 2 MiB, and
 # every frame decodable at 720x1280.
 $SCREENSAVER_FILTER = 'fps=60,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,transpose=clock,format=yuvj420p'

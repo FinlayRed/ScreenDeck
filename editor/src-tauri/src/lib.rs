@@ -547,7 +547,7 @@ mod tests {
         valid.profiles[0].pages[0].buttons[0].icon_id = Some("anim".into());
         let mut bundle = compiler::compile(&valid).unwrap();
         // Asset table starts after the SDB header; the frame_count field is at
-        // asset offset 16 within the 20-byte m5_ui_asset_t.
+        // asset offset 16 within the 20-byte ui_asset_t.
         let assets_offset = u32::from_le_bytes(bundle[32..36].try_into().unwrap()) as usize;
         bundle[16 + assets_offset + 16..16 + assets_offset + 18]
             .copy_from_slice(&3u16.to_le_bytes());
@@ -681,7 +681,7 @@ mod tests {
     fn minimal_bundle_layout_matches_smoke_test_fixture() {
         // The device-sync.ps1 -CommitTestBundle fixture (MinimalUiPayload)
         // hardcodes these offsets, and the firmware validator
-        // (m5_ui_bundle_valid) accepts the bundle only while they hold. Pin
+        // (ui_bundle_valid) accepts the bundle only while they hold. Pin
         // the fixture against the compiler's reference emit.
         let mut minimal = project();
         minimal.macros.clear();
@@ -1009,7 +1009,7 @@ mod tests {
     #[test]
     #[ignore = "requires FFmpeg"]
     fn ffmpeg_converts_video_to_60fps_device_mjpeg() {
-        let media = prepare_screensaver(Path::new("../../../.m5_sample.mp4")).unwrap();
+        let media = prepare_screensaver(Path::new("../../../.sample.mp4")).unwrap();
         let frames = media
             .windows(2)
             .filter(|pair| *pair == [0xff, 0xd8])
@@ -1023,7 +1023,7 @@ mod tests {
     #[test]
     #[ignore = "requires FFmpeg and a physical Screendeck connected to the USB-OTG port"]
     fn physical_60fps_screensaver_conversion_and_upload() {
-        let media = prepare_screensaver(Path::new("../../../.m5_sample.mp4")).unwrap();
+        let media = prepare_screensaver(Path::new("../../../.sample.mp4")).unwrap();
         let frames = media
             .windows(2)
             .filter(|pair| *pair == [0xff, 0xd8])

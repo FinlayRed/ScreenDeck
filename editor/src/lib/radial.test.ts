@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { placeRadial, radialDirection, radialGridOffset, selectRadial } from "./radial";
 
-describe("M6 radial geometry", () => {
+describe("radial geometry", () => {
   it("clamps all corner and edge origins on-screen", () => {
     for (const origin of [{x:0,y:0},{x:1280,y:0},{x:0,y:720},{x:1280,y:720},{x:640,y:0}]) {
       const g = placeRadial(origin, { width: 1280, height: 720 }, 8);

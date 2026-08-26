@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /*
- * M6 — radial gestures, integrated settings, animated media and screensaver.
+ * UI/media module: radial gestures, integrated settings, animated media and
+ * screensaver.
  *
- * The M3 transport remains the owner of the card and the USB device.  This
+ * The sync transport remains the owner of the card and the USB device.  This
  * module only consumes a fixed, device-local media path after that transport
  * and the shared LVGL display are ready.
  */
@@ -30,62 +31,62 @@
 #include "lvgl.h"
 #include "draw/lv_image_decoder_private.h"
 #include "misc/cache/instance/lv_image_cache.h"
-#include "m6_media.h"
-#include "m6_radial.h"
+#include "media.h"
+#include "radial.h"
 
-static const char *TAG = "m6";
+static const char *TAG = "screendeck";
 
-#define M5_COLUMNS 8
-#define M5_ROWS 4
-#define M5_BUTTONS (M5_COLUMNS * M5_ROWS)
-#define M5_GAP_PX 8
-#define M5_MARGIN_X_PX 16
-#define M5_ACTIVE_POLL_MS 5
-#define M5_DEFAULT_SCREENSAVER_IDLE_SECONDS 15
-#define M5_SCREENSAVER_FPS 60
-#define M5_SAVER_BENCH_FRAMES 120
-#define M5_PRELOAD_LIMIT (8U * 1024U * 1024U)
-#define M5_SD_READ_AHEAD_BYTES (128U * 1024U)
-#define M5_JPEG_PATH BSP_SD_MOUNT_POINT "/screendeck/screensaver.mjpg"
-#define M5_LCD_WIDTH 1280
-#define M5_LCD_HEIGHT 720
-#define M5_RGB565_BYTES (M5_LCD_WIDTH * M5_LCD_HEIGHT * 2U)
-#define M5_INDEX_BUFFER_BYTES (16U * 1024U)
-#define M5_UI_MAGIC 0x4955354DUL
-#define M5_SDB3_MAGIC 0x33424453UL
-#define M5_ICON_UPDATE_BATCH 4
-#define M5_ICON_MEDIUM_LOAD_FPS 10
-#define M5_ICON_HEAVY_LOAD_FPS 7
-#define M5_MACRO_SLOTS 8
-#define M5_CONSUMER_QUEUE_DEPTH 16
-#define M5_HID_KEYBOARD_REPORT_ID 1
-#define M5_HID_CONSUMER_REPORT_ID 2
-#define M6_RADIAL_ACTION_PROFILE_NEXT (UINT16_MAX - 3)
-#define M6_RADIAL_ACTION_PAGE_PREVIOUS (UINT16_MAX - 2)
-#define M6_RADIAL_ACTION_PAGE_NEXT (UINT16_MAX - 1)
-#define M6_RADIAL_ACTION_NONE UINT16_MAX
-#define M6_RADIAL_OPEN_DRAG_PX 5
-#define M6_RADIAL_PREWARM_MAX (M5_BUTTONS * 8)
-#define M6_RADIAL_PREWARM_INITIAL_MS 30
-#define M6_RADIAL_PREWARM_PERIOD_MS 1
+#define COLUMNS 8
+#define ROWS 4
+#define BUTTONS (COLUMNS * ROWS)
+#define GAP_PX 8
+#define MARGIN_X_PX 16
+#define ACTIVE_POLL_MS 5
+#define DEFAULT_SCREENSAVER_IDLE_SECONDS 15
+#define SCREENSAVER_FPS 60
+#define SAVER_BENCH_FRAMES 120
+#define PRELOAD_LIMIT (8U * 1024U * 1024U)
+#define SD_READ_AHEAD_BYTES (128U * 1024U)
+#define JPEG_PATH BSP_SD_MOUNT_POINT "/screendeck/screensaver.mjpg"
+#define LCD_WIDTH 1280
+#define LCD_HEIGHT 720
+#define RGB565_BYTES (LCD_WIDTH * LCD_HEIGHT * 2U)
+#define INDEX_BUFFER_BYTES (16U * 1024U)
+#define UI_MAGIC 0x4955354DUL
+#define SDB3_MAGIC 0x33424453UL
+#define ICON_UPDATE_BATCH 4
+#define ICON_MEDIUM_LOAD_FPS 10
+#define ICON_HEAVY_LOAD_FPS 7
+#define MACRO_SLOTS 8
+#define CONSUMER_QUEUE_DEPTH 16
+#define HID_KEYBOARD_REPORT_ID 1
+#define HID_CONSUMER_REPORT_ID 2
+#define RADIAL_ACTION_PROFILE_NEXT (UINT16_MAX - 3)
+#define RADIAL_ACTION_PAGE_PREVIOUS (UINT16_MAX - 2)
+#define RADIAL_ACTION_PAGE_NEXT (UINT16_MAX - 1)
+#define RADIAL_ACTION_NONE UINT16_MAX
+#define RADIAL_OPEN_DRAG_PX 5
+#define RADIAL_PREWARM_MAX (BUTTONS * 8)
+#define RADIAL_PREWARM_INITIAL_MS 30
+#define RADIAL_PREWARM_PERIOD_MS 1
 
 typedef enum {
-    M5_STATE_ACTIVE,
-    M5_STATE_PLAYING,
-    M5_STATE_WAKING,
-} m5_state_t;
+    STATE_ACTIVE,
+    STATE_PLAYING,
+    STATE_WAKING,
+} state_t;
 
 typedef struct {
     uint32_t offset;
     uint32_t length;
-} m5_frame_index_t;
+} frame_index_t;
 
 typedef struct {
     FILE *file;
     uint32_t file_size;
     uint32_t frame_count;
     uint32_t largest_frame;
-    m5_frame_index_t frames[M5_MAX_FRAMES];
+    frame_index_t frames[MAX_FRAMES];
     uint8_t *preload;
     uint8_t *read_buffer;
     uint8_t *file_buffer;
@@ -95,7 +96,7 @@ typedef struct {
     uint8_t panel_buffer_index;
     bool ready;
     bool preloaded;
-} m5_media_t;
+} media_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -104,41 +105,41 @@ typedef struct __attribute__((packed)) {
     uint32_t step_count, profiles_offset, pages_offset, assets_offset, button_macro_refs_offset;
     uint32_t macro_descriptors_offset, macro_steps_offset, blob_offset, flags;
     uint32_t radial_descriptors_offset, radial_items_offset, radial_item_count, settings;
-} m5_ui_header_t;
+} ui_header_t;
 
-typedef struct __attribute__((packed)) { uint16_t first_page, page_count; uint32_t reserved; } m5_ui_profile_t;
-typedef struct __attribute__((packed)) { uint32_t radial_index; uint16_t asset_index; uint8_t action, fit; } m5_ui_button_t;
+typedef struct __attribute__((packed)) { uint16_t first_page, page_count; uint32_t reserved; } ui_profile_t;
+typedef struct __attribute__((packed)) { uint32_t radial_index; uint16_t asset_index; uint8_t action, fit; } ui_button_t;
 typedef struct __attribute__((packed)) {
     uint32_t static_offset, static_length, animation_offset, animation_length;
     uint16_t frame_count;
     uint8_t type, fps;
-} m5_ui_asset_t;
-typedef struct __attribute__((packed)) { uint16_t first_step, step_count; uint32_t reserved; } m5_ui_macro_t;
-typedef struct __attribute__((packed)) { uint8_t kind, usage_page; uint16_t usage; uint32_t duration_ms; } m5_ui_step_t;
-typedef struct __attribute__((packed)) { uint16_t first_item; uint8_t count, cover_mask; } m6_ui_radial_t;
-typedef struct __attribute__((packed)) { uint16_t asset_index, macro_index; } m6_ui_radial_item_t;
-typedef struct { uint32_t offset, length; } m5_icon_frame_t;
+} ui_asset_t;
+typedef struct __attribute__((packed)) { uint16_t first_step, step_count; uint32_t reserved; } ui_macro_t;
+typedef struct __attribute__((packed)) { uint8_t kind, usage_page; uint16_t usage; uint32_t duration_ms; } ui_step_t;
+typedef struct __attribute__((packed)) { uint16_t first_item; uint8_t count, cover_mask; } ui_radial_t;
+typedef struct __attribute__((packed)) { uint16_t asset_index, macro_index; } ui_radial_item_t;
+typedef struct { uint32_t offset, length; } icon_frame_t;
 typedef struct {
-    m5_icon_frame_t frames[M5_ICON_MAX_FRAMES];
+    icon_frame_t frames[ICON_MAX_FRAMES];
     uint16_t count;
-} m5_icon_index_t;
+} icon_index_t;
 
 typedef struct {
     uint8_t *payload;
     size_t payload_size;
-    const m5_ui_header_t *header;
-    const m5_ui_profile_t *profiles;
-    const m5_ui_button_t *buttons;
-    const m5_ui_asset_t *assets;
+    const ui_header_t *header;
+    const ui_profile_t *profiles;
+    const ui_button_t *buttons;
+    const ui_asset_t *assets;
     const uint16_t *button_macro_refs;
-    const m5_ui_macro_t *macros;
-    const m5_ui_step_t *steps;
-    const m6_ui_radial_t *radials;
-    const m6_ui_radial_item_t *radial_items;
+    const ui_macro_t *macros;
+    const ui_step_t *steps;
+    const ui_radial_t *radials;
+    const ui_radial_item_t *radial_items;
     lv_image_dsc_t *images;
-    m5_icon_index_t *animation_indices;
+    icon_index_t *animation_indices;
     bool ready;
-} m5_ui_bundle_t;
+} ui_bundle_t;
 
 typedef struct {
     bool active;
@@ -148,55 +149,55 @@ typedef struct {
     uint8_t tap_usage, tap_modifiers;
     bool held_keys[256];
     uint8_t held_modifiers;
-} m5_macro_slot_t;
+} macro_slot_t;
 
 typedef struct {
     lv_obj_t *image;
     uint16_t asset_index, frame;
     uint8_t frame_phase;
     lv_image_dsc_t descriptor;
-} m5_visible_animation_t;
+} visible_animation_t;
 
 /* Control requests sent by the M3 sync task are serialized through this queue
  * so the media task remains the sole owner of screensaver handles and buffers.
- * See m5_media_control() in m6_media.h. */
+ * See media_control() in media.h. */
 typedef struct {
-    m5_media_ctrl_t type;
+    media_ctrl_t type;
     SemaphoreHandle_t reply;
     uint32_t result;
     uint8_t references;
-} m5_media_control_msg_t;
+} media_control_msg_t;
 
 static QueueHandle_t s_media_control_queue;
 static portMUX_TYPE s_media_control_lock = portMUX_INITIALIZER_UNLOCKED;
 static lv_display_t *s_display;
 static esp_lcd_panel_handle_t s_panel;
 static lv_obj_t *s_saver_input;
-static m5_media_t s_media;
-static m5_ui_bundle_t s_ui_bundle;
+static media_t s_media;
+static ui_bundle_t s_ui_bundle;
 static esp_lv_decoder_handle_t s_icon_decoder;
 static uint16_t s_current_profile;
 static uint16_t s_current_page;
-static volatile m5_state_t s_state = M5_STATE_ACTIVE;
+static volatile state_t s_state = STATE_ACTIVE;
 static volatile int64_t s_last_activity_us;
 static volatile bool s_ui_ready;
 static volatile bool s_wake_requested;
 static volatile bool s_page_change_requested;
 static volatile bool s_screensaver_requested;
-static uint32_t s_screensaver_idle_seconds = M5_DEFAULT_SCREENSAVER_IDLE_SECONDS;
+static uint32_t s_screensaver_idle_seconds = DEFAULT_SCREENSAVER_IDLE_SECONDS;
 static uint32_t s_media_index_error;
 static bool s_media_flipped;
-static const uint32_t M5_MEDIA_CONTROL_TIMEOUT_MS = 30000;
-static uint8_t s_index_buffer[M5_INDEX_BUFFER_BYTES];
-static m5_macro_slot_t s_macro_slots[M5_MACRO_SLOTS];
+static const uint32_t MEDIA_CONTROL_TIMEOUT_MS = 30000;
+static uint8_t s_index_buffer[INDEX_BUFFER_BYTES];
+static macro_slot_t s_macro_slots[MACRO_SLOTS];
 static uint8_t s_key_refs[256], s_modifier_refs[8];
 static bool s_keyboard_report_pending;
-static uint16_t s_consumer_queue[M5_CONSUMER_QUEUE_DEPTH];
+static uint16_t s_consumer_queue[CONSUMER_QUEUE_DEPTH];
 static uint8_t s_consumer_queue_head, s_consumer_queue_count;
 static bool s_consumer_release_pending;
 static SemaphoreHandle_t s_macro_mutex;
 static TaskHandle_t s_macro_task_handle;
-static m5_visible_animation_t s_visible_animations[M5_BUTTONS];
+static visible_animation_t s_visible_animations[BUTTONS];
 static uint8_t s_visible_animation_count;
 static uint8_t s_visible_animation_cursor;
 static bool s_screensaver_enabled = true;
@@ -206,21 +207,21 @@ static lv_obj_t *s_radial_overlay;
 static lv_obj_t *s_radial_nodes[8];
 static lv_obj_t *s_radial_highlights[8];
 static lv_timer_t *s_radial_prewarm_timer;
-static uint16_t s_radial_prewarm_assets[M6_RADIAL_PREWARM_MAX];
+static uint16_t s_radial_prewarm_assets[RADIAL_PREWARM_MAX];
 static uint16_t s_radial_prewarm_count;
 static uint16_t s_radial_prewarm_cursor;
 static int64_t s_radial_prewarm_started_us;
-static m6_radial_geometry_t s_radial_geometry;
+static radial_geometry_t s_radial_geometry;
 static int8_t s_radial_selection = -1;
 static uint32_t s_active_radial = UINT32_MAX;
 static uint32_t s_pending_radial = UINT32_MAX;
 static uint8_t s_pending_radial_button;
-static m6_point_t s_pending_radial_origin;
-static m6_point_t s_radial_press_point;
+static point_t s_pending_radial_origin;
+static point_t s_radial_press_point;
 static bool s_radial_suppress_click;
 extern const char *m3_active_bundle_path(void);
 
-static const char *const s_symbols[M5_BUTTONS] = {
+static const char *const s_symbols[BUTTONS] = {
     LV_SYMBOL_PLAY, LV_SYMBOL_STOP, LV_SYMBOL_SETTINGS, LV_SYMBOL_LOOP,
     LV_SYMBOL_CHARGE, LV_SYMBOL_POWER, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_HOME,
     LV_SYMBOL_SAVE, LV_SYMBOL_DOWNLOAD, LV_SYMBOL_UPLOAD, LV_SYMBOL_BELL,
@@ -231,13 +232,13 @@ static const char *const s_symbols[M5_BUTTONS] = {
     LV_SYMBOL_LEFT, LV_SYMBOL_RIGHT, LV_SYMBOL_REFRESH, LV_SYMBOL_OK,
 };
 
-static void m5_render_active_ui(void);
-static void m5_media_handle_control(m5_media_control_msg_t *ctrl);
+static void render_active_ui(void);
+static void media_handle_control(media_control_msg_t *ctrl);
 
 /* The caller and the queued request each hold one reference. This keeps the
  * message and its semaphore alive when the caller times out before the media
  * task dequeues or finishes the request. */
-static void m5_media_control_release(m5_media_control_msg_t *ctrl)
+static void media_control_release(media_control_msg_t *ctrl)
 {
     bool destroy = false;
     portENTER_CRITICAL(&s_media_control_lock);
@@ -249,18 +250,18 @@ static void m5_media_control_release(m5_media_control_msg_t *ctrl)
     }
 }
 
-static void m6_log_render_time(const char *phase, int64_t started_us)
+static void log_render_time(const char *phase, int64_t started_us)
 {
 #if CONFIG_LV_USE_PPA
     const unsigned ppa_enabled = 1;
 #else
     const unsigned ppa_enabled = 0;
 #endif
-    ESP_LOGI(TAG, "M6_RENDER phase=%s elapsed_us=%lld ppa=%u",
+    ESP_LOGI(TAG, "RENDER phase=%s elapsed_us=%lld ppa=%u",
              phase, (long long) (esp_timer_get_time() - started_us), ppa_enabled);
 }
 
-static void m6_cancel_radial_prewarm(void)
+static void cancel_radial_prewarm(void)
 {
     if (s_radial_prewarm_timer != NULL) lv_timer_delete(s_radial_prewarm_timer);
     s_radial_prewarm_timer = NULL;
@@ -269,7 +270,7 @@ static void m6_cancel_radial_prewarm(void)
     s_radial_prewarm_started_us = 0;
 }
 
-static bool m6_radial_prewarm_contains(uint16_t asset)
+static bool radial_prewarm_contains(uint16_t asset)
 {
     for (uint16_t i = 0; i < s_radial_prewarm_count; ++i) {
         if (s_radial_prewarm_assets[i] == asset) return true;
@@ -277,68 +278,68 @@ static bool m6_radial_prewarm_contains(uint16_t asset)
     return false;
 }
 
-static void m6_radial_prewarm_cb(lv_timer_t *timer)
+static void radial_prewarm_cb(lv_timer_t *timer)
 {
-    if (!s_ui_bundle.ready || s_state != M5_STATE_ACTIVE ||
+    if (!s_ui_bundle.ready || s_state != STATE_ACTIVE ||
         s_radial_prewarm_cursor >= s_radial_prewarm_count) {
         const uint16_t warmed = s_radial_prewarm_cursor;
         const int64_t elapsed = s_radial_prewarm_started_us == 0
             ? 0 : esp_timer_get_time() - s_radial_prewarm_started_us;
         lv_timer_delete(timer);
         s_radial_prewarm_timer = NULL;
-        ESP_LOGI(TAG, "M6_PREWARM page=%u assets=%u elapsed_us=%lld",
+        ESP_LOGI(TAG, "PREWARM page=%u assets=%u elapsed_us=%lld",
                  s_current_page, warmed, (long long) elapsed);
         return;
     }
 
     if (s_radial_prewarm_cursor == 0) {
         s_radial_prewarm_started_us = esp_timer_get_time();
-        lv_timer_set_period(timer, M6_RADIAL_PREWARM_PERIOD_MS);
+        lv_timer_set_period(timer, RADIAL_PREWARM_PERIOD_MS);
     }
     const uint16_t asset = s_radial_prewarm_assets[s_radial_prewarm_cursor++];
     lv_image_decoder_dsc_t decoder;
     if (lv_image_decoder_open(&decoder, &s_ui_bundle.images[asset], NULL) == LV_RESULT_OK) {
         lv_image_decoder_close(&decoder);
     } else {
-        ESP_LOGW(TAG, "M6_PREWARM page=%u asset=%u result=decode_failed", s_current_page, asset);
+        ESP_LOGW(TAG, "PREWARM page=%u asset=%u result=decode_failed", s_current_page, asset);
     }
 }
 
-static void m6_schedule_radial_prewarm(void)
+static void schedule_radial_prewarm(void)
 {
-    m6_cancel_radial_prewarm();
+    cancel_radial_prewarm();
     if (!s_ui_bundle.ready) return;
 
-    const m5_ui_button_t *page = &s_ui_bundle.buttons[(size_t) s_current_page * M5_BUTTONS];
-    for (uint8_t button_index = 0; button_index < M5_BUTTONS; ++button_index) {
+    const ui_button_t *page = &s_ui_bundle.buttons[(size_t) s_current_page * BUTTONS];
+    for (uint8_t button_index = 0; button_index < BUTTONS; ++button_index) {
         const uint32_t radial_index = page[button_index].radial_index;
         if (radial_index == UINT32_MAX) continue;
-        const m6_ui_radial_t *radial = &s_ui_bundle.radials[radial_index];
+        const ui_radial_t *radial = &s_ui_bundle.radials[radial_index];
         for (uint8_t item_index = 0; item_index < radial->count; ++item_index) {
             const uint16_t asset = s_ui_bundle.radial_items[radial->first_item + item_index].asset_index;
-            if (asset == UINT16_MAX || m6_radial_prewarm_contains(asset)) continue;
-            if (s_radial_prewarm_count < M6_RADIAL_PREWARM_MAX) {
+            if (asset == UINT16_MAX || radial_prewarm_contains(asset)) continue;
+            if (s_radial_prewarm_count < RADIAL_PREWARM_MAX) {
                 s_radial_prewarm_assets[s_radial_prewarm_count++] = asset;
             }
         }
     }
     if (s_radial_prewarm_count != 0) {
-        s_radial_prewarm_timer = lv_timer_create(m6_radial_prewarm_cb,
-                                                  M6_RADIAL_PREWARM_INITIAL_MS, NULL);
+        s_radial_prewarm_timer = lv_timer_create(radial_prewarm_cb,
+                                                  RADIAL_PREWARM_INITIAL_MS, NULL);
     }
 }
 
-static void m5_touch_activity(void)
+static void touch_activity(void)
 {
     s_last_activity_us = esp_timer_get_time();
 }
 
-static bool m5_range_valid(size_t offset, size_t count, size_t item_size, size_t total)
+static bool range_valid(size_t offset, size_t count, size_t item_size, size_t total)
 {
     return offset <= total && item_size != 0 && count <= (total - offset) / item_size;
 }
 
-static bool m5_index_icon(const uint8_t *payload, const m5_ui_asset_t *asset, m5_icon_index_t *index)
+static bool index_icon(const uint8_t *payload, const ui_asset_t *asset, icon_index_t *index)
 {
     bool in_frame = false;
     uint8_t previous = 0;
@@ -349,8 +350,8 @@ static bool m5_index_icon(const uint8_t *payload, const m5_ui_asset_t *asset, m5
             start = position - 1;
             in_frame = true;
         } else if (in_frame && previous == 0xff && current == 0xd9) {
-            if (index->count >= M5_ICON_MAX_FRAMES) return false;
-            index->frames[index->count++] = (m5_icon_frame_t) {
+            if (index->count >= ICON_MAX_FRAMES) return false;
+            index->frames[index->count++] = (icon_frame_t) {
                 .offset = asset->animation_offset + start,
                 .length = position + 1 - start,
             };
@@ -364,7 +365,7 @@ static bool m5_index_icon(const uint8_t *payload, const m5_ui_asset_t *asset, m5
 /* Reads a bounded M5UI table range from the payload stream into a scratch
  * buffer. `bytes` is already validated against payload_size, so the allocation
  * is bounded by the 16 MiB bundle limit. */
-static uint8_t *m5_read_table(FILE *file, long payload_offset, uint32_t offset, uint32_t bytes)
+static uint8_t *read_table(FILE *file, long payload_offset, uint32_t offset, uint32_t bytes)
 {
     uint8_t *buffer = heap_caps_malloc(bytes ? bytes : 1,
                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -378,10 +379,10 @@ static uint8_t *m5_read_table(FILE *file, long payload_offset, uint32_t offset, 
 }
 
 /* Scans one icon animation stream on the payload for complete SOI/EOI frames.
- * Mirrors m5_index_icon: the stream must close cleanly with more than one and
- * at most M5_ICON_MAX_FRAMES frames, exactly matching the declared count. */
-static bool m5_scan_animation_frames(FILE *file, long payload_offset,
-                                     const m5_ui_asset_t *asset, uint32_t *count)
+ * Mirrors index_icon: the stream must close cleanly with more than one and
+ * at most ICON_MAX_FRAMES frames, exactly matching the declared count. */
+static bool scan_animation_frames(FILE *file, long payload_offset,
+                                     const ui_asset_t *asset, uint32_t *count)
 {
     if (fseek(file, payload_offset + (long) asset->animation_offset, SEEK_SET) != 0) return false;
     bool in_frame = false;
@@ -398,7 +399,7 @@ static bool m5_scan_animation_frames(FILE *file, long payload_offset,
             if (!in_frame && previous == 0xff && current == 0xd8) {
                 in_frame = true;
             } else if (in_frame && previous == 0xff && current == 0xd9) {
-                if (++frames > M5_ICON_MAX_FRAMES) return false;
+                if (++frames > ICON_MAX_FRAMES) return false;
                 in_frame = false;
             }
             previous = current;
@@ -409,64 +410,64 @@ static bool m5_scan_animation_frames(FILE *file, long payload_offset,
     return !in_frame && frames == asset->frame_count && frames > 1;
 }
 
-bool m5_ui_bundle_valid(FILE *file, long payload_offset, uint32_t payload_size)
+bool ui_bundle_valid(FILE *file, long payload_offset, uint32_t payload_size)
 {
     /* The header is copied into an aligned local so no field access depends on
      * the payload's alignment; every later table is likewise memcpy'd into a
      * scratch buffer (F4). */
-    m5_ui_header_t header;
+    ui_header_t header;
     if (payload_size < sizeof(header) ||
         fseek(file, payload_offset, SEEK_SET) != 0 ||
         fread(&header, 1, sizeof(header), file) != sizeof(header)) {
         return false;
     }
-    if (header.magic != M5_UI_MAGIC || header.version != 3 ||
+    if (header.magic != UI_MAGIC || header.version != 3 ||
         header.header_bytes != sizeof(header) || header.profile_count == 0 ||
-        header.page_count == 0 || header.buttons_per_page != M5_BUTTONS ||
+        header.page_count == 0 || header.buttons_per_page != BUTTONS ||
         header.blob_offset > payload_size ||
-        !m5_range_valid(header.profiles_offset, header.profile_count, sizeof(m5_ui_profile_t), payload_size) ||
-        !m5_range_valid(header.pages_offset, (size_t) header.page_count * M5_BUTTONS, sizeof(m5_ui_button_t), payload_size) ||
-        !m5_range_valid(header.assets_offset, header.asset_count, sizeof(m5_ui_asset_t), payload_size) ||
-        !m5_range_valid(header.button_macro_refs_offset, (size_t) header.page_count * M5_BUTTONS, sizeof(uint16_t), payload_size) ||
-        !m5_range_valid(header.macro_descriptors_offset, header.macro_count, sizeof(m5_ui_macro_t), payload_size) ||
-        !m5_range_valid(header.macro_steps_offset, header.step_count, sizeof(m5_ui_step_t), payload_size) ||
-        !m5_range_valid(header.radial_descriptors_offset, header.radial_count, sizeof(m6_ui_radial_t), payload_size) ||
-        !m5_range_valid(header.radial_items_offset, header.radial_item_count, sizeof(m6_ui_radial_item_t), payload_size) ||
+        !range_valid(header.profiles_offset, header.profile_count, sizeof(ui_profile_t), payload_size) ||
+        !range_valid(header.pages_offset, (size_t) header.page_count * BUTTONS, sizeof(ui_button_t), payload_size) ||
+        !range_valid(header.assets_offset, header.asset_count, sizeof(ui_asset_t), payload_size) ||
+        !range_valid(header.button_macro_refs_offset, (size_t) header.page_count * BUTTONS, sizeof(uint16_t), payload_size) ||
+        !range_valid(header.macro_descriptors_offset, header.macro_count, sizeof(ui_macro_t), payload_size) ||
+        !range_valid(header.macro_steps_offset, header.step_count, sizeof(ui_step_t), payload_size) ||
+        !range_valid(header.radial_descriptors_offset, header.radial_count, sizeof(ui_radial_t), payload_size) ||
+        !range_valid(header.radial_items_offset, header.radial_item_count, sizeof(ui_radial_item_t), payload_size) ||
         /* F4: typed-table offsets must satisfy the element alignment so the
          * runtime can form typed pointers without an unaligned load panic. */
-        header.profiles_offset % _Alignof(m5_ui_profile_t) != 0 ||
-        header.pages_offset % _Alignof(m5_ui_button_t) != 0 ||
-        header.assets_offset % _Alignof(m5_ui_asset_t) != 0 ||
+        header.profiles_offset % _Alignof(ui_profile_t) != 0 ||
+        header.pages_offset % _Alignof(ui_button_t) != 0 ||
+        header.assets_offset % _Alignof(ui_asset_t) != 0 ||
         header.button_macro_refs_offset % _Alignof(uint16_t) != 0 ||
-        header.macro_descriptors_offset % _Alignof(m5_ui_macro_t) != 0 ||
-        header.macro_steps_offset % _Alignof(m5_ui_step_t) != 0 ||
-        header.radial_descriptors_offset % _Alignof(m6_ui_radial_t) != 0 ||
-        header.radial_items_offset % _Alignof(m6_ui_radial_item_t) != 0) {
+        header.macro_descriptors_offset % _Alignof(ui_macro_t) != 0 ||
+        header.macro_steps_offset % _Alignof(ui_step_t) != 0 ||
+        header.radial_descriptors_offset % _Alignof(ui_radial_t) != 0 ||
+        header.radial_items_offset % _Alignof(ui_radial_item_t) != 0) {
         return false;
     }
 
-    const size_t pages = (size_t) header.page_count * M5_BUTTONS;
-    uint8_t *profiles = m5_read_table(file, payload_offset, header.profiles_offset,
-                                      (uint32_t) header.profile_count * sizeof(m5_ui_profile_t));
-    uint8_t *buttons = m5_read_table(file, payload_offset, header.pages_offset,
-                                     (uint32_t) pages * sizeof(m5_ui_button_t));
-    uint8_t *macro_refs = m5_read_table(file, payload_offset, header.button_macro_refs_offset,
+    const size_t pages = (size_t) header.page_count * BUTTONS;
+    uint8_t *profiles = read_table(file, payload_offset, header.profiles_offset,
+                                      (uint32_t) header.profile_count * sizeof(ui_profile_t));
+    uint8_t *buttons = read_table(file, payload_offset, header.pages_offset,
+                                     (uint32_t) pages * sizeof(ui_button_t));
+    uint8_t *macro_refs = read_table(file, payload_offset, header.button_macro_refs_offset,
                                         (uint32_t) pages * sizeof(uint16_t));
     uint8_t *assets = header.asset_count == 0 ? NULL :
-        m5_read_table(file, payload_offset, header.assets_offset,
-                      (uint32_t) header.asset_count * sizeof(m5_ui_asset_t));
+        read_table(file, payload_offset, header.assets_offset,
+                      (uint32_t) header.asset_count * sizeof(ui_asset_t));
     uint8_t *macros = header.macro_count == 0 ? NULL :
-        m5_read_table(file, payload_offset, header.macro_descriptors_offset,
-                      (uint32_t) header.macro_count * sizeof(m5_ui_macro_t));
+        read_table(file, payload_offset, header.macro_descriptors_offset,
+                      (uint32_t) header.macro_count * sizeof(ui_macro_t));
     uint8_t *steps = header.step_count == 0 ? NULL :
-        m5_read_table(file, payload_offset, header.macro_steps_offset,
-                      header.step_count * sizeof(m5_ui_step_t));
+        read_table(file, payload_offset, header.macro_steps_offset,
+                      header.step_count * sizeof(ui_step_t));
     uint8_t *radials = header.radial_count == 0 ? NULL :
-        m5_read_table(file, payload_offset, header.radial_descriptors_offset,
-                      (uint32_t) header.radial_count * sizeof(m6_ui_radial_t));
+        read_table(file, payload_offset, header.radial_descriptors_offset,
+                      (uint32_t) header.radial_count * sizeof(ui_radial_t));
     uint8_t *radial_items = header.radial_item_count == 0 ? NULL :
-        m5_read_table(file, payload_offset, header.radial_items_offset,
-                      header.radial_item_count * sizeof(m6_ui_radial_item_t));
+        read_table(file, payload_offset, header.radial_items_offset,
+                      header.radial_item_count * sizeof(ui_radial_item_t));
     if (profiles == NULL || buttons == NULL || macro_refs == NULL ||
         (header.asset_count != 0 && assets == NULL) ||
         (header.macro_count != 0 && macros == NULL) ||
@@ -476,7 +477,7 @@ bool m5_ui_bundle_valid(FILE *file, long payload_offset, uint32_t payload_size)
         goto invalid;
     }
 
-    const m5_ui_profile_t *profile_table = (const m5_ui_profile_t *) profiles;
+    const ui_profile_t *profile_table = (const ui_profile_t *) profiles;
     for (uint16_t i = 0; i < header.profile_count; ++i) {
         if (profile_table[i].page_count == 0 ||
             (uint32_t) profile_table[i].first_page + profile_table[i].page_count > header.page_count) {
@@ -484,31 +485,31 @@ bool m5_ui_bundle_valid(FILE *file, long payload_offset, uint32_t payload_size)
         }
     }
 
-    const m5_ui_asset_t *asset_table = (const m5_ui_asset_t *) assets;
+    const ui_asset_t *asset_table = (const ui_asset_t *) assets;
     for (uint16_t i = 0; i < header.asset_count; ++i) {
-        if (!m5_range_valid(asset_table[i].static_offset, asset_table[i].static_length, 1, payload_size) ||
+        if (!range_valid(asset_table[i].static_offset, asset_table[i].static_length, 1, payload_size) ||
             asset_table[i].static_offset < header.blob_offset) {
             goto invalid;
         }
         if (asset_table[i].type == 2) {
             uint32_t animation_frames = 0;
-            if (asset_table[i].fps != M5_ICON_FPS ||
-                !m5_range_valid(asset_table[i].animation_offset, asset_table[i].animation_length, 1, payload_size) ||
+            if (asset_table[i].fps != ICON_FPS ||
+                !range_valid(asset_table[i].animation_offset, asset_table[i].animation_length, 1, payload_size) ||
                 asset_table[i].animation_offset < header.blob_offset ||
-                !m5_scan_animation_frames(file, payload_offset, &asset_table[i], &animation_frames)) {
+                !scan_animation_frames(file, payload_offset, &asset_table[i], &animation_frames)) {
                 goto invalid;
             }
         }
     }
 
-    const m5_ui_macro_t *macro_table = (const m5_ui_macro_t *) macros;
+    const ui_macro_t *macro_table = (const ui_macro_t *) macros;
     for (uint16_t i = 0; i < header.macro_count; ++i) {
         if ((uint32_t) macro_table[i].first_step + macro_table[i].step_count > header.step_count) {
             goto invalid;
         }
     }
 
-    const m5_ui_button_t *button_table = (const m5_ui_button_t *) buttons;
+    const ui_button_t *button_table = (const ui_button_t *) buttons;
     const uint16_t *ref_table = (const uint16_t *) macro_refs;
     for (size_t i = 0; i < pages; ++i) {
         if (button_table[i].asset_index != UINT16_MAX && button_table[i].asset_index >= header.asset_count) {
@@ -522,17 +523,17 @@ bool m5_ui_bundle_valid(FILE *file, long payload_offset, uint32_t payload_size)
         }
     }
 
-    const m6_ui_radial_t *radial_table = (const m6_ui_radial_t *) radials;
+    const ui_radial_t *radial_table = (const ui_radial_t *) radials;
     for (uint16_t i = 0; i < header.radial_count; ++i) {
         if ((radial_table[i].count != 4 && radial_table[i].count != 6 && radial_table[i].count != 8) ||
             (uint32_t) radial_table[i].first_item + radial_table[i].count > header.radial_item_count) {
             goto invalid;
         }
     }
-    const m6_ui_radial_item_t *item_table = (const m6_ui_radial_item_t *) radial_items;
+    const ui_radial_item_t *item_table = (const ui_radial_item_t *) radial_items;
     for (uint32_t i = 0; i < header.radial_item_count; ++i) {
         const uint16_t action_ref = item_table[i].macro_index;
-        if ((action_ref >= header.macro_count && action_ref < M6_RADIAL_ACTION_PROFILE_NEXT) ||
+        if ((action_ref >= header.macro_count && action_ref < RADIAL_ACTION_PROFILE_NEXT) ||
             (item_table[i].asset_index != UINT16_MAX && item_table[i].asset_index >= header.asset_count)) {
             goto invalid;
         }
@@ -550,7 +551,7 @@ invalid:
     return false;
 }
 
-static bool m5_load_ui_bundle(void)
+static bool load_ui_bundle(void)
 {
     const char *path = m3_active_bundle_path();
     if (path == NULL) return false;
@@ -562,7 +563,7 @@ static bool m5_load_ui_bundle(void)
     }
     uint32_t magic, total_bytes;
     memcpy(&magic, sdb_header, 4); memcpy(&total_bytes, sdb_header + 8, 4);
-    if (magic != M5_SDB3_MAGIC || total_bytes < 16 + sizeof(m5_ui_header_t) || total_bytes > 16U * 1024U * 1024U) {
+    if (magic != SDB3_MAGIC || total_bytes < 16 + sizeof(ui_header_t) || total_bytes > 16U * 1024U * 1024U) {
         fclose(file); return false;
     }
     const size_t payload_size = total_bytes - 16U;
@@ -571,7 +572,7 @@ static bool m5_load_ui_bundle(void)
      * before allocating the payload. The in-memory checks below remain as
      * defense in depth. */
     if (fseek(file, 16, SEEK_SET) != 0 ||
-        !m5_ui_bundle_valid(file, 16, (uint32_t) payload_size) ||
+        !ui_bundle_valid(file, 16, (uint32_t) payload_size) ||
         fseek(file, 16, SEEK_SET) != 0) {
         fclose(file);
         return false;
@@ -581,44 +582,44 @@ static bool m5_load_ui_bundle(void)
         heap_caps_free(payload); fclose(file); return false;
     }
     fclose(file);
-    const m5_ui_header_t *header = (const m5_ui_header_t *) payload;
-    if (header->magic != M5_UI_MAGIC || header->version != 3 || header->header_bytes != sizeof(*header) ||
-        header->profile_count == 0 || header->page_count == 0 || header->buttons_per_page != M5_BUTTONS ||
-        !m5_range_valid(header->profiles_offset, header->profile_count, sizeof(m5_ui_profile_t), payload_size) ||
-        !m5_range_valid(header->pages_offset, (size_t) header->page_count * M5_BUTTONS, sizeof(m5_ui_button_t), payload_size) ||
-        !m5_range_valid(header->assets_offset, header->asset_count, sizeof(m5_ui_asset_t), payload_size) ||
-        !m5_range_valid(header->button_macro_refs_offset, (size_t) header->page_count * M5_BUTTONS, sizeof(uint16_t), payload_size) ||
-        !m5_range_valid(header->macro_descriptors_offset, header->macro_count, sizeof(m5_ui_macro_t), payload_size) ||
-        !m5_range_valid(header->macro_steps_offset, header->step_count, sizeof(m5_ui_step_t), payload_size) ||
-        !m5_range_valid(header->radial_descriptors_offset, header->radial_count, sizeof(m6_ui_radial_t), payload_size) ||
-        !m5_range_valid(header->radial_items_offset, header->radial_item_count, sizeof(m6_ui_radial_item_t), payload_size) ||
+    const ui_header_t *header = (const ui_header_t *) payload;
+    if (header->magic != UI_MAGIC || header->version != 3 || header->header_bytes != sizeof(*header) ||
+        header->profile_count == 0 || header->page_count == 0 || header->buttons_per_page != BUTTONS ||
+        !range_valid(header->profiles_offset, header->profile_count, sizeof(ui_profile_t), payload_size) ||
+        !range_valid(header->pages_offset, (size_t) header->page_count * BUTTONS, sizeof(ui_button_t), payload_size) ||
+        !range_valid(header->assets_offset, header->asset_count, sizeof(ui_asset_t), payload_size) ||
+        !range_valid(header->button_macro_refs_offset, (size_t) header->page_count * BUTTONS, sizeof(uint16_t), payload_size) ||
+        !range_valid(header->macro_descriptors_offset, header->macro_count, sizeof(ui_macro_t), payload_size) ||
+        !range_valid(header->macro_steps_offset, header->step_count, sizeof(ui_step_t), payload_size) ||
+        !range_valid(header->radial_descriptors_offset, header->radial_count, sizeof(ui_radial_t), payload_size) ||
+        !range_valid(header->radial_items_offset, header->radial_item_count, sizeof(ui_radial_item_t), payload_size) ||
         header->blob_offset > payload_size ||
         /* F4: the uint16_t macro-reference table must be 2-byte aligned for
          * the ESP32-P4's aligned-load requirement. */
         (header->button_macro_refs_offset & 1U) != 0) {
         heap_caps_free(payload); return false;
     }
-    const m5_ui_profile_t *profiles = (const m5_ui_profile_t *) (payload + header->profiles_offset);
-    const m5_ui_button_t *buttons = (const m5_ui_button_t *) (payload + header->pages_offset);
-    const m5_ui_asset_t *assets = (const m5_ui_asset_t *) (payload + header->assets_offset);
+    const ui_profile_t *profiles = (const ui_profile_t *) (payload + header->profiles_offset);
+    const ui_button_t *buttons = (const ui_button_t *) (payload + header->pages_offset);
+    const ui_asset_t *assets = (const ui_asset_t *) (payload + header->assets_offset);
     const uint16_t *button_macro_refs = (const uint16_t *) (payload + header->button_macro_refs_offset);
-    const m5_ui_macro_t *macros = (const m5_ui_macro_t *) (payload + header->macro_descriptors_offset);
-    const m5_ui_step_t *steps = (const m5_ui_step_t *) (payload + header->macro_steps_offset);
-    const m6_ui_radial_t *radials = (const m6_ui_radial_t *) (payload + header->radial_descriptors_offset);
-    const m6_ui_radial_item_t *radial_items = (const m6_ui_radial_item_t *) (payload + header->radial_items_offset);
+    const ui_macro_t *macros = (const ui_macro_t *) (payload + header->macro_descriptors_offset);
+    const ui_step_t *steps = (const ui_step_t *) (payload + header->macro_steps_offset);
+    const ui_radial_t *radials = (const ui_radial_t *) (payload + header->radial_descriptors_offset);
+    const ui_radial_item_t *radial_items = (const ui_radial_item_t *) (payload + header->radial_items_offset);
     for (uint16_t i = 0; i < header->profile_count; ++i) {
         if (profiles[i].page_count == 0 || profiles[i].first_page + profiles[i].page_count > header->page_count) {
             heap_caps_free(payload); return false;
         }
     }
     lv_image_dsc_t *images = calloc(header->asset_count, sizeof(lv_image_dsc_t));
-    m5_icon_index_t *indices = calloc(header->asset_count, sizeof(m5_icon_index_t));
+    icon_index_t *indices = calloc(header->asset_count, sizeof(icon_index_t));
     if (header->asset_count != 0 && (images == NULL || indices == NULL)) { free(images); free(indices); heap_caps_free(payload); return false; }
     for (uint16_t i = 0; i < header->asset_count; ++i) {
-        if (!m5_range_valid(assets[i].static_offset, assets[i].static_length, 1, payload_size) || assets[i].static_offset < header->blob_offset ||
-            (assets[i].type == 2 && (assets[i].fps != M5_ICON_FPS ||
-             !m5_range_valid(assets[i].animation_offset, assets[i].animation_length, 1, payload_size) ||
-             assets[i].animation_offset < header->blob_offset || !m5_index_icon(payload, &assets[i], &indices[i])))) {
+        if (!range_valid(assets[i].static_offset, assets[i].static_length, 1, payload_size) || assets[i].static_offset < header->blob_offset ||
+            (assets[i].type == 2 && (assets[i].fps != ICON_FPS ||
+             !range_valid(assets[i].animation_offset, assets[i].animation_length, 1, payload_size) ||
+             assets[i].animation_offset < header->blob_offset || !index_icon(payload, &assets[i], &indices[i])))) {
             free(images); free(indices); heap_caps_free(payload); return false;
         }
         images[i].data = payload + assets[i].static_offset;
@@ -629,7 +630,7 @@ static bool m5_load_ui_bundle(void)
             free(images); free(indices); heap_caps_free(payload); return false;
         }
     }
-    for (size_t i = 0; i < (size_t) header->page_count * M5_BUTTONS; ++i) {
+    for (size_t i = 0; i < (size_t) header->page_count * BUTTONS; ++i) {
         if (buttons[i].asset_index != UINT16_MAX && buttons[i].asset_index >= header->asset_count) {
             free(images); free(indices); heap_caps_free(payload); return false;
         }
@@ -648,12 +649,12 @@ static bool m5_load_ui_bundle(void)
     }
     for (uint32_t i = 0; i < header->radial_item_count; ++i) {
         const uint16_t action_ref = radial_items[i].macro_index;
-        if ((action_ref >= header->macro_count && action_ref < M6_RADIAL_ACTION_PROFILE_NEXT) ||
+        if ((action_ref >= header->macro_count && action_ref < RADIAL_ACTION_PROFILE_NEXT) ||
             (radial_items[i].asset_index != UINT16_MAX && radial_items[i].asset_index >= header->asset_count)) {
             free(images); free(indices); heap_caps_free(payload); return false;
         }
     }
-    s_ui_bundle = (m5_ui_bundle_t) {
+    s_ui_bundle = (ui_bundle_t) {
         .payload = payload, .payload_size = payload_size, .header = header,
         .profiles = profiles, .buttons = buttons, .assets = assets,
         .button_macro_refs = button_macro_refs, .macros = macros, .steps = steps,
@@ -663,7 +664,7 @@ static bool m5_load_ui_bundle(void)
     s_current_profile = 0;
     s_current_page = profiles[0].first_page;
     s_screensaver_idle_seconds = (header->flags >= 5 && header->flags <= 3600)
-        ? header->flags : M5_DEFAULT_SCREENSAVER_IDLE_SECONDS;
+        ? header->flags : DEFAULT_SCREENSAVER_IDLE_SECONDS;
     s_brightness_percent = (header->settings & 0xff) <= 100 ? header->settings & 0xff : 80;
     s_screensaver_enabled = (header->settings & (1U << 9)) != 0;
     s_empty_button_style = (header->settings >> 10) & 0x03;
@@ -673,28 +674,28 @@ static bool m5_load_ui_bundle(void)
     /* F8: remember the orientation so direct panel draws (screensaver) can
      * mirror frames the same way LVGL rotates the UI. */
     s_media_flipped = (header->settings & (1U << 8)) != 0;
-    ESP_LOGI(TAG, "M6_UI bundle=loaded schema=3 profiles=%u pages=%u assets=%u macros=%u radials=%u bytes=%u",
+    ESP_LOGI(TAG, "UI bundle=loaded schema=3 profiles=%u pages=%u assets=%u macros=%u radials=%u bytes=%u",
              header->profile_count, header->page_count, header->asset_count, header->macro_count, header->radial_count, (unsigned) payload_size);
     return true;
 }
 
-static void m5_input_event_cb(lv_event_t *event)
+static void input_event_cb(lv_event_t *event)
 {
     const lv_event_code_t code = lv_event_get_code(event);
     if (code != LV_EVENT_PRESSED && code != LV_EVENT_CLICKED) {
         return;
     }
-    m5_touch_activity();
-    if (s_state == M5_STATE_PLAYING && code == LV_EVENT_PRESSED) {
+    touch_activity();
+    if (s_state == STATE_PLAYING && code == LV_EVENT_PRESSED) {
         /* Never clean the screen from the callback of the object being
          * deleted. The media task performs the transition after LVGL has
          * returned from input dispatch; this also consumes the wake press. */
-        s_state = M5_STATE_WAKING;
+        s_state = STATE_WAKING;
         s_wake_requested = true;
     }
 }
 
-static bool m5_flush_keyboard_locked(void)
+static bool flush_keyboard_locked(void)
 {
     if (!s_keyboard_report_pending) return true;
     uint8_t report[6] = {0};
@@ -710,7 +711,7 @@ static bool m5_flush_keyboard_locked(void)
         /* Boot-protocol reports cannot represent more than six ordinary keys.
          * Cancel every slot and send a clean release instead of hiding keys
          * that could unexpectedly appear when another key is released. */
-        ESP_LOGE(TAG, "M5_HID result=too_many_keys action=release_all count=%u", count);
+        ESP_LOGE(TAG, "HID result=too_many_keys action=release_all count=%u", count);
         memset(s_key_refs, 0, sizeof(s_key_refs));
         memset(s_modifier_refs, 0, sizeof(s_modifier_refs));
         memset(s_macro_slots, 0, sizeof(s_macro_slots));
@@ -718,23 +719,23 @@ static bool m5_flush_keyboard_locked(void)
         modifiers = 0;
     }
     if (!tud_hid_ready() ||
-        !tud_hid_keyboard_report(M5_HID_KEYBOARD_REPORT_ID, modifiers, report)) {
+        !tud_hid_keyboard_report(HID_KEYBOARD_REPORT_ID, modifiers, report)) {
         return false;
     }
     s_keyboard_report_pending = false;
     return true;
 }
 
-static void m5_emit_keyboard_locked(void)
+static void emit_keyboard_locked(void)
 {
     /* A release report is safety-critical. If the interrupt endpoint is busy,
      * retain the newest complete keyboard state and let the macro task retry it
      * instead of silently leaving a key or modifier held on the host. */
     s_keyboard_report_pending = true;
-    (void) m5_flush_keyboard_locked();
+    (void) flush_keyboard_locked();
 }
 
-static bool m5_flush_consumer_locked(void)
+static bool flush_consumer_locked(void)
 {
     uint16_t report;
     if (s_consumer_release_pending) {
@@ -745,32 +746,32 @@ static bool m5_flush_consumer_locked(void)
         return true;
     }
     if (!tud_hid_ready() ||
-        !tud_hid_report(M5_HID_CONSUMER_REPORT_ID, &report, sizeof(report))) {
+        !tud_hid_report(HID_CONSUMER_REPORT_ID, &report, sizeof(report))) {
         return false;
     }
     if (s_consumer_release_pending) {
         s_consumer_release_pending = false;
     } else {
-        s_consumer_queue_head = (uint8_t) ((s_consumer_queue_head + 1) % M5_CONSUMER_QUEUE_DEPTH);
+        s_consumer_queue_head = (uint8_t) ((s_consumer_queue_head + 1) % CONSUMER_QUEUE_DEPTH);
         --s_consumer_queue_count;
         s_consumer_release_pending = true;
     }
     return !s_consumer_release_pending && s_consumer_queue_count == 0;
 }
 
-static void m5_queue_consumer_locked(uint16_t usage)
+static void queue_consumer_locked(uint16_t usage)
 {
-    if (s_consumer_queue_count == M5_CONSUMER_QUEUE_DEPTH) {
-        ESP_LOGE(TAG, "M5_HID result=consumer_queue_full usage=%u", usage);
+    if (s_consumer_queue_count == CONSUMER_QUEUE_DEPTH) {
+        ESP_LOGE(TAG, "HID result=consumer_queue_full usage=%u", usage);
         return;
     }
-    const uint8_t tail = (uint8_t) ((s_consumer_queue_head + s_consumer_queue_count) % M5_CONSUMER_QUEUE_DEPTH);
+    const uint8_t tail = (uint8_t) ((s_consumer_queue_head + s_consumer_queue_count) % CONSUMER_QUEUE_DEPTH);
     s_consumer_queue[tail] = usage;
     ++s_consumer_queue_count;
-    (void) m5_flush_consumer_locked();
+    (void) flush_consumer_locked();
 }
 
-static void m5_release_tap_locked(m5_macro_slot_t *slot)
+static void release_tap_locked(macro_slot_t *slot)
 {
     if (!slot->tap_active) return;
     if (s_key_refs[slot->tap_usage]) --s_key_refs[slot->tap_usage];
@@ -780,9 +781,9 @@ static void m5_release_tap_locked(m5_macro_slot_t *slot)
     slot->tap_active = false;
 }
 
-static void m5_release_slot_locked(m5_macro_slot_t *slot)
+static void release_slot_locked(macro_slot_t *slot)
 {
-    m5_release_tap_locked(slot);
+    release_tap_locked(slot);
     for (uint16_t usage = 1; usage < 256; ++usage) {
         if (slot->held_keys[usage] && s_key_refs[usage]) --s_key_refs[usage];
     }
@@ -792,7 +793,7 @@ static void m5_release_slot_locked(m5_macro_slot_t *slot)
     memset(slot, 0, sizeof(*slot));
 }
 
-static bool m5_set_slot_key_locked(m5_macro_slot_t *slot, uint16_t usage, bool down)
+static bool set_slot_key_locked(macro_slot_t *slot, uint16_t usage, bool down)
 {
     if (usage >= 0xe0 && usage <= 0xe7) {
         const uint8_t bit = (uint8_t) (usage - 0xe0);
@@ -822,69 +823,69 @@ static bool m5_set_slot_key_locked(m5_macro_slot_t *slot, uint16_t usage, bool d
     return false;
 }
 
-void m5_hid_release_all(const char *reason)
+void hid_release_all(const char *reason)
 {
     if (s_macro_mutex == NULL || xSemaphoreTake(s_macro_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
     memset(s_key_refs, 0, sizeof(s_key_refs));
     memset(s_modifier_refs, 0, sizeof(s_modifier_refs));
     memset(s_macro_slots, 0, sizeof(s_macro_slots));
-    m5_emit_keyboard_locked();
+    emit_keyboard_locked();
     s_consumer_queue_head = 0;
     s_consumer_queue_count = 0;
     s_consumer_release_pending = true;
-    (void) m5_flush_consumer_locked();
+    (void) flush_consumer_locked();
     xSemaphoreGive(s_macro_mutex);
     if (s_macro_task_handle != NULL) xTaskNotifyGive(s_macro_task_handle);
-    ESP_LOGI(TAG, "M5_HID release_all reason=%s", reason ? reason : "unspecified");
+    ESP_LOGI(TAG, "HID release_all reason=%s", reason ? reason : "unspecified");
 }
 
-static void m5_start_macro(uint16_t macro_index)
+static void start_macro(uint16_t macro_index)
 {
     if (macro_index >= s_ui_bundle.header->macro_count || xSemaphoreTake(s_macro_mutex, pdMS_TO_TICKS(20)) != pdTRUE) return;
-    m5_macro_slot_t *slot = NULL;
-    for (size_t i = 0; i < M5_MACRO_SLOTS; ++i) {
+    macro_slot_t *slot = NULL;
+    for (size_t i = 0; i < MACRO_SLOTS; ++i) {
         if (s_macro_slots[i].active && s_macro_slots[i].macro_index == macro_index) {
-            m5_release_slot_locked(&s_macro_slots[i]);
-            m5_emit_keyboard_locked();
+            release_slot_locked(&s_macro_slots[i]);
+            emit_keyboard_locked();
             slot = &s_macro_slots[i];
             break;
         }
         if (!slot && !s_macro_slots[i].active) slot = &s_macro_slots[i];
     }
-    if (slot) *slot = (m5_macro_slot_t) {.active = true, .macro_index = macro_index, .due_us = esp_timer_get_time()};
+    if (slot) *slot = (macro_slot_t) {.active = true, .macro_index = macro_index, .due_us = esp_timer_get_time()};
     xSemaphoreGive(s_macro_mutex);
     if (slot && s_macro_task_handle != NULL) xTaskNotifyGive(s_macro_task_handle);
-    ESP_LOGI(TAG, "M5_MACRO start=%u result=%s", macro_index, slot ? "queued" : "slots_full");
+    ESP_LOGI(TAG, "MACRO start=%u result=%s", macro_index, slot ? "queued" : "slots_full");
 }
 
-static void m5_macro_task(void *argument)
+static void macro_task(void *argument)
 {
     (void) argument;
     for (;;) {
         TickType_t wait_ticks = portMAX_DELAY;
         if (xSemaphoreTake(s_macro_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             const int64_t now = esp_timer_get_time();
-            (void) m5_flush_keyboard_locked();
-            (void) m5_flush_consumer_locked();
-            for (size_t i = 0; s_ui_bundle.ready && i < M5_MACRO_SLOTS; ++i) {
-                m5_macro_slot_t *slot = &s_macro_slots[i];
+            (void) flush_keyboard_locked();
+            (void) flush_consumer_locked();
+            for (size_t i = 0; s_ui_bundle.ready && i < MACRO_SLOTS; ++i) {
+                macro_slot_t *slot = &s_macro_slots[i];
                 if (!slot->active || now < slot->due_us) continue;
                 if (slot->tap_active) {
-                    m5_release_tap_locked(slot);
-                    m5_emit_keyboard_locked();
+                    release_tap_locked(slot);
+                    emit_keyboard_locked();
                     continue;
                 }
-                const m5_ui_macro_t *macro = &s_ui_bundle.macros[slot->macro_index];
+                const ui_macro_t *macro = &s_ui_bundle.macros[slot->macro_index];
                 if (slot->next_step >= macro->step_count) {
-                    m5_release_slot_locked(slot);
-                    m5_emit_keyboard_locked();
+                    release_slot_locked(slot);
+                    emit_keyboard_locked();
                     continue;
                 }
-                const m5_ui_step_t *step = &s_ui_bundle.steps[macro->first_step + slot->next_step++];
+                const ui_step_t *step = &s_ui_bundle.steps[macro->first_step + slot->next_step++];
                 if (step->kind == 3) {
                     slot->due_us = now + (int64_t) step->duration_ms * 1000;
                 } else if (step->kind == 4 && step->usage_page == 0x0c) {
-                    m5_queue_consumer_locked(step->usage);
+                    queue_consumer_locked(step->usage);
                 } else if (step->kind == 5 && step->usage < 0xe0 && step->usage < 256) {
                     if (s_key_refs[step->usage] != UINT8_MAX) ++s_key_refs[step->usage];
                     for (uint8_t bit = 0; bit < 4; ++bit) if ((step->usage_page & (1U << bit)) && s_modifier_refs[bit] != UINT8_MAX) ++s_modifier_refs[bit];
@@ -892,16 +893,16 @@ static void m5_macro_task(void *argument)
                     slot->tap_usage = (uint8_t) step->usage;
                     slot->tap_modifiers = step->usage_page & 0x0f;
                     slot->due_us = now + (int64_t) (step->duration_ms ? step->duration_ms : 25) * 1000;
-                    m5_emit_keyboard_locked();
+                    emit_keyboard_locked();
                 } else if ((step->kind == 1 || step->kind == 2) && step->usage_page == 0x07 && step->usage < 256) {
-                    if (m5_set_slot_key_locked(slot, step->usage, step->kind == 1)) {
-                        m5_emit_keyboard_locked();
+                    if (set_slot_key_locked(slot, step->usage, step->kind == 1)) {
+                        emit_keyboard_locked();
                     }
                 }
             }
             const int64_t after = esp_timer_get_time();
-            for (size_t i = 0; i < M5_MACRO_SLOTS; ++i) {
-                const m5_macro_slot_t *slot = &s_macro_slots[i];
+            for (size_t i = 0; i < MACRO_SLOTS; ++i) {
+                const macro_slot_t *slot = &s_macro_slots[i];
                 if (!slot->active) continue;
                 const int64_t remaining_us = slot->due_us - after;
                 const TickType_t candidate = remaining_us <= 0 ? 1 : pdMS_TO_TICKS((remaining_us + 999) / 1000);
@@ -917,32 +918,32 @@ static void m5_macro_task(void *argument)
     }
 }
 
-static m6_point_t m6_touch_point(void)
+static point_t touch_point(void)
 {
     lv_point_t point = {0};
     lv_indev_t *indev = lv_indev_active();
     if (indev != NULL) lv_indev_get_point(indev, &point);
-    return (m6_point_t) {(int16_t) point.x, (int16_t) point.y};
+    return (point_t) {(int16_t) point.x, (int16_t) point.y};
 }
 
-static bool m6_radial_drag_exceeded(m6_point_t point)
+static bool radial_drag_exceeded(point_t point)
 {
     const int16_t dx = abs(point.x - s_radial_press_point.x);
     const int16_t dy = abs(point.y - s_radial_press_point.y);
-    return (dx > dy ? dx : dy) >= M6_RADIAL_OPEN_DRAG_PX;
+    return (dx > dy ? dx : dy) >= RADIAL_OPEN_DRAG_PX;
 }
 
-static m6_point_t m6_radial_grid_offset(uint8_t count, uint8_t index, int16_t step)
+static point_t radial_grid_offset(uint8_t count, uint8_t index, int16_t step)
 {
     static const int8_t offsets4[4][2] = {{0,-2},{2,0},{0,2},{-2,0}};
     static const int8_t offsets6[6][2] = {{0,-2},{2,-1},{2,1},{0,2},{-2,1},{-2,-1}};
     static const int8_t offsets8[8][2] = {{0,-2},{2,-2},{2,0},{2,2},{0,2},{-2,2},{-2,0},{-2,-2}};
     const int8_t (*offsets)[2] = count == 4 ? offsets4 : count == 6 ? offsets6 : offsets8;
-    return (m6_point_t) {(int16_t) (offsets[index][0] * step / 2),
+    return (point_t) {(int16_t) (offsets[index][0] * step / 2),
                          (int16_t) (offsets[index][1] * step / 2)};
 }
 
-static const char *m6_radial_direction_label(uint8_t count, uint8_t index)
+static const char *radial_direction_label(uint8_t count, uint8_t index)
 {
     static const char *const labels4[4] = {"N", "E", "S", "W"};
     static const char *const labels6[6] = {"N", "NE", "SE", "S", "SW", "NW"};
@@ -950,11 +951,11 @@ static const char *m6_radial_direction_label(uint8_t count, uint8_t index)
     return (count == 4 ? labels4 : count == 6 ? labels6 : labels8)[index];
 }
 
-static void m5_run_ui_action(uint8_t action, uint16_t macro_index)
+static void run_ui_action(uint8_t action, uint16_t macro_index)
 {
-    const m5_ui_profile_t *profile = &s_ui_bundle.profiles[s_current_profile];
+    const ui_profile_t *profile = &s_ui_bundle.profiles[s_current_profile];
     if (action == 1) {
-        if (macro_index != UINT16_MAX) m5_start_macro(macro_index);
+        if (macro_index != UINT16_MAX) start_macro(macro_index);
     } else if (action == 2) {
         const uint16_t last = profile->first_page + profile->page_count - 1;
         s_current_page = s_current_page >= last ? profile->first_page : s_current_page + 1;
@@ -970,22 +971,22 @@ static void m5_run_ui_action(uint8_t action, uint16_t macro_index)
     }
 }
 
-static void m6_run_radial_action(const m6_ui_radial_item_t *item)
+static void run_radial_action(const ui_radial_item_t *item)
 {
     const uint16_t action_ref = item->macro_index;
-    if (action_ref < s_ui_bundle.header->macro_count) m5_run_ui_action(1, action_ref);
-    else if (action_ref == M6_RADIAL_ACTION_PAGE_NEXT) m5_run_ui_action(2, UINT16_MAX);
-    else if (action_ref == M6_RADIAL_ACTION_PAGE_PREVIOUS) m5_run_ui_action(3, UINT16_MAX);
-    else if (action_ref == M6_RADIAL_ACTION_PROFILE_NEXT) m5_run_ui_action(4, UINT16_MAX);
+    if (action_ref < s_ui_bundle.header->macro_count) run_ui_action(1, action_ref);
+    else if (action_ref == RADIAL_ACTION_PAGE_NEXT) run_ui_action(2, UINT16_MAX);
+    else if (action_ref == RADIAL_ACTION_PAGE_PREVIOUS) run_ui_action(3, UINT16_MAX);
+    else if (action_ref == RADIAL_ACTION_PROFILE_NEXT) run_ui_action(4, UINT16_MAX);
 }
 
-static void m6_close_radial(bool run_selection)
+static void close_radial(bool run_selection)
 {
     if (s_active_radial != UINT32_MAX && run_selection && s_radial_selection >= 0) {
-        const m6_ui_radial_t *radial = &s_ui_bundle.radials[s_active_radial];
-        const m6_ui_radial_item_t *item = &s_ui_bundle.radial_items[radial->first_item + s_radial_selection];
-        m6_run_radial_action(item);
-        ESP_LOGI(TAG, "M6_RADIAL selection=%d action_ref=%u committed=1", s_radial_selection, item->macro_index);
+        const ui_radial_t *radial = &s_ui_bundle.radials[s_active_radial];
+        const ui_radial_item_t *item = &s_ui_bundle.radial_items[radial->first_item + s_radial_selection];
+        run_radial_action(item);
+        ESP_LOGI(TAG, "RADIAL selection=%d action_ref=%u committed=1", s_radial_selection, item->macro_index);
     }
     if (s_radial_overlay != NULL) lv_obj_delete(s_radial_overlay);
     s_radial_overlay = NULL;
@@ -1001,14 +1002,14 @@ static void m6_close_radial(bool run_selection)
     if (s_radial_prewarm_timer != NULL) lv_timer_resume(s_radial_prewarm_timer);
 }
 
-static void m6_open_radial(uint32_t radial_index, uint8_t button_index, m6_point_t origin)
+static void open_radial(uint32_t radial_index, uint8_t button_index, point_t origin)
 {
-    const m6_ui_radial_t *radial = &s_ui_bundle.radials[radial_index];
+    const ui_radial_t *radial = &s_ui_bundle.radials[radial_index];
     const uint16_t width = lv_display_get_horizontal_resolution(s_display);
     const uint16_t height = lv_display_get_vertical_resolution(s_display);
-    const int16_t tile_size = (width - (2 * M5_MARGIN_X_PX) - ((M5_COLUMNS - 1) * M5_GAP_PX)) / M5_COLUMNS;
-    const int16_t step = tile_size + M5_GAP_PX;
-    s_radial_geometry = m6_radial_place(origin, width, height, radial->count);
+    const int16_t tile_size = (width - (2 * MARGIN_X_PX) - ((COLUMNS - 1) * GAP_PX)) / COLUMNS;
+    const int16_t step = tile_size + GAP_PX;
+    s_radial_geometry = radial_place(origin, width, height, radial->count);
     /* Keep both gesture selection and the visual menu anchored to the key
      * centre. Edge items may be clipped by the display. */
     s_radial_geometry.center = origin;
@@ -1024,7 +1025,7 @@ static void m6_open_radial(uint32_t radial_index, uint8_t button_index, m6_point
     lv_obj_remove_flag(s_radial_overlay, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_move_foreground(s_radial_overlay);
     for (uint8_t i = 0; i < radial->count; ++i) {
-        const m6_point_t offset = m6_radial_grid_offset(radial->count, i, step);
+        const point_t offset = radial_grid_offset(radial->count, i, step);
         lv_obj_t *node = lv_obj_create(s_radial_overlay);
         s_radial_nodes[i] = node;
         lv_obj_remove_style_all(node);
@@ -1037,7 +1038,7 @@ static void m6_open_radial(uint32_t radial_index, uint8_t button_index, m6_point
         lv_obj_set_style_border_width(node, 0, 0);
         lv_obj_remove_flag(node, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_t *label = lv_label_create(node);
-        lv_label_set_text(label, m6_radial_direction_label(radial->count, i));
+        lv_label_set_text(label, radial_direction_label(radial->count, i));
         lv_obj_set_style_text_color(label, lv_color_hex(0xD0D0D0), 0);
         lv_obj_center(label);
         const uint16_t asset = s_ui_bundle.radial_items[radial->first_item + i].asset_index;
@@ -1070,7 +1071,7 @@ static void m6_open_radial(uint32_t radial_index, uint8_t button_index, m6_point
     lv_obj_set_style_bg_opa(center, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(center, 0, 0);
     lv_obj_remove_flag(center, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    const m5_ui_button_t *source = &s_ui_bundle.buttons[(size_t) s_current_page * M5_BUTTONS + button_index];
+    const ui_button_t *source = &s_ui_bundle.buttons[(size_t) s_current_page * BUTTONS + button_index];
     if (source->asset_index != UINT16_MAX) {
         lv_obj_t *image = lv_image_create(center);
         lv_image_set_src(image, &s_ui_bundle.images[source->asset_index]);
@@ -1080,10 +1081,10 @@ static void m6_open_radial(uint32_t radial_index, uint8_t button_index, m6_point
     }
 }
 
-static void m6_update_radial(m6_point_t point)
+static void update_radial(point_t point)
 {
     if (s_active_radial == UINT32_MAX) return;
-    const m6_radial_selection_t next = m6_radial_select(&s_radial_geometry, point, s_radial_selection);
+    const radial_selection_t next = radial_select(&s_radial_geometry, point, s_radial_selection);
     if (next.index == s_radial_selection) return;
     if (s_radial_selection >= 0 && s_radial_highlights[s_radial_selection] != NULL)
         lv_obj_add_flag(s_radial_highlights[s_radial_selection], LV_OBJ_FLAG_HIDDEN);
@@ -1092,14 +1093,14 @@ static void m6_update_radial(m6_point_t point)
         lv_obj_remove_flag(s_radial_highlights[s_radial_selection], LV_OBJ_FLAG_HIDDEN);
 }
 
-static void m5_tile_event_cb(lv_event_t *event)
+static void tile_event_cb(lv_event_t *event)
 {
-    m5_input_event_cb(event);
-    if (s_state != M5_STATE_ACTIVE || !s_ui_bundle.ready) return;
+    input_event_cb(event);
+    if (s_state != STATE_ACTIVE || !s_ui_bundle.ready) return;
     const lv_event_code_t code = lv_event_get_code(event);
     const uint32_t button_index = (uint32_t) (uintptr_t) lv_event_get_user_data(event);
-    if (button_index >= M5_BUTTONS) return;
-    const m5_ui_button_t *button = &s_ui_bundle.buttons[(size_t) s_current_page * M5_BUTTONS + button_index];
+    if (button_index >= BUTTONS) return;
+    const ui_button_t *button = &s_ui_bundle.buttons[(size_t) s_current_page * BUTTONS + button_index];
     lv_obj_t *tile = lv_event_get_target_obj(event);
     if ((code == LV_EVENT_PRESSED || code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) &&
         lv_obj_get_child_count(tile) != 0) {
@@ -1116,32 +1117,32 @@ static void m5_tile_event_cb(lv_event_t *event)
         if (code == LV_EVENT_PRESSED) {
             lv_area_t area;
             lv_obj_get_coords(tile, &area);
-            s_pending_radial_origin = (m6_point_t) {
+            s_pending_radial_origin = (point_t) {
                 (int16_t) ((area.x1 + area.x2) / 2),
                 (int16_t) ((area.y1 + area.y2) / 2),
             };
-            s_radial_press_point = m6_touch_point();
+            s_radial_press_point = touch_point();
             s_pending_radial = button->radial_index;
             s_pending_radial_button = button_index;
             s_radial_suppress_click = false;
         } else if (code == LV_EVENT_PRESSING) {
-            const m6_point_t point = m6_touch_point();
+            const point_t point = touch_point();
             if (s_active_radial != UINT32_MAX) {
-                m6_update_radial(point);
-            } else if (s_pending_radial == button->radial_index && m6_radial_drag_exceeded(point)) {
+                update_radial(point);
+            } else if (s_pending_radial == button->radial_index && radial_drag_exceeded(point)) {
                 s_radial_suppress_click = true;
-                m6_open_radial(s_pending_radial, s_pending_radial_button, s_pending_radial_origin);
-                m6_update_radial(point);
+                open_radial(s_pending_radial, s_pending_radial_button, s_pending_radial_origin);
+                update_radial(point);
             }
         } else if (code == LV_EVENT_RELEASED) {
             if (s_active_radial != UINT32_MAX) {
-                const m6_radial_selection_t final = m6_radial_select(&s_radial_geometry, m6_touch_point(), s_radial_selection);
+                const radial_selection_t final = radial_select(&s_radial_geometry, touch_point(), s_radial_selection);
                 s_radial_selection = final.index;
-                m6_close_radial(final.committed);
+                close_radial(final.committed);
             }
             s_pending_radial = UINT32_MAX;
         } else if (code == LV_EVENT_PRESS_LOST) {
-            if (s_active_radial != UINT32_MAX) m6_close_radial(false);
+            if (s_active_radial != UINT32_MAX) close_radial(false);
             s_pending_radial = UINT32_MAX;
             s_radial_suppress_click = false;
         }
@@ -1151,14 +1152,14 @@ static void m5_tile_event_cb(lv_event_t *event)
         s_radial_suppress_click = false;
         return;
     }
-    const uint16_t macro = s_ui_bundle.button_macro_refs[(size_t) s_current_page * M5_BUTTONS + button_index];
-    m5_run_ui_action(button->action, macro);
+    const uint16_t macro = s_ui_bundle.button_macro_refs[(size_t) s_current_page * BUTTONS + button_index];
+    run_ui_action(button->action, macro);
 }
 
-static bool m5_enter_saver_ui(void)
+static bool enter_saver_ui(void)
 {
     lv_obj_t *screen = lv_screen_active();
-    m6_cancel_radial_prewarm();
+    cancel_radial_prewarm();
     lv_obj_clean(screen);
     lv_image_cache_drop(NULL);
     if (s_icon_decoder != NULL) {
@@ -1168,9 +1169,9 @@ static bool m5_enter_saver_ui(void)
     if (s_media.decoder == NULL && jpeg_new_decoder_engine(&(jpeg_decode_engine_cfg_t) {
             .intr_priority = 1, .timeout_ms = 100,
         }, &s_media.decoder) != ESP_OK) {
-        ESP_LOGE(TAG, "M5_MEDIA result=decoder_handoff_failed owner=screensaver");
+        ESP_LOGE(TAG, "MEDIA result=decoder_handoff_failed owner=screensaver");
         ESP_ERROR_CHECK(esp_lv_decoder_init(&s_icon_decoder));
-        m5_render_active_ui();
+        render_active_ui();
         return false;
     }
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), 0);
@@ -1182,18 +1183,18 @@ static bool m5_enter_saver_ui(void)
     lv_obj_set_pos(s_saver_input, 0, 0);
     lv_obj_set_style_bg_opa(s_saver_input, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_saver_input, 0, 0);
-    lv_obj_add_event_cb(s_saver_input, m5_input_event_cb, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(s_saver_input, input_event_cb, LV_EVENT_ALL, NULL);
     lv_obj_add_flag(s_saver_input, LV_OBJ_FLAG_CLICKABLE);
-    s_state = M5_STATE_PLAYING;
-    ESP_LOGI(TAG, "M5_STATE from=active to=playing frames=%u source=%s",
+    s_state = STATE_PLAYING;
+    ESP_LOGI(TAG, "STATE from=active to=playing frames=%u source=%s",
              s_media.frame_count, s_media.preloaded ? "psram" : "sd");
     return true;
 }
 
-static void m5_render_active_ui(void)
+static void render_active_ui(void)
 {
     if (s_display == NULL) return;
-    m6_cancel_radial_prewarm();
+    cancel_radial_prewarm();
     s_radial_overlay = NULL;
     memset(s_radial_nodes, 0, sizeof(s_radial_nodes));
     memset(s_radial_highlights, 0, sizeof(s_radial_highlights));
@@ -1209,17 +1210,17 @@ static void m5_render_active_ui(void)
 
     const int width = lv_display_get_horizontal_resolution(s_display);
     const int height = lv_display_get_vertical_resolution(s_display);
-    const int tile_size = (width - (2 * M5_MARGIN_X_PX) - ((M5_COLUMNS - 1) * M5_GAP_PX)) / M5_COLUMNS;
-    const int grid_height = (M5_ROWS * tile_size) + ((M5_ROWS - 1) * M5_GAP_PX);
+    const int tile_size = (width - (2 * MARGIN_X_PX) - ((COLUMNS - 1) * GAP_PX)) / COLUMNS;
+    const int grid_height = (ROWS * tile_size) + ((ROWS - 1) * GAP_PX);
     const int top = (height - grid_height) / 2;
 
-    for (uint8_t row = 0; row < M5_ROWS; ++row) {
-        for (uint8_t column = 0; column < M5_COLUMNS; ++column) {
-            const uint8_t index = row * M5_COLUMNS + column;
+    for (uint8_t row = 0; row < ROWS; ++row) {
+        for (uint8_t column = 0; column < COLUMNS; ++column) {
+            const uint8_t index = row * COLUMNS + column;
             lv_obj_t *tile = lv_button_create(screen);
             lv_obj_set_size(tile, tile_size, tile_size);
-            lv_obj_set_pos(tile, M5_MARGIN_X_PX + column * (tile_size + M5_GAP_PX),
-                           top + row * (tile_size + M5_GAP_PX));
+            lv_obj_set_pos(tile, MARGIN_X_PX + column * (tile_size + GAP_PX),
+                           top + row * (tile_size + GAP_PX));
             lv_obj_set_style_radius(tile, 12, 0);
             lv_obj_set_style_border_width(tile, 0, 0);
             lv_obj_set_style_shadow_width(tile, 0, 0);
@@ -1230,8 +1231,8 @@ static void m5_render_active_ui(void)
             lv_obj_set_style_recolor_opa(tile, LV_OPA_TRANSP, LV_STATE_PRESSED);
             lv_obj_set_style_transform_width(tile, 0, LV_STATE_PRESSED);
             lv_obj_set_style_transform_height(tile, 0, LV_STATE_PRESSED);
-            const m5_ui_button_t *definition = s_ui_bundle.ready
-                ? &s_ui_bundle.buttons[(size_t) s_current_page * M5_BUTTONS + index] : NULL;
+            const ui_button_t *definition = s_ui_bundle.ready
+                ? &s_ui_bundle.buttons[(size_t) s_current_page * BUTTONS + index] : NULL;
             const bool has_icon = definition && definition->asset_index != UINT16_MAX;
             if (!has_icon && s_ui_bundle.ready && s_empty_button_style == 2) {
                 lv_obj_set_style_bg_opa(tile, LV_OPA_TRANSP, 0);
@@ -1239,13 +1240,13 @@ static void m5_render_active_ui(void)
                 lv_obj_set_style_bg_color(tile, lv_color_hex(0x202126), 0);
                 lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
             }
-            lv_obj_add_event_cb(tile, m5_tile_event_cb, LV_EVENT_ALL, (void *) (uintptr_t) index);
+            lv_obj_add_event_cb(tile, tile_event_cb, LV_EVENT_ALL, (void *) (uintptr_t) index);
             lv_obj_t *icon;
             if (definition && definition->asset_index != UINT16_MAX) {
                 const uint16_t asset_index = definition->asset_index;
                 bool animation_has_baked_corners = false;
                 if (s_ui_bundle.assets[asset_index].type == 2) {
-                    const m5_icon_frame_t *first = &s_ui_bundle.animation_indices[asset_index].frames[0];
+                    const icon_frame_t *first = &s_ui_bundle.animation_indices[asset_index].frames[0];
                     jpeg_decode_picture_info_t info;
                     animation_has_baked_corners =
                         jpeg_decoder_get_info(s_ui_bundle.payload + first->offset, first->length, &info) == ESP_OK &&
@@ -1276,9 +1277,9 @@ static void m5_render_active_ui(void)
                 } else {
                     lv_obj_center(icon);
                 }
-                if (s_ui_bundle.assets[asset_index].type == 2 && s_visible_animation_count < M5_BUTTONS) {
-                    m5_visible_animation_t *visible = &s_visible_animations[s_visible_animation_count++];
-                    *visible = (m5_visible_animation_t) {.image = icon, .asset_index = asset_index};
+                if (s_ui_bundle.assets[asset_index].type == 2 && s_visible_animation_count < BUTTONS) {
+                    visible_animation_t *visible = &s_visible_animations[s_visible_animation_count++];
+                    *visible = (visible_animation_t) {.image = icon, .asset_index = asset_index};
                     visible->descriptor.data = s_ui_bundle.payload + s_ui_bundle.animation_indices[asset_index].frames[0].offset;
                     visible->descriptor.data_size = s_ui_bundle.animation_indices[asset_index].frames[0].length;
                     lv_image_set_src(icon, &visible->descriptor);
@@ -1306,29 +1307,29 @@ static void m5_render_active_ui(void)
             lv_obj_add_flag(press_overlay, LV_OBJ_FLAG_HIDDEN);
         }
     }
-    ESP_LOGI(TAG, "M5_UI grid=8x4 square_px=%d black_bars_px=%d,%d", tile_size, top,
+    ESP_LOGI(TAG, "UI grid=8x4 square_px=%d black_bars_px=%d,%d", tile_size, top,
              height - grid_height - top);
-    m6_schedule_radial_prewarm();
+    schedule_radial_prewarm();
 }
 
-static uint8_t m5_animation_target_fps(void)
+static uint8_t animation_target_fps(void)
 {
-    if (s_visible_animation_count <= 8) return M5_ICON_FPS;
-    if (s_visible_animation_count <= 16) return M5_ICON_MEDIUM_LOAD_FPS;
-    return M5_ICON_HEAVY_LOAD_FPS;
+    if (s_visible_animation_count <= 8) return ICON_FPS;
+    if (s_visible_animation_count <= 16) return ICON_MEDIUM_LOAD_FPS;
+    return ICON_HEAVY_LOAD_FPS;
 }
 
-static uint8_t m5_advance_animation_batch(uint8_t target_fps)
+static uint8_t advance_animation_batch(uint8_t target_fps)
 {
-    const uint8_t count = s_visible_animation_count < M5_ICON_UPDATE_BATCH
-        ? s_visible_animation_count : M5_ICON_UPDATE_BATCH;
+    const uint8_t count = s_visible_animation_count < ICON_UPDATE_BATCH
+        ? s_visible_animation_count : ICON_UPDATE_BATCH;
     for (uint8_t i = 0; i < count; ++i) {
-        m5_visible_animation_t *visible = &s_visible_animations[s_visible_animation_cursor];
-        const m5_icon_index_t *index = &s_ui_bundle.animation_indices[visible->asset_index];
+        visible_animation_t *visible = &s_visible_animations[s_visible_animation_cursor];
+        const icon_index_t *index = &s_ui_bundle.animation_indices[visible->asset_index];
         /* The source stream remains 15 FPS. At reduced display rates, skip
          * source frames with a phase accumulator so motion keeps its original
          * speed instead of playing in slow motion. */
-        visible->frame_phase += M5_ICON_FPS;
+        visible->frame_phase += ICON_FPS;
         const uint8_t source_frames = visible->frame_phase / target_fps;
         visible->frame_phase %= target_fps;
         visible->frame = (visible->frame + source_frames) % index->count;
@@ -1342,10 +1343,10 @@ static uint8_t m5_advance_animation_batch(uint8_t target_fps)
     return count;
 }
 
-static bool m5_index_mjpeg(void)
+static bool index_mjpeg(void)
 {
     s_media_index_error = 0;
-    FILE *file = fopen(M5_JPEG_PATH, "rb");
+    FILE *file = fopen(JPEG_PATH, "rb");
     if (file == NULL) { s_media_index_error = 1; return false; }
     if (fseek(file, 0, SEEK_END) != 0) {
         fclose(file);
@@ -1369,15 +1370,15 @@ static bool m5_index_mjpeg(void)
                 start = position - 1U;
                 in_frame = true;
             } else if (in_frame && previous == 0xFF && current == 0xD9) {
-                if (s_media.frame_count < M5_MAX_FRAMES) {
+                if (s_media.frame_count < MAX_FRAMES) {
                     const uint32_t end = position + 1U;
                     const uint32_t length = end - start;
-                    s_media.frames[s_media.frame_count++] = (m5_frame_index_t) {
+                    s_media.frames[s_media.frame_count++] = (frame_index_t) {
                         .offset = start, .length = length,
                     };
                     if (length > s_media.largest_frame) s_media.largest_frame = length;
                 } else {
-                    ESP_LOGW(TAG, "M5_MEDIA result=too_many_frames limit=%u", M5_MAX_FRAMES);
+                    ESP_LOGW(TAG, "MEDIA result=too_many_frames limit=%u", MAX_FRAMES);
                     fclose(file);
                     s_media_index_error = 4; return false;
                 }
@@ -1391,12 +1392,12 @@ static bool m5_index_mjpeg(void)
     if (in_frame || s_media.frame_count == 0) { s_media_index_error = 3; return false; }
 
     s_media.file_size = (uint32_t) size;
-    s_media.file = fopen(M5_JPEG_PATH, "rb");
+    s_media.file = fopen(JPEG_PATH, "rb");
     if (s_media.file == NULL) { s_media_index_error = 5; return false; }
 
     const size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    const size_t preload_need = (size_t) s_media.file_size + M5_RGB565_BYTES + M5_MAX_JPEG_BYTES;
-    if (s_media.file_size <= M5_PRELOAD_LIMIT && free_psram > preload_need) {
+    const size_t preload_need = (size_t) s_media.file_size + RGB565_BYTES + MAX_JPEG_BYTES;
+    if (s_media.file_size <= PRELOAD_LIMIT && free_psram > preload_need) {
         s_media.preload = heap_caps_malloc(s_media.file_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (s_media.preload != NULL && fread(s_media.preload, 1, s_media.file_size, s_media.file) == s_media.file_size) {
             s_media.preloaded = true;
@@ -1407,21 +1408,21 @@ static bool m5_index_mjpeg(void)
         fseek(s_media.file, 0, SEEK_SET);
     }
     if (!s_media.preloaded) {
-        const uint32_t buffer_size = s_media.largest_frame > M5_MAX_JPEG_BYTES ? 0 : s_media.largest_frame;
+        const uint32_t buffer_size = s_media.largest_frame > MAX_JPEG_BYTES ? 0 : s_media.largest_frame;
         if (buffer_size == 0) {
-            ESP_LOGW(TAG, "M5_MEDIA source=sd result=frame_too_large bytes=%u", s_media.largest_frame);
+            ESP_LOGW(TAG, "MEDIA source=sd result=frame_too_large bytes=%u", s_media.largest_frame);
             fclose(s_media.file);
             s_media.file = NULL;
             s_media_index_error = 6; return false;
         }
         fclose(s_media.file);
-        s_media.file = fopen(M5_JPEG_PATH, "rb");
+        s_media.file = fopen(JPEG_PATH, "rb");
         if (s_media.file == NULL) { s_media_index_error = 5; return false; }
-        s_media.file_buffer = heap_caps_malloc(M5_SD_READ_AHEAD_BYTES,
+        s_media.file_buffer = heap_caps_malloc(SD_READ_AHEAD_BYTES,
                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (s_media.file_buffer != NULL &&
             setvbuf(s_media.file, (char *) s_media.file_buffer, _IOFBF,
-                    M5_SD_READ_AHEAD_BYTES) != 0) {
+                    SD_READ_AHEAD_BYTES) != 0) {
             heap_caps_free(s_media.file_buffer);
             s_media.file_buffer = NULL;
         }
@@ -1435,7 +1436,7 @@ static bool m5_index_mjpeg(void)
         }
     }
     if (s_media.panel_buffers[0] == NULL) {
-        ESP_LOGW(TAG, "M5_MEDIA result=frame_buffers_unavailable");
+        ESP_LOGW(TAG, "MEDIA result=frame_buffers_unavailable");
         heap_caps_free(s_media.read_buffer);
         heap_caps_free(s_media.preload);
         heap_caps_free(s_media.file_buffer);
@@ -1447,7 +1448,7 @@ static bool m5_index_mjpeg(void)
         s_media_index_error = 8;
         return false;
     }
-    const m5_frame_index_t *first = &s_media.frames[0];
+    const frame_index_t *first = &s_media.frames[0];
     const uint8_t *first_bytes = s_media.preloaded ? s_media.preload + first->offset
                                                    : s_media.read_buffer;
     if (!s_media.preloaded &&
@@ -1457,12 +1458,12 @@ static bool m5_index_mjpeg(void)
     } else {
         jpeg_decode_picture_info_t info;
         if (jpeg_decoder_get_info(first_bytes, first->length, &info) != ESP_OK ||
-            info.width != M5_PANEL_WIDTH || info.height != M5_PANEL_HEIGHT) {
+            info.width != PANEL_WIDTH || info.height != PANEL_HEIGHT) {
             s_media_index_error = 10;
         }
     }
     if (s_media_index_error == 10) {
-        ESP_LOGW(TAG, "M5_MEDIA result=invalid_dimensions");
+        ESP_LOGW(TAG, "MEDIA result=invalid_dimensions");
         heap_caps_free(s_media.read_buffer);
         heap_caps_free(s_media.preload);
         heap_caps_free(s_media.file_buffer);
@@ -1477,18 +1478,18 @@ static bool m5_index_mjpeg(void)
         s_media.file_offset = first->offset + first->length;
     }
     s_media.ready = true;
-    ESP_LOGI(TAG, "M5_MEDIA source=%s frames=%u bytes=%u largest=%u fps=%u",
+    ESP_LOGI(TAG, "MEDIA source=%s frames=%u bytes=%u largest=%u fps=%u",
              s_media.preloaded ? "psram" : "sd", s_media.frame_count,
-             s_media.file_size, s_media.largest_frame, M5_SCREENSAVER_FPS);
+             s_media.file_size, s_media.largest_frame, SCREENSAVER_FPS);
     return true;
 }
 
-bool m5_mjpeg_file_valid(const char *path)
+bool mjpeg_file_valid(const char *path)
 {
     /* F7: full structural validation of a screensaver stream before activation
      * and at boot: complete SOI/EOI frame boundaries, frame count within
-     * M5_MAX_FRAMES, per-frame size within M5_MAX_JPEG_BYTES, and every frame
-     * decoding to M5_PANEL_WIDTH x M5_PANEL_HEIGHT. The four bytes FF D8 FF D9
+     * MAX_FRAMES, per-frame size within MAX_JPEG_BYTES, and every frame
+     * decoding to PANEL_WIDTH x PANEL_HEIGHT. The four bytes FF D8 FF D9
      * fail here because the frame cannot be parsed as a 720x1280 JPEG. */
     FILE *file = fopen(path, "rb");
     if (file == NULL) return false;
@@ -1508,8 +1509,8 @@ bool m5_mjpeg_file_valid(const char *path)
                 in_frame = true;
             } else if (in_frame && previous == 0xff && current == 0xd9) {
                 const uint32_t length = position + 1U - start;
-                if (length > M5_MAX_JPEG_BYTES) { fclose(file); return false; }
-                if (++frame_count > M5_MAX_FRAMES) { fclose(file); return false; }
+                if (length > MAX_JPEG_BYTES) { fclose(file); return false; }
+                if (++frame_count > MAX_FRAMES) { fclose(file); return false; }
                 if (length > largest_frame) largest_frame = length;
                 in_frame = false;
             }
@@ -1521,8 +1522,8 @@ bool m5_mjpeg_file_valid(const char *path)
 
     /* Second pass: decode every frame header. Frame offsets are stored in the
      * first pass so reads never interleave with the streaming scan. */
-    m5_frame_index_t *frames = heap_caps_malloc(
-        (size_t) frame_count * sizeof(m5_frame_index_t),
+    frame_index_t *frames = heap_caps_malloc(
+        (size_t) frame_count * sizeof(frame_index_t),
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint8_t *frame_buffer = heap_caps_malloc(largest_frame, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     bool valid = frames != NULL && frame_buffer != NULL && fseek(file, 0, SEEK_SET) == 0;
@@ -1539,7 +1540,7 @@ bool m5_mjpeg_file_valid(const char *path)
                     start = position - 1U;
                     in_frame = true;
                 } else if (in_frame && previous == 0xff && current == 0xd9) {
-                    frames[stored++] = (m5_frame_index_t) {
+                    frames[stored++] = (frame_index_t) {
                         .offset = start,
                         .length = position + 1U - start,
                     };
@@ -1559,7 +1560,7 @@ bool m5_mjpeg_file_valid(const char *path)
         }
         jpeg_decode_picture_info_t info;
         if (jpeg_decoder_get_info(frame_buffer, frames[i].length, &info) != ESP_OK ||
-            info.width != M5_PANEL_WIDTH || info.height != M5_PANEL_HEIGHT) {
+            info.width != PANEL_WIDTH || info.height != PANEL_HEIGHT) {
             valid = false;
             break;
         }
@@ -1570,9 +1571,9 @@ bool m5_mjpeg_file_valid(const char *path)
     return valid;
 }
 
-static const uint8_t *m5_frame_bytes(uint32_t index, uint32_t *length)
+static const uint8_t *frame_bytes(uint32_t index, uint32_t *length)
 {
-    const m5_frame_index_t *frame = &s_media.frames[index % s_media.frame_count];
+    const frame_index_t *frame = &s_media.frames[index % s_media.frame_count];
     *length = frame->length;
     if (s_media.preloaded) return s_media.preload + frame->offset;
     if (frame->length > s_media.largest_frame ||
@@ -1589,7 +1590,7 @@ static const uint8_t *m5_frame_bytes(uint32_t index, uint32_t *length)
  * frame in place (a 180-degree rotation is a pixel-order reversal) so the
  * screensaver matches the UI orientation. Costs one pass per frame only when
  * the flipped orientation is active. */
-static void m5_flip_rgb565_180(uint16_t *frame, uint32_t pixels)
+static void flip_rgb565_180(uint16_t *frame, uint32_t pixels)
 {
     for (uint32_t i = 0, j = pixels - 1; i < j; ++i, --j) {
         const uint16_t value = frame[i];
@@ -1598,10 +1599,10 @@ static void m5_flip_rgb565_180(uint16_t *frame, uint32_t pixels)
     }
 }
 
-static bool m5_decode_and_draw(uint32_t index)
+static bool decode_and_draw(uint32_t index)
 {
     uint32_t input_size = 0;
-    const uint8_t *input = m5_frame_bytes(index, &input_size);
+    const uint8_t *input = frame_bytes(index, &input_size);
     if (input == NULL) return false;
     uint32_t output_size = 0;
     const jpeg_decode_cfg_t decode_cfg = {
@@ -1609,17 +1610,17 @@ static bool m5_decode_and_draw(uint32_t index)
         .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
     };
     if (jpeg_decoder_process(s_media.decoder, &decode_cfg, input, input_size,
-                             s_media.panel_buffers[s_media.panel_buffer_index], M5_RGB565_BYTES,
-                             &output_size) != ESP_OK || output_size != M5_RGB565_BYTES) {
+                             s_media.panel_buffers[s_media.panel_buffer_index], RGB565_BYTES,
+                             &output_size) != ESP_OK || output_size != RGB565_BYTES) {
         return false;
     }
     if (s_media_flipped) {
-        m5_flip_rgb565_180((uint16_t *) s_media.panel_buffers[s_media.panel_buffer_index],
-                           M5_PANEL_WIDTH * M5_PANEL_HEIGHT);
+        flip_rgb565_180((uint16_t *) s_media.panel_buffers[s_media.panel_buffer_index],
+                           PANEL_WIDTH * PANEL_HEIGHT);
     }
     if (esp_lv_adapter_lock(1000) == ESP_OK) {
-        const esp_err_t result = esp_lcd_panel_draw_bitmap(s_panel, 0, 0, M5_PANEL_WIDTH,
-                                                            M5_PANEL_HEIGHT,
+        const esp_err_t result = esp_lcd_panel_draw_bitmap(s_panel, 0, 0, PANEL_WIDTH,
+                                                            PANEL_HEIGHT,
                                                             s_media.panel_buffers[s_media.panel_buffer_index]);
         s_media.panel_buffer_index = (s_media.panel_buffer_index + 1U) % 3U;
         esp_lv_adapter_unlock();
@@ -1628,23 +1629,23 @@ static bool m5_decode_and_draw(uint32_t index)
     return false;
 }
 
-static void m5_media_task(void *argument)
+static void media_task(void *argument)
 {
     (void) argument;
-    const bool bundle_ready = m5_load_ui_bundle();
+    const bool bundle_ready = load_ui_bundle();
     if (bundle_ready && esp_lv_adapter_lock(1000) == ESP_OK) {
         const int64_t started_us = esp_timer_get_time();
-        m5_render_active_ui();
+        render_active_ui();
         esp_lv_adapter_refresh_now(s_display);
-        m6_log_render_time("bundle", started_us);
+        log_render_time("bundle", started_us);
         esp_lv_adapter_unlock();
     }
-    const bool media_ready = m5_index_mjpeg();
+    const bool media_ready = index_mjpeg();
     if (!media_ready) {
-        ESP_LOGI(TAG, "M5_MEDIA source=none frames=0 fps=%u", M5_SCREENSAVER_FPS);
+        ESP_LOGI(TAG, "MEDIA source=none frames=0 fps=%u", SCREENSAVER_FPS);
     }
     s_last_activity_us = esp_timer_get_time();
-    ESP_LOGI(TAG, "M5_COMPLETE animation_fps=15 saver_ready=%u", media_ready);
+    ESP_LOGI(TAG, "COMPLETE animation_fps=15 saver_ready=%u", media_ready);
     uint32_t saver_frame = 0;
     int64_t next_frame_us = 0;
     int64_t next_icon_frame_us = 0;
@@ -1657,20 +1658,20 @@ static void m5_media_task(void *argument)
     while (true) {
         /* Serialize cross-task media requests (sync QUIESCE/RELOAD, USB test)
          * here in the owning task before any other state is observed. */
-        m5_media_control_msg_t *ctrl;
+        media_control_msg_t *ctrl;
         while (s_media_control_queue != NULL &&
                xQueueReceive(s_media_control_queue, &ctrl, 0) == pdTRUE) {
-            m5_media_handle_control(ctrl);
+            media_handle_control(ctrl);
         }
         if (!s_ui_ready) {
             /* The adapter lock is not guaranteed to be available from
              * app_main immediately after bsp_display_start. Retry from the
              * task once the LVGL worker owns its normal scheduling loop. */
             if (esp_lv_adapter_lock(1000) == ESP_OK) {
-                m5_render_active_ui();
+                render_active_ui();
                 esp_lv_adapter_unlock();
                 s_ui_ready = true;
-                ESP_LOGI(TAG, "M5_UI state=ready animation_fps=15");
+                ESP_LOGI(TAG, "UI state=ready animation_fps=15");
             }
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
@@ -1678,8 +1679,8 @@ static void m5_media_task(void *argument)
         const int64_t now = esp_timer_get_time();
         if (s_screensaver_requested) {
             s_screensaver_requested = false;
-            if (s_state == M5_STATE_ACTIVE && s_media.ready && esp_lv_adapter_lock(1000) == ESP_OK) {
-                if (!m5_enter_saver_ui()) {
+            if (s_state == STATE_ACTIVE && s_media.ready && esp_lv_adapter_lock(1000) == ESP_OK) {
+                if (!enter_saver_ui()) {
                     esp_lv_adapter_unlock();
                     continue;
                 }
@@ -1690,7 +1691,7 @@ static void m5_media_task(void *argument)
                 saver_window_work_us = 0;
                 saver_window_presented = saver_window_failed = saver_window_dropped = 0;
                 saver_window_max_work_us = 0;
-                ESP_LOGI(TAG, "M5_STATE from=active to=playing reason=desktop_test");
+                ESP_LOGI(TAG, "STATE from=active to=playing reason=desktop_test");
                 continue;
             }
         }
@@ -1701,26 +1702,26 @@ static void m5_media_task(void *argument)
                     s_media.decoder = NULL;
                 }
                 if (s_icon_decoder == NULL) ESP_ERROR_CHECK(esp_lv_decoder_init(&s_icon_decoder));
-                m5_render_active_ui();
+                render_active_ui();
                 esp_lv_adapter_unlock();
                 s_wake_requested = false;
-                s_state = M5_STATE_ACTIVE;
+                s_state = STATE_ACTIVE;
                 s_last_activity_us = esp_timer_get_time();
-                ESP_LOGI(TAG, "M5_STATE from=playing to=active reason=touch consumed=1");
+                ESP_LOGI(TAG, "STATE from=playing to=active reason=touch consumed=1");
             }
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
-        if (s_state == M5_STATE_ACTIVE) {
+        if (s_state == STATE_ACTIVE) {
             if (s_page_change_requested && esp_lv_adapter_lock(1000) == ESP_OK) {
-                m5_render_active_ui();
+                render_active_ui();
                 esp_lv_adapter_unlock();
                 s_page_change_requested = false;
                 continue;
             }
             if (s_screensaver_enabled && s_media.ready && now - s_last_activity_us >= (int64_t) s_screensaver_idle_seconds * 1000000) {
                 if (esp_lv_adapter_lock(1000) == ESP_OK) {
-                    if (!m5_enter_saver_ui()) {
+                    if (!enter_saver_ui()) {
                         esp_lv_adapter_unlock();
                         continue;
                     }
@@ -1737,8 +1738,8 @@ static void m5_media_task(void *argument)
             if (s_visible_animation_count && now >= next_icon_frame_us &&
                 now - s_last_activity_us > 100000 && esp_lv_adapter_lock(20) == ESP_OK) {
                 const int64_t started = esp_timer_get_time();
-                const uint8_t target_fps = m5_animation_target_fps();
-                const uint8_t advanced = m5_advance_animation_batch(target_fps);
+                const uint8_t target_fps = animation_target_fps();
+                const uint8_t advanced = advance_animation_batch(target_fps);
                 esp_lv_adapter_unlock();
                 const int64_t elapsed = esp_timer_get_time() - started;
                 /* Stagger a busy page instead of invalidating as many as 32
@@ -1748,14 +1749,14 @@ static void m5_media_task(void *argument)
                     ((int64_t) 1000000 * advanced /
                      ((int64_t) target_fps * s_visible_animation_count));
                 if (elapsed > 50000) {
-                    ESP_LOGW(TAG, "M5_ANIMATION fps_target=%u visible=%u batch=%u cycle_us=%lld overloaded=1",
+                    ESP_LOGW(TAG, "ANIMATION fps_target=%u visible=%u batch=%u cycle_us=%lld overloaded=1",
                              target_fps, s_visible_animation_count, advanced, (long long) elapsed);
                 }
             }
             /* Input callbacks run in LVGL's task, but page changes and other
              * deferred UI work are completed here. Keep this interval short
              * and do no redraw work while idle so touch feedback stays crisp. */
-            vTaskDelay(pdMS_TO_TICKS(M5_ACTIVE_POLL_MS));
+            vTaskDelay(pdMS_TO_TICKS(ACTIVE_POLL_MS));
             continue;
         }
 
@@ -1763,17 +1764,17 @@ static void m5_media_task(void *argument)
             const bool first_frame = next_frame_us == 0;
             if (saver_window_start_us == 0) saver_window_start_us = now;
             const int64_t frame_started_us = esp_timer_get_time();
-            const bool drawn = m5_decode_and_draw(saver_frame++);
+            const bool drawn = decode_and_draw(saver_frame++);
             const uint32_t frame_work_us = (uint32_t) (esp_timer_get_time() - frame_started_us);
             saver_window_work_us += frame_work_us;
             if (frame_work_us > saver_window_max_work_us) saver_window_max_work_us = frame_work_us;
             if (!drawn) {
                 ++saver_window_failed;
-                ESP_LOGW(TAG, "M5_FRAME index=%u dropped=1", saver_frame - 1);
+                ESP_LOGW(TAG, "FRAME index=%u dropped=1", saver_frame - 1);
             } else {
                 ++saver_window_presented;
             }
-            const int64_t period_us = 1000000 / M5_SCREENSAVER_FPS;
+            const int64_t period_us = 1000000 / SCREENSAVER_FPS;
             /* Start the playback clock once the cold first frame is ready;
              * decoder initialization time is not a missed video deadline. */
             if (first_frame) {
@@ -1788,18 +1789,18 @@ static void m5_media_task(void *argument)
                 saver_frame += skipped;
                 saver_window_dropped += skipped;
                 next_frame_us += (int64_t) skipped * period_us;
-                ESP_LOGW(TAG, "M5_FRAME index=%u dropped=1 count=%u reason=deadline", saver_frame, skipped);
+                ESP_LOGW(TAG, "FRAME index=%u dropped=1 count=%u reason=deadline", saver_frame, skipped);
             }
             const uint32_t attempted = saver_window_presented + saver_window_failed;
-            if (attempted >= M5_SAVER_BENCH_FRAMES) {
+            if (attempted >= SAVER_BENCH_FRAMES) {
                 const int64_t window_elapsed_us = esp_timer_get_time() - saver_window_start_us;
                 const uint32_t achieved_fps_x100 = window_elapsed_us > 0
                     ? (uint32_t) ((uint64_t) saver_window_presented * 100000000ULL /
                                   (uint64_t) window_elapsed_us) : 0;
                 const uint32_t average_work_us = attempted != 0
                     ? (uint32_t) (saver_window_work_us / attempted) : 0;
-                ESP_LOGI(TAG, "M5_SAVER target_fps=%u presented=%u failed=%u deadline_drops=%u elapsed_us=%lld achieved_fps_x100=%u avg_work_us=%u max_work_us=%u frame_budget_us=%lld worst_headroom_us=%lld",
-                         M5_SCREENSAVER_FPS, saver_window_presented, saver_window_failed,
+                ESP_LOGI(TAG, "SAVER target_fps=%u presented=%u failed=%u deadline_drops=%u elapsed_us=%lld achieved_fps_x100=%u avg_work_us=%u max_work_us=%u frame_budget_us=%lld worst_headroom_us=%lld",
+                         SCREENSAVER_FPS, saver_window_presented, saver_window_failed,
                          saver_window_dropped, (long long) window_elapsed_us,
                          achieved_fps_x100, average_work_us, saver_window_max_work_us,
                          (long long) period_us,
@@ -1816,13 +1817,13 @@ static void m5_media_task(void *argument)
     }
 }
 
-void m5_media_start(lv_display_t *display)
+void media_start(lv_display_t *display)
 {
     s_display = display;
     s_panel = bsp_display_get_panel_handle();
     s_last_activity_us = esp_timer_get_time();
     memset(&s_media, 0, sizeof(s_media));
-    s_media_control_queue = xQueueCreate(4, sizeof(m5_media_control_msg_t *));
+    s_media_control_queue = xQueueCreate(4, sizeof(media_control_msg_t *));
     ESP_ERROR_CHECK(s_media_control_queue == NULL ? ESP_ERR_NO_MEM : ESP_OK);
     s_macro_mutex = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(s_macro_mutex ? ESP_OK : ESP_ERR_NO_MEM);
@@ -1837,26 +1838,26 @@ void m5_media_start(lv_display_t *display)
      * The worker indexes it in the background after the usable UI is visible. */
     if (esp_lv_adapter_lock(1000) == ESP_OK) {
         const int64_t started_us = esp_timer_get_time();
-        m5_render_active_ui();
+        render_active_ui();
         ESP_ERROR_CHECK(esp_lv_adapter_refresh_now(s_display));
-        m6_log_render_time("initial", started_us);
+        log_render_time("initial", started_us);
         esp_lv_adapter_unlock();
         s_ui_ready = true;
-        ESP_LOGI(TAG, "M5_UI state=ready animation_fps=15");
+        ESP_LOGI(TAG, "UI state=ready animation_fps=15");
     } else {
-        ESP_LOGE(TAG, "M5_UI result=initial_lock_timeout");
+        ESP_LOGE(TAG, "UI result=initial_lock_timeout");
     }
-    BaseType_t task_ok = xTaskCreate(m5_media_task, "m5_media", 8192, NULL, 5, NULL);
+    BaseType_t task_ok = xTaskCreate(media_task, "media", 8192, NULL, 5, NULL);
     ESP_ERROR_CHECK(task_ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
-    task_ok = xTaskCreate(m5_macro_task, "m5_macro", 4096, NULL, 6, &s_macro_task_handle);
+    task_ok = xTaskCreate(macro_task, "macro", 4096, NULL, 6, &s_macro_task_handle);
     ESP_ERROR_CHECK(task_ok == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
-    ESP_LOGI(TAG, "M5_MEDIA indexing=background");
+    ESP_LOGI(TAG, "MEDIA indexing=background");
 }
 
 /* Closes every screensaver resource the media task owns. Only ever called from
- * the media task (or m5_media_start before the task starts). After this, the
+ * the media task (or media_start before the task starts). After this, the
  * sync task may rename or unlink the screensaver files safely. */
-static void m5_media_quiesce(void)
+static void media_quiesce(void)
 {
     if (s_media.file != NULL) fclose(s_media.file);
     heap_caps_free(s_media.read_buffer);
@@ -1875,22 +1876,22 @@ static void m5_media_quiesce(void)
     s_media_index_error = 0;
 }
 
-static void m5_media_handle_control(m5_media_control_msg_t *ctrl)
+static void media_handle_control(media_control_msg_t *ctrl)
 {
     switch (ctrl->type) {
-    case M5_MEDIA_CTRL_QUIESCE:
-        m5_media_quiesce();
+    case MEDIA_CTRL_QUIESCE:
+        media_quiesce();
         ctrl->result = 0;
         break;
-    case M5_MEDIA_CTRL_RELOAD:
-        m5_media_quiesce();
-        (void) m5_index_mjpeg();
+    case MEDIA_CTRL_RELOAD:
+        media_quiesce();
+        (void) index_mjpeg();
         ctrl->result = s_media.ready ? 0 : (s_media_index_error ? s_media_index_error : UINT32_MAX);
         break;
-    case M5_MEDIA_CTRL_TEST:
+    case MEDIA_CTRL_TEST:
         if (!s_media.ready) {
-            m5_media_quiesce();
-            (void) m5_index_mjpeg();
+            media_quiesce();
+            (void) index_mjpeg();
         }
         ctrl->result = s_media.ready ? 0 : (s_media_index_error ? s_media_index_error : UINT32_MAX);
         if (s_media.ready) s_screensaver_requested = true;
@@ -1900,15 +1901,15 @@ static void m5_media_handle_control(m5_media_control_msg_t *ctrl)
         break;
     }
     if (ctrl->reply != NULL) xSemaphoreGive(ctrl->reply);
-    m5_media_control_release(ctrl);
+    media_control_release(ctrl);
 }
 
-uint32_t m5_media_control(m5_media_ctrl_t control, uint32_t timeout_ms)
+uint32_t media_control(media_ctrl_t control, uint32_t timeout_ms)
 {
     if (s_media_control_queue == NULL) return UINT32_MAX;
-    m5_media_control_msg_t *msg = malloc(sizeof(*msg));
+    media_control_msg_t *msg = malloc(sizeof(*msg));
     if (msg == NULL) return UINT32_MAX;
-    *msg = (m5_media_control_msg_t) {
+    *msg = (media_control_msg_t) {
         .type = control,
         .result = UINT32_MAX,
         .references = 2,
@@ -1926,11 +1927,11 @@ uint32_t m5_media_control(m5_media_ctrl_t control, uint32_t timeout_ms)
     }
     const BaseType_t acked = xSemaphoreTake(msg->reply, pdMS_TO_TICKS(timeout_ms));
     const uint32_t result = acked == pdTRUE ? msg->result : UINT32_MAX;
-    m5_media_control_release(msg);
+    media_control_release(msg);
     return acked == pdTRUE ? result : UINT32_MAX;
 }
 
-uint32_t m5_media_trigger_screensaver(void)
+uint32_t media_trigger_screensaver(void)
 {
-    return m5_media_control(M5_MEDIA_CTRL_TEST, M5_MEDIA_CONTROL_TIMEOUT_MS);
+    return media_control(MEDIA_CTRL_TEST, MEDIA_CONTROL_TIMEOUT_MS);
 }
