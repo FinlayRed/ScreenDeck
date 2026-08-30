@@ -447,13 +447,13 @@ mod tests {
     fn project() -> Project {
         serde_json::from_value(json!({
             "schemaVersion": 3, "name": "Round trip", "screensaverTimeoutSeconds": 30, "brightnessPercent": 80, "orientation": "landscape", "screensaverEnabled": true, "assets": [],
-            "macros": [{"id":"m1","name":"F13","steps":[{"kind":"key_down","key":"F13"},{"kind":"delay","durationMs":25},{"kind":"key_up","key":"F13"}]}],
-            "profiles": [{"id":"p1","name":"Default","pages":[{"id":"g1","name":"Main","buttons":(0..32).map(|i| if i == 0 { json!({"action":"macro","macroId":"m1"}) } else { json!({"action":"none"}) }).collect::<Vec<_>>() }]}]
+            "macros": [{"id":"macro-f13","name":"F13","steps":[{"kind":"key_down","key":"F13"},{"kind":"delay","durationMs":25},{"kind":"key_up","key":"F13"}]}],
+            "profiles": [{"id":"p1","name":"Default","pages":[{"id":"g1","name":"Main","buttons":(0..32).map(|i| if i == 0 { json!({"action":"macro","macroId":"macro-f13"}) } else { json!({"action":"none"}) }).collect::<Vec<_>>() }]}]
         })).unwrap()
     }
 
     #[test]
-    fn crc_matches_physical_m3_smoke_vector() {
+    fn crc_matches_physical_device_sync_smoke_vector() {
         let payload: Vec<u8> = (0..96).map(|value| (value * 37 + 11) as u8).collect();
         assert_eq!(compiler::crc32(&payload), 0xBDDF_EACA);
     }
@@ -465,10 +465,10 @@ mod tests {
     }
 
     #[test]
-    fn compiler_emits_valid_sdb3_header() {
+    fn compiler_emits_valid_bundle_header() {
         let bundle = compiler::compile(&project()).unwrap();
         assert_eq!(compiler::summarize(&project()).bundle_bytes, bundle.len());
-        assert_eq!(&bundle[0..4], &0x3342_4453u32.to_le_bytes());
+        assert_eq!(&bundle[0..4], &0x4C42_4453u32.to_le_bytes());
         assert_eq!(
             u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize,
             bundle.len()
@@ -477,7 +477,7 @@ mod tests {
             u32::from_le_bytes(bundle[12..16].try_into().unwrap()),
             compiler::crc32(&bundle[16..])
         );
-        assert_eq!(&bundle[16..20], &0x4955_354Du32.to_le_bytes());
+        assert_eq!(&bundle[16..20], &0x4955_4453u32.to_le_bytes());
         assert_eq!(u16::from_le_bytes(bundle[20..22].try_into().unwrap()), 3);
     }
 
@@ -546,7 +546,7 @@ mod tests {
         valid.assets.push(animated_asset_with(2));
         valid.profiles[0].pages[0].buttons[0].icon_id = Some("anim".into());
         let mut bundle = compiler::compile(&valid).unwrap();
-        // Asset table starts after the SDB header; the frame_count field is at
+        // Asset table starts after the bundle header; the frame_count field is at
         // asset offset 16 within the 20-byte ui_asset_t.
         let assets_offset = u32::from_le_bytes(bundle[32..36].try_into().unwrap()) as usize;
         bundle[16 + assets_offset + 16..16 + assets_offset + 18]
@@ -781,7 +781,7 @@ mod tests {
                     icon_id: None,
                     image_fit: Some("cover".into()),
                     action: model::ActionKind::Macro,
-                    macro_id: Some("m1".into()),
+                    macro_id: Some("macro-f13".into()),
                 },
                 model::RadialItem {
                     icon_id: None,

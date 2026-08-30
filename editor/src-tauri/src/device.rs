@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::{thread, time::Duration};
 use thiserror::Error;
 
-const MAGIC: u32 = 0x3343_4453;
+const SYNC_MAGIC: u32 = 0x5953_4453; // SDSY
 const VERSION: u8 = 1;
 const HELLO: u8 = 1;
 const BEGIN: u8 = 2;
@@ -29,9 +29,9 @@ const TEST_SCREENSAVER_CAPABILITY: u32 = 0x80;
 const MEDIA_BATCH_CAPABILITY: u32 = 0x40;
 const BUNDLE_BATCH_CAPABILITY: u32 = 0x200;
 const FRAME_FLAG_NO_RESPONSE: u16 = 0x0001;
-const CHUNK_BYTES: usize = 1400 - 8; // SDC3 payload limit minus chunk prefix
+const CHUNK_BYTES: usize = 1400 - 8; // Sync payload limit minus chunk prefix
                                      // Match the project-sync chunk size proven reliable on the physical P4.
-const MEDIA_CHUNK_BYTES: usize = 1400 - 8; // SDC3 payload limit minus chunk prefix
+const MEDIA_CHUNK_BYTES: usize = 1400 - 8; // Sync payload limit minus chunk prefix
 const MEDIA_BATCH_CHUNKS: usize = 8;
 const BUNDLE_BATCH_CHUNKS: usize = 16;
 
@@ -41,7 +41,7 @@ pub enum DeviceError {
     NotFound,
     #[error("Windows could not open the Screendeck WinUSB interface (error {0}). Close other Screendeck tools and reconnect the device.")]
     Windows(u32),
-    #[error("device returned a malformed SDC3 response: {0}")]
+    #[error("device returned a malformed sync response: {0}")]
     Protocol(String),
     #[error("device rejected {operation}: {status} ({detail})")]
     Rejected {
@@ -120,7 +120,7 @@ fn status_detail(status: u32, value: u32) -> String {
 
 fn flagged_frame(opcode: u8, sequence: u32, flags: u16, payload: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(20 + payload.len());
-    bytes.extend_from_slice(&MAGIC.to_le_bytes());
+    bytes.extend_from_slice(&SYNC_MAGIC.to_le_bytes());
     bytes.push(VERSION);
     bytes.push(opcode);
     bytes.extend_from_slice(&flags.to_le_bytes());
@@ -137,7 +137,7 @@ fn frame(opcode: u8, sequence: u32, payload: &[u8]) -> Vec<u8> {
 
 fn parse_response(bytes: &[u8], opcode: u8, sequence: u32) -> Result<(u32, u32), DeviceError> {
     if bytes.len() != 28
-        || u32::from_le_bytes(bytes[0..4].try_into().unwrap()) != MAGIC
+        || u32::from_le_bytes(bytes[0..4].try_into().unwrap()) != SYNC_MAGIC
         || bytes[4] != VERSION
         || bytes[5] != opcode | 0x80
         || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != sequence
@@ -201,7 +201,7 @@ fn checked_response(
 /// response from older firmware.
 fn parse_status_response(bytes: &[u8], sequence: u32) -> Result<StatusDetails, DeviceError> {
     if bytes.len() < 20
-        || u32::from_le_bytes(bytes[0..4].try_into().unwrap()) != MAGIC
+        || u32::from_le_bytes(bytes[0..4].try_into().unwrap()) != SYNC_MAGIC
         || bytes[4] != VERSION
         || bytes[5] != STATUS | 0x80
         || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != sequence
@@ -370,7 +370,7 @@ mod status_tests {
         status.extend_from_slice(&16_384u32.to_le_bytes()); // media bytes
         status.extend_from_slice(&0xCAFE_BABEu32.to_le_bytes()); // media CRC
         let mut response = Vec::new();
-        response.extend_from_slice(&MAGIC.to_le_bytes());
+        response.extend_from_slice(&SYNC_MAGIC.to_le_bytes());
         response.push(VERSION);
         response.push(STATUS | 0x80);
         response.extend_from_slice(&0u16.to_le_bytes());
@@ -388,7 +388,7 @@ mod status_tests {
             .flat_map(|value| value.to_le_bytes())
             .collect();
         let mut response = Vec::new();
-        response.extend_from_slice(&MAGIC.to_le_bytes());
+        response.extend_from_slice(&SYNC_MAGIC.to_le_bytes());
         response.push(VERSION);
         response.push(STATUS | 0x80);
         response.extend_from_slice(&0u16.to_le_bytes());
@@ -431,7 +431,7 @@ mod status_tests {
         body.extend_from_slice(&0u32.to_le_bytes()); // status success
         body.extend_from_slice(&42u32.to_le_bytes()); // value
         let mut response = Vec::new();
-        response.extend_from_slice(&MAGIC.to_le_bytes());
+        response.extend_from_slice(&SYNC_MAGIC.to_le_bytes());
         response.push(VERSION);
         response.push(STATUS | 0x80);
         response.extend_from_slice(&0u16.to_le_bytes());
@@ -486,7 +486,8 @@ pub fn status() -> DeviceStatus {
             connected: true,
             generation: details.active_generation,
             capabilities,
-            detail: "SDC3 v3 · verified commits · resume · checksums · atomic activation".into(),
+            detail: "Device sync · verified commits · resume · checksums · atomic activation"
+                .into(),
         },
         Err(error) => DeviceStatus {
             connected: false,
@@ -502,7 +503,8 @@ pub fn test_screensaver() -> Result<(), DeviceError> {
     let capabilities = checked_exchange(&mut session, HELLO, 1, &[], "capability query")?;
     if capabilities & TEST_SCREENSAVER_CAPABILITY == 0 {
         return Err(DeviceError::Protocol(
-            "device firmware does not support screensaver testing; flash the latest firmware first".into(),
+            "device firmware does not support screensaver testing; flash the latest firmware first"
+                .into(),
         ));
     }
     checked_exchange_with_timeout(
@@ -521,7 +523,7 @@ pub fn sync(bundle: &[u8], fingerprint: String) -> Result<SyncResult, DeviceErro
     let capabilities = checked_exchange(&mut session, HELLO, 1, &[], "capability query")?;
     if capabilities & 0x1f != 0x1f {
         return Err(DeviceError::Protocol(format!(
-            "device capabilities 0x{capabilities:08X} do not satisfy M4"
+            "device capabilities 0x{capabilities:08X} do not include all required sync features"
         )));
     }
     let initial_generation = status_query(&mut session, 2, IO_TIMEOUT_MS)?.active_generation;
@@ -651,7 +653,7 @@ pub fn download() -> Result<Vec<u8>, DeviceError> {
         bundle.extend_from_slice(chunk);
         sequence += 1;
     }
-    if u32::from_le_bytes(bundle[0..4].try_into().unwrap()) != 0x3342_4453
+    if u32::from_le_bytes(bundle[0..4].try_into().unwrap()) != 0x4C42_4453
         || u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize != bundle.len()
         || u32::from_le_bytes(bundle[12..16].try_into().unwrap()) != crc32(&bundle[16..])
     {
@@ -677,7 +679,7 @@ pub fn download() -> Result<Vec<u8>, DeviceError> {
 
 fn parse_payload_response(bytes: &[u8], opcode: u8, sequence: u32) -> Result<&[u8], DeviceError> {
     if bytes.len() < 20
-        || u32::from_le_bytes(bytes[0..4].try_into().unwrap()) != MAGIC
+        || u32::from_le_bytes(bytes[0..4].try_into().unwrap()) != SYNC_MAGIC
         || bytes[4] != VERSION
         || bytes[5] != opcode | 0x80
         || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != sequence

@@ -52,8 +52,8 @@ static const char *TAG = "screendeck";
 #define LCD_HEIGHT 720
 #define RGB565_BYTES (LCD_WIDTH * LCD_HEIGHT * 2U)
 #define INDEX_BUFFER_BYTES (16U * 1024U)
-#define UI_MAGIC 0x4955354DUL
-#define SDB3_MAGIC 0x33424453UL
+#define UI_BUNDLE_MAGIC 0x49554453UL /* SDUI */
+#define BUNDLE_MAGIC 0x4C424453UL    /* SDBL */
 #define ICON_UPDATE_BATCH 4
 #define ICON_MEDIUM_LOAD_FPS 10
 #define ICON_HEAVY_LOAD_FPS 7
@@ -158,7 +158,7 @@ typedef struct {
     lv_image_dsc_t descriptor;
 } visible_animation_t;
 
-/* Control requests sent by the M3 sync task are serialized through this queue
+/* Control requests sent by the device sync task are serialized through this queue
  * so the media task remains the sole owner of screensaver handles and buffers.
  * See media_control() in media.h. */
 typedef struct {
@@ -219,7 +219,7 @@ static uint8_t s_pending_radial_button;
 static point_t s_pending_radial_origin;
 static point_t s_radial_press_point;
 static bool s_radial_suppress_click;
-extern const char *m3_active_bundle_path(void);
+extern const char *sync_active_bundle_path(void);
 
 static const char *const s_symbols[BUTTONS] = {
     LV_SYMBOL_PLAY, LV_SYMBOL_STOP, LV_SYMBOL_SETTINGS, LV_SYMBOL_LOOP,
@@ -362,7 +362,7 @@ static bool index_icon(const uint8_t *payload, const ui_asset_t *asset, icon_ind
     return !in_frame && index->count == asset->frame_count && index->count > 1;
 }
 
-/* Reads a bounded M5UI table range from the payload stream into a scratch
+/* Reads a bounded UI bundle table range from the payload stream into a scratch
  * buffer. `bytes` is already validated against payload_size, so the allocation
  * is bounded by the 16 MiB bundle limit. */
 static uint8_t *read_table(FILE *file, long payload_offset, uint32_t offset, uint32_t bytes)
@@ -421,7 +421,7 @@ bool ui_bundle_valid(FILE *file, long payload_offset, uint32_t payload_size)
         fread(&header, 1, sizeof(header), file) != sizeof(header)) {
         return false;
     }
-    if (header.magic != UI_MAGIC || header.version != 3 ||
+    if (header.magic != UI_BUNDLE_MAGIC || header.version != 3 ||
         header.header_bytes != sizeof(header) || header.profile_count == 0 ||
         header.page_count == 0 || header.buttons_per_page != BUTTONS ||
         header.blob_offset > payload_size ||
@@ -553,7 +553,7 @@ invalid:
 
 static bool load_ui_bundle(void)
 {
-    const char *path = m3_active_bundle_path();
+    const char *path = sync_active_bundle_path();
     if (path == NULL) return false;
     FILE *file = fopen(path, "rb");
     uint8_t sdb_header[16];
@@ -563,7 +563,7 @@ static bool load_ui_bundle(void)
     }
     uint32_t magic, total_bytes;
     memcpy(&magic, sdb_header, 4); memcpy(&total_bytes, sdb_header + 8, 4);
-    if (magic != SDB3_MAGIC || total_bytes < 16 + sizeof(ui_header_t) || total_bytes > 16U * 1024U * 1024U) {
+    if (magic != BUNDLE_MAGIC || total_bytes < 16 + sizeof(ui_header_t) || total_bytes > 16U * 1024U * 1024U) {
         fclose(file); return false;
     }
     const size_t payload_size = total_bytes - 16U;
@@ -583,7 +583,7 @@ static bool load_ui_bundle(void)
     }
     fclose(file);
     const ui_header_t *header = (const ui_header_t *) payload;
-    if (header->magic != UI_MAGIC || header->version != 3 || header->header_bytes != sizeof(*header) ||
+    if (header->magic != UI_BUNDLE_MAGIC || header->version != 3 || header->header_bytes != sizeof(*header) ||
         header->profile_count == 0 || header->page_count == 0 || header->buttons_per_page != BUTTONS ||
         !range_valid(header->profiles_offset, header->profile_count, sizeof(ui_profile_t), payload_size) ||
         !range_valid(header->pages_offset, (size_t) header->page_count * BUTTONS, sizeof(ui_button_t), payload_size) ||

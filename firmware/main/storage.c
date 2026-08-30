@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 /*
- * M3 — USB bundle sync and microSD ownership.
+ * Device sync and microSD storage.
  *
  * The P4 owns the card at all times.  The vendor endpoint transports framed
  * sync messages; it never exposes a mass-storage interface to Windows.
@@ -34,62 +34,62 @@
 #include "media.h"
 #endif
 
-static const char *TAG = "m3";
+static const char *TAG = "device_sync";
 
-#define M3_PROTOCOL_MAGIC 0x33434453UL /* SDC3 */
-#define M3_PROTOCOL_VERSION 1
-#define M3_BUNDLE_MAGIC 0x33424453UL   /* SDB3 */
-#define M3_POINTER_MAGIC 0x33525450UL  /* PTR3 */
-#define M3_MAX_FRAME_PAYLOAD 1400
-#define M3_RX_FRAME_BYTES (sizeof(m3_frame_header_t) + M3_MAX_FRAME_PAYLOAD)
-#define M3_RX_PACKET_BYTES CONFIG_TINYUSB_VENDOR_RX_BUFSIZE
-#define M3_RX_QUEUE_DEPTH 24
-#define M3_ROOT BSP_SD_MOUNT_POINT "/screendeck"
-#define M3_BUNDLES_DIR M3_ROOT "/bundles"
-#define M3_STAGE_FILE M3_ROOT "/upload.part"
-#define M3_STATE_FILE M3_ROOT "/upload.state"
-#define M3_MEDIA_STAGE_FILE M3_ROOT "/screensaver.upload"
-#define M3_MEDIA_FILE M3_ROOT "/screensaver.mjpg"
-#define M3_MEDIA_BACKUP_FILE M3_ROOT "/screensaver.previous"
-#define M3_MAX_BUNDLE_BYTES (16U * 1024U * 1024U)
-#define M3_MAX_MEDIA_BYTES (16U * 1024U * 1024U)
-#define M3_BUNDLE_WRITE_BUFFER_BYTES (64U * 1024U)
-#define M3_MEDIA_WRITE_BUFFER_BYTES (64U * 1024U)
-#define M3_RESPONSE_WAIT_MS 250
-#define M3_FRAME_FLAG_NO_RESPONSE 0x0001U
-#define M3_HID_REPORT_ID 1
-#define M3_CONSUMER_REPORT_ID 2
-#define M3_MOUSE_REPORT_ID 3
-#define M3_WINUSB_VENDOR_REQUEST 0x21
-#define M3_MS_OS_20_DESCRIPTOR_LENGTH 0xB2
-
-typedef enum {
-    M3_OP_HELLO = 1,
-    M3_OP_BEGIN = 2,
-    M3_OP_CHUNK = 3,
-    M3_OP_COMMIT = 4,
-    M3_OP_ABORT = 5,
-    M3_OP_STATUS = 6,
-    M3_OP_DIAG = 7,
-    M3_OP_MEDIA_BEGIN = 8,
-    M3_OP_MEDIA_CHUNK = 9,
-    M3_OP_MEDIA_COMMIT = 10,
-    M3_OP_MEDIA_ABORT = 11,
-    M3_OP_TEST_SCREENSAVER = 12,
-    M3_OP_DOWNLOAD_BEGIN = 13,
-    M3_OP_DOWNLOAD_CHUNK = 14,
-    M3_OP_DOWNLOAD_END = 15,
-} m3_opcode_t;
+#define SYNC_PROTOCOL_MAGIC 0x59534453UL /* SDSY */
+#define SYNC_PROTOCOL_VERSION 1
+#define SYNC_BUNDLE_MAGIC 0x4C424453UL   /* SDBL */
+#define SYNC_POINTER_MAGIC 0x54504453UL  /* SDPT */
+#define SYNC_MAX_FRAME_PAYLOAD 1400
+#define SYNC_RX_FRAME_BYTES (sizeof(sync_frame_header_t) + SYNC_MAX_FRAME_PAYLOAD)
+#define SYNC_RX_PACKET_BYTES CONFIG_TINYUSB_VENDOR_RX_BUFSIZE
+#define SYNC_RX_QUEUE_DEPTH 24
+#define SYNC_ROOT BSP_SD_MOUNT_POINT "/screendeck"
+#define SYNC_BUNDLES_DIR SYNC_ROOT "/bundles"
+#define SYNC_STAGE_FILE SYNC_ROOT "/upload.part"
+#define SYNC_STATE_FILE SYNC_ROOT "/upload.state"
+#define SYNC_MEDIA_STAGE_FILE SYNC_ROOT "/screensaver.upload"
+#define SYNC_MEDIA_FILE SYNC_ROOT "/screensaver.mjpg"
+#define SYNC_MEDIA_BACKUP_FILE SYNC_ROOT "/screensaver.previous"
+#define SYNC_MAX_BUNDLE_BYTES (16U * 1024U * 1024U)
+#define SYNC_MAX_MEDIA_BYTES (16U * 1024U * 1024U)
+#define SYNC_BUNDLE_WRITE_BUFFER_BYTES (64U * 1024U)
+#define SYNC_MEDIA_WRITE_BUFFER_BYTES (64U * 1024U)
+#define SYNC_RESPONSE_WAIT_MS 250
+#define SYNC_FRAME_FLAG_NO_RESPONSE 0x0001U
+#define SYNC_HID_REPORT_ID 1
+#define SYNC_CONSUMER_REPORT_ID 2
+#define SYNC_MOUSE_REPORT_ID 3
+#define SYNC_WINUSB_VENDOR_REQUEST 0x21
+#define SYNC_MS_OS_20_DESCRIPTOR_LENGTH 0xB2
 
 typedef enum {
-    M3_STATUS_OK = 0,
-    M3_STATUS_BAD_FRAME = 1,
-    M3_STATUS_BAD_STATE = 2,
-    M3_STATUS_IO = 3,
-    M3_STATUS_BAD_BUNDLE = 4,
-    M3_STATUS_BUSY = 5,
-    M3_STATUS_MEDIA_UNAVAILABLE = 6,
-} m3_status_t;
+    SYNC_OP_HELLO = 1,
+    SYNC_OP_BEGIN = 2,
+    SYNC_OP_CHUNK = 3,
+    SYNC_OP_COMMIT = 4,
+    SYNC_OP_ABORT = 5,
+    SYNC_OP_STATUS = 6,
+    SYNC_OP_DIAG = 7,
+    SYNC_OP_MEDIA_BEGIN = 8,
+    SYNC_OP_MEDIA_CHUNK = 9,
+    SYNC_OP_MEDIA_COMMIT = 10,
+    SYNC_OP_MEDIA_ABORT = 11,
+    SYNC_OP_TEST_SCREENSAVER = 12,
+    SYNC_OP_DOWNLOAD_BEGIN = 13,
+    SYNC_OP_DOWNLOAD_CHUNK = 14,
+    SYNC_OP_DOWNLOAD_END = 15,
+} sync_opcode_t;
+
+typedef enum {
+    SYNC_STATUS_OK = 0,
+    SYNC_STATUS_BAD_FRAME = 1,
+    SYNC_STATUS_BAD_STATE = 2,
+    SYNC_STATUS_IO = 3,
+    SYNC_STATUS_BAD_BUNDLE = 4,
+    SYNC_STATUS_BUSY = 5,
+    SYNC_STATUS_MEDIA_UNAVAILABLE = 6,
+} sync_status_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -99,17 +99,17 @@ typedef struct __attribute__((packed)) {
     uint32_t sequence;
     uint32_t payload_size;
     uint32_t payload_crc32;
-} m3_frame_header_t;
+} sync_frame_header_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t total_bytes;
     uint32_t bundle_crc32;
-} m3_begin_t;
+} sync_begin_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t offset;
     uint32_t chunk_crc32;
-} m3_chunk_prefix_t;
+} sync_chunk_prefix_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -117,7 +117,7 @@ typedef struct __attribute__((packed)) {
     uint16_t header_bytes;
     uint32_t total_bytes;
     uint32_t payload_crc32;
-} m3_bundle_header_t;
+} sync_bundle_header_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -125,7 +125,7 @@ typedef struct __attribute__((packed)) {
     uint32_t bundle_crc32;
     char bundle_name[32];
     uint32_t record_crc32;
-} m3_pointer_t;
+} sync_pointer_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -133,12 +133,12 @@ typedef struct __attribute__((packed)) {
     uint32_t bundle_crc32;
     uint32_t received_bytes;
     uint32_t record_crc32;
-} m3_upload_state_t;
+} sync_upload_state_t;
 
 typedef struct {
     uint16_t length;
-    uint8_t bytes[M3_RX_PACKET_BYTES];
-} m3_rx_packet_t;
+    uint8_t bytes[SYNC_RX_PACKET_BYTES];
+} sync_rx_packet_t;
 
 typedef struct {
     bool mounted;
@@ -155,7 +155,7 @@ typedef struct {
     FILE *upload_file;
     uint8_t *upload_buffer;
     size_t upload_buffer_used;
-} m3_storage_state_t;
+} sync_storage_state_t;
 
 typedef struct {
     bool open;
@@ -165,12 +165,12 @@ typedef struct {
     uint32_t total_bytes;
     uint32_t crc32;
     uint32_t received_bytes;
-} m3_media_upload_t;
+} sync_media_upload_t;
 
 static QueueHandle_t s_rx_queue;
-static m3_storage_state_t s_storage;
-static m3_media_upload_t s_media_upload;
-static uint8_t s_frame_buffer[M3_RX_FRAME_BYTES];
+static sync_storage_state_t s_storage;
+static sync_media_upload_t s_media_upload;
+static uint8_t s_frame_buffer[SYNC_RX_FRAME_BYTES];
 static size_t s_frame_length;
 static bool s_usb_mounted;
 static lv_display_t *s_display;
@@ -179,13 +179,13 @@ static FILE *s_download_file;
 static uint32_t s_download_offset;
 static uint32_t s_download_generation;
 
-const char *m3_active_bundle_path(void)
+const char *sync_active_bundle_path(void)
 {
     return s_active_bundle_path[0] != '\0' ? s_active_bundle_path : NULL;
 }
 
 #ifdef MEDIA_ENABLED
-static void m3_restart_after_commit(void *argument)
+static void sync_restart_after_commit(void *argument)
 {
     (void) argument;
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -194,17 +194,17 @@ static void m3_restart_after_commit(void *argument)
 #endif
 
 static const uint8_t s_hid_report_descriptor[] = {
-    TUD_HID_REPORT_DESC_KEYBOARD(HID_REPORT_ID(M3_HID_REPORT_ID)),
-    TUD_HID_REPORT_DESC_CONSUMER(HID_REPORT_ID(M3_CONSUMER_REPORT_ID)),
-    TUD_HID_REPORT_DESC_MOUSE(HID_REPORT_ID(M3_MOUSE_REPORT_ID)),
+    TUD_HID_REPORT_DESC_KEYBOARD(HID_REPORT_ID(SYNC_HID_REPORT_ID)),
+    TUD_HID_REPORT_DESC_CONSUMER(HID_REPORT_ID(SYNC_CONSUMER_REPORT_ID)),
+    TUD_HID_REPORT_DESC_MOUSE(HID_REPORT_ID(SYNC_MOUSE_REPORT_ID)),
 };
 
 static const char *s_string_descriptors[] = {
-    (const char[]) {0x09, 0x04}, "Screendeck", "Screendeck M3 Sync",
-    "M3-SYNC-STORAGE", "Keyboard", "Sync channel",
+    (const char[]) {0x09, 0x04}, "Screendeck", "Screendeck Sync",
+    "SCREENDECK-SYNC", "Keyboard", "Sync channel",
 };
 
-#define M3_TUSB_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN + TUD_VENDOR_DESC_LEN)
+#define SYNC_TUSB_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN + TUD_VENDOR_DESC_LEN)
 
 static const tusb_desc_device_t s_device_descriptor = {
     .bLength = sizeof(tusb_desc_device_t),
@@ -239,7 +239,7 @@ static const tusb_desc_device_qualifier_t s_device_qualifier = {
 };
 
 static const uint8_t s_full_speed_configuration_descriptor[] = {
-    TUD_CONFIG_DESCRIPTOR(1, 2, 0, M3_TUSB_TOTAL_LEN,
+    TUD_CONFIG_DESCRIPTOR(1, 2, 0, SYNC_TUSB_TOTAL_LEN,
                           TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
     TUD_HID_DESCRIPTOR(0, 4, HID_ITF_PROTOCOL_NONE,
                        sizeof(s_hid_report_descriptor), 0x81, 16, 10),
@@ -248,7 +248,7 @@ static const uint8_t s_full_speed_configuration_descriptor[] = {
 
 #if (TUD_OPT_HIGH_SPEED)
 static const uint8_t s_high_speed_configuration_descriptor[] = {
-    TUD_CONFIG_DESCRIPTOR(1, 2, 0, M3_TUSB_TOTAL_LEN,
+    TUD_CONFIG_DESCRIPTOR(1, 2, 0, SYNC_TUSB_TOTAL_LEN,
                           TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
     TUD_HID_DESCRIPTOR(0, 4, HID_ITF_PROTOCOL_NONE,
                        sizeof(s_hid_report_descriptor), 0x81, 16, 10),
@@ -256,30 +256,30 @@ static const uint8_t s_high_speed_configuration_descriptor[] = {
 };
 #endif
 
-#define M3_BOS_TOTAL_LENGTH (TUD_BOS_DESC_LEN + TUD_BOS_MICROSOFT_OS_DESC_LEN)
+#define SYNC_BOS_TOTAL_LENGTH (TUD_BOS_DESC_LEN + TUD_BOS_MICROSOFT_OS_DESC_LEN)
 
 static const uint8_t s_bos_descriptor[] = {
-    TUD_BOS_DESCRIPTOR(M3_BOS_TOTAL_LENGTH, 1),
-    TUD_BOS_MS_OS_20_DESCRIPTOR(M3_MS_OS_20_DESCRIPTOR_LENGTH, M3_WINUSB_VENDOR_REQUEST),
+    TUD_BOS_DESCRIPTOR(SYNC_BOS_TOTAL_LENGTH, 1),
+    TUD_BOS_MS_OS_20_DESCRIPTOR(SYNC_MS_OS_20_DESCRIPTOR_LENGTH, SYNC_WINUSB_VENDOR_REQUEST),
 };
 
 static const uint8_t s_ms_os_20_descriptor[] = {
     // Set header: length, type, Windows version, total length.
     U16_TO_U8S_LE(0x000A), U16_TO_U8S_LE(MS_OS_20_SET_HEADER_DESCRIPTOR),
-    U32_TO_U8S_LE(0x06030000), U16_TO_U8S_LE(M3_MS_OS_20_DESCRIPTOR_LENGTH),
+    U32_TO_U8S_LE(0x06030000), U16_TO_U8S_LE(SYNC_MS_OS_20_DESCRIPTOR_LENGTH),
     // Configuration subset header.
     U16_TO_U8S_LE(0x0008), U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_CONFIGURATION),
-    0, 0, U16_TO_U8S_LE(M3_MS_OS_20_DESCRIPTOR_LENGTH - 0x0A),
+    0, 0, U16_TO_U8S_LE(SYNC_MS_OS_20_DESCRIPTOR_LENGTH - 0x0A),
     // Function subset header. Interface 1 is the vendor sync endpoint.
     U16_TO_U8S_LE(0x0008), U16_TO_U8S_LE(MS_OS_20_SUBSET_HEADER_FUNCTION),
-    1, 0, U16_TO_U8S_LE(M3_MS_OS_20_DESCRIPTOR_LENGTH - 0x0A - 0x08),
+    1, 0, U16_TO_U8S_LE(SYNC_MS_OS_20_DESCRIPTOR_LENGTH - 0x0A - 0x08),
     // Compatible ID descriptor: instruct Windows to bind WinUSB.
     U16_TO_U8S_LE(0x0014), U16_TO_U8S_LE(MS_OS_20_FEATURE_COMPATBLE_ID),
     'W', 'I', 'N', 'U', 'S', 'B', 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     // Registry property descriptor. A stable interface GUID lets the desktop
     // app find this WinUSB function without depending on a mutable device path.
-    U16_TO_U8S_LE(M3_MS_OS_20_DESCRIPTOR_LENGTH - 0x0A - 0x08 - 0x08 - 0x14),
+    U16_TO_U8S_LE(SYNC_MS_OS_20_DESCRIPTOR_LENGTH - 0x0A - 0x08 - 0x08 - 0x14),
     U16_TO_U8S_LE(MS_OS_20_FEATURE_REG_PROPERTY),
     U16_TO_U8S_LE(0x0007), U16_TO_U8S_LE(0x002A),
     'D', 0x00, 'e', 0x00, 'v', 0x00, 'i', 0x00, 'c', 0x00, 'e', 0x00,
@@ -297,8 +297,8 @@ static const uint8_t s_ms_os_20_descriptor[] = {
     '4', 0x00, '}', 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-TU_VERIFY_STATIC(sizeof(s_ms_os_20_descriptor) == M3_MS_OS_20_DESCRIPTOR_LENGTH,
-                 "M3 MS OS 2.0 descriptor length mismatch");
+TU_VERIFY_STATIC(sizeof(s_ms_os_20_descriptor) == SYNC_MS_OS_20_DESCRIPTOR_LENGTH,
+                 "device sync MS OS 2.0 descriptor length mismatch");
 
 uint8_t const *tud_descriptor_bos_cb(void)
 {
@@ -314,7 +314,7 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
         return true;
     }
     if (request->bmRequestType_bit.type != TUSB_REQ_TYPE_VENDOR ||
-        request->bRequest != M3_WINUSB_VENDOR_REQUEST || request->wIndex != 7) {
+        request->bRequest != SYNC_WINUSB_VENDOR_REQUEST || request->wIndex != 7) {
         return false;
     }
     return tud_control_xfer(rhport, request, (void *) s_ms_os_20_descriptor,
@@ -342,12 +342,12 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
     (void) instance; (void) report_id; (void) report_type; (void) buffer; (void) bufsize;
 }
 
-static uint32_t m3_crc32(const void *data, size_t length)
+static uint32_t sync_crc32(const void *data, size_t length)
 {
     return esp_crc32_le(UINT32_MAX, data, length);
 }
 
-static bool m3_mkdir(const char *path)
+static bool sync_mkdir(const char *path)
 {
     if (mkdir(path, 0775) == 0) {
         return true;
@@ -356,7 +356,7 @@ static bool m3_mkdir(const char *path)
     return stat(path, &status) == 0 && S_ISDIR(status.st_mode);
 }
 
-static bool m3_write_exact(const char *path, const void *data, size_t length)
+static bool sync_write_exact(const char *path, const void *data, size_t length)
 {
     FILE *file = fopen(path, "wb");
     if (file == NULL) {
@@ -367,7 +367,7 @@ static bool m3_write_exact(const char *path, const void *data, size_t length)
     return ok;
 }
 
-static bool m3_read_exact(const char *path, void *data, size_t length)
+static bool sync_read_exact(const char *path, void *data, size_t length)
 {
     FILE *file = fopen(path, "rb");
     if (file == NULL) {
@@ -378,19 +378,19 @@ static bool m3_read_exact(const char *path, void *data, size_t length)
     return ok;
 }
 
-static bool m3_upload_state_write(void)
+static bool sync_upload_state_write(void)
 {
-    m3_upload_state_t record = {
-        .magic = M3_PROTOCOL_MAGIC,
+    sync_upload_state_t record = {
+        .magic = SYNC_PROTOCOL_MAGIC,
         .total_bytes = s_storage.total_bytes,
         .bundle_crc32 = s_storage.bundle_crc32,
         .received_bytes = s_storage.received_bytes,
     };
-    record.record_crc32 = m3_crc32(&record, offsetof(m3_upload_state_t, record_crc32));
-    return m3_write_exact(M3_STATE_FILE, &record, sizeof(record));
+    record.record_crc32 = sync_crc32(&record, offsetof(sync_upload_state_t, record_crc32));
+    return sync_write_exact(SYNC_STATE_FILE, &record, sizeof(record));
 }
 
-static void m3_bundle_upload_close(void)
+static void sync_bundle_upload_close(void)
 {
     if (s_storage.upload_file != NULL) fclose(s_storage.upload_file);
     free(s_storage.upload_buffer);
@@ -399,11 +399,11 @@ static void m3_bundle_upload_close(void)
     s_storage.upload_buffer_used = 0;
 }
 
-static bool m3_bundle_upload_open(bool resume)
+static bool sync_bundle_upload_open(bool resume)
 {
     if (s_storage.upload_file != NULL && s_storage.upload_buffer != NULL) return true;
-    FILE *file = fopen(M3_STAGE_FILE, resume ? "ab" : "wb");
-    uint8_t *buffer = malloc(M3_BUNDLE_WRITE_BUFFER_BYTES);
+    FILE *file = fopen(SYNC_STAGE_FILE, resume ? "ab" : "wb");
+    uint8_t *buffer = malloc(SYNC_BUNDLE_WRITE_BUFFER_BYTES);
     if (file == NULL || buffer == NULL) {
         if (file != NULL) fclose(file);
         free(buffer);
@@ -415,7 +415,7 @@ static bool m3_bundle_upload_open(bool resume)
     return true;
 }
 
-static bool m3_bundle_upload_flush_buffer(void)
+static bool sync_bundle_upload_flush_buffer(void)
 {
     if (s_storage.upload_file == NULL || s_storage.upload_buffer == NULL) return false;
     if (s_storage.upload_buffer_used != 0 &&
@@ -427,28 +427,28 @@ static bool m3_bundle_upload_flush_buffer(void)
     return true;
 }
 
-static bool m3_bundle_upload_checkpoint(void)
+static bool sync_bundle_upload_checkpoint(void)
 {
-    if (!m3_bundle_upload_flush_buffer() || fflush(s_storage.upload_file) != 0 ||
-        fsync(fileno(s_storage.upload_file)) != 0 || !m3_upload_state_write()) {
+    if (!sync_bundle_upload_flush_buffer() || fflush(s_storage.upload_file) != 0 ||
+        fsync(fileno(s_storage.upload_file)) != 0 || !sync_upload_state_write()) {
         return false;
     }
     s_storage.durable_bytes = s_storage.received_bytes;
     return true;
 }
 
-static bool m3_upload_state_load(void)
+static bool sync_upload_state_load(void)
 {
-    m3_upload_state_t record = {0};
-    if (!m3_read_exact(M3_STATE_FILE, &record, sizeof(record)) ||
-        record.magic != M3_PROTOCOL_MAGIC ||
-        record.record_crc32 != m3_crc32(&record, offsetof(m3_upload_state_t, record_crc32)) ||
-        record.total_bytes == 0 || record.total_bytes > M3_MAX_BUNDLE_BYTES ||
+    sync_upload_state_t record = {0};
+    if (!sync_read_exact(SYNC_STATE_FILE, &record, sizeof(record)) ||
+        record.magic != SYNC_PROTOCOL_MAGIC ||
+        record.record_crc32 != sync_crc32(&record, offsetof(sync_upload_state_t, record_crc32)) ||
+        record.total_bytes == 0 || record.total_bytes > SYNC_MAX_BUNDLE_BYTES ||
         record.received_bytes > record.total_bytes) {
         return false;
     }
     struct stat stage;
-    if (stat(M3_STAGE_FILE, &stage) != 0 || (uint32_t) stage.st_size != record.received_bytes) {
+    if (stat(SYNC_STAGE_FILE, &stage) != 0 || (uint32_t) stage.st_size != record.received_bytes) {
         return false;
     }
     s_storage.upload_open = true;
@@ -459,12 +459,12 @@ static bool m3_upload_state_load(void)
     return true;
 }
 
-static bool m3_validate_bundle_file(const char *path, uint32_t expected_bytes, uint32_t expected_crc)
+static bool sync_validate_bundle_file(const char *path, uint32_t expected_bytes, uint32_t expected_crc)
 {
-    m3_bundle_header_t header = {0};
+    sync_bundle_header_t header = {0};
     FILE *file = fopen(path, "rb");
     if (file == NULL || fread(&header, 1, sizeof(header), file) != sizeof(header) ||
-        header.magic != M3_BUNDLE_MAGIC || header.schema_version != M3_PROTOCOL_VERSION ||
+        header.magic != SYNC_BUNDLE_MAGIC || header.schema_version != SYNC_PROTOCOL_VERSION ||
         header.header_bytes != sizeof(header) || header.total_bytes != expected_bytes) {
         if (file) fclose(file);
         return false;
@@ -479,7 +479,7 @@ static bool m3_validate_bundle_file(const char *path, uint32_t expected_bytes, u
     return crc == expected_crc && header.payload_crc32 == expected_crc;
 }
 
-static bool m3_file_crc32(const char *path, uint32_t maximum_bytes,
+static bool sync_file_crc32(const char *path, uint32_t maximum_bytes,
                           uint32_t *bytes_out, uint32_t *crc_out)
 {
     FILE *file = fopen(path, "rb");
@@ -504,19 +504,19 @@ static bool m3_file_crc32(const char *path, uint32_t maximum_bytes,
     return true;
 }
 
-/* Full pre-activation validation: the SDB envelope and CRC plus every inner
- * M5UI semantic (F3/F4). A bundle passes only when the runtime parser can
+/* Full pre-activation validation: the bundle envelope and CRC plus every inner
+ * UI bundle semantic (F3/F4). A bundle passes only when the runtime parser can
  * build a working UI from it, so an invalid but CRC-correct bundle can never
  * be marked active. */
-static bool m3_bundle_fully_valid(const char *path, uint32_t expected_bytes, uint32_t expected_crc)
+static bool sync_bundle_fully_valid(const char *path, uint32_t expected_bytes, uint32_t expected_crc)
 {
-    if (!m3_validate_bundle_file(path, expected_bytes, expected_crc)) return false;
+    if (!sync_validate_bundle_file(path, expected_bytes, expected_crc)) return false;
 #ifdef MEDIA_ENABLED
     FILE *file = fopen(path, "rb");
     if (file == NULL) return false;
     const bool valid = ui_bundle_valid(
-        file, sizeof(m3_bundle_header_t),
-        expected_bytes - (uint32_t) sizeof(m3_bundle_header_t));
+        file, sizeof(sync_bundle_header_t),
+        expected_bytes - (uint32_t) sizeof(sync_bundle_header_t));
     fclose(file);
     return valid;
 #else
@@ -524,15 +524,15 @@ static bool m3_bundle_fully_valid(const char *path, uint32_t expected_bytes, uin
 #endif
 }
 
-static bool m3_read_pointer(const char *path, m3_pointer_t *pointer)
+static bool sync_read_pointer(const char *path, sync_pointer_t *pointer)
 {
-    return m3_read_exact(path, pointer, sizeof(*pointer)) &&
-           pointer->magic == M3_POINTER_MAGIC &&
-           pointer->record_crc32 == m3_crc32(pointer, offsetof(m3_pointer_t, record_crc32)) &&
+    return sync_read_exact(path, pointer, sizeof(*pointer)) &&
+           pointer->magic == SYNC_POINTER_MAGIC &&
+           pointer->record_crc32 == sync_crc32(pointer, offsetof(sync_pointer_t, record_crc32)) &&
            memchr(pointer->bundle_name, '\0', sizeof(pointer->bundle_name)) != NULL;
 }
 
-static bool m3_parse_generation(const char *name, const char *prefix,
+static bool sync_parse_generation(const char *name, const char *prefix,
                                 const char *suffix, uint32_t *generation)
 {
     const size_t prefix_length = strlen(prefix);
@@ -544,21 +544,21 @@ static bool m3_parse_generation(const char *name, const char *prefix,
     return true;
 }
 
-static bool m3_find_pointer_below(uint32_t limit, m3_pointer_t *selected,
+static bool sync_find_pointer_below(uint32_t limit, sync_pointer_t *selected,
                                   char *selected_path, size_t selected_path_size)
 {
     bool found = false;
     uint32_t best = 0;
-    DIR *directory = opendir(M3_ROOT);
+    DIR *directory = opendir(SYNC_ROOT);
     if (directory == NULL) return false;
     struct dirent *entry;
     while ((entry = readdir(directory)) != NULL) {
         uint32_t filename_generation;
-        if (!m3_parse_generation(entry->d_name, "active-", ".ptr", &filename_generation)) continue;
+        if (!sync_parse_generation(entry->d_name, "active-", ".ptr", &filename_generation)) continue;
         char pointer_path[384];
-        snprintf(pointer_path, sizeof(pointer_path), "%s/%s", M3_ROOT, entry->d_name);
-        m3_pointer_t pointer = {0};
-        if (!m3_read_pointer(pointer_path, &pointer) || pointer.generation != filename_generation ||
+        snprintf(pointer_path, sizeof(pointer_path), "%s/%s", SYNC_ROOT, entry->d_name);
+        sync_pointer_t pointer = {0};
+        if (!sync_read_pointer(pointer_path, &pointer) || pointer.generation != filename_generation ||
             pointer.generation >= limit || (found && pointer.generation <= best)) continue;
         *selected = pointer;
         snprintf(selected_path, selected_path_size, "%s", pointer_path);
@@ -569,40 +569,40 @@ static bool m3_find_pointer_below(uint32_t limit, m3_pointer_t *selected,
     return found;
 }
 
-static void m3_cleanup_generations(void)
+static void sync_cleanup_generations(void)
 {
-    DIR *directory = opendir(M3_ROOT);
+    DIR *directory = opendir(SYNC_ROOT);
     if (directory != NULL) {
         struct dirent *entry;
         while ((entry = readdir(directory)) != NULL) {
             uint32_t generation;
-            if (!m3_parse_generation(entry->d_name, "active-", ".ptr", &generation) ||
+            if (!sync_parse_generation(entry->d_name, "active-", ".ptr", &generation) ||
                 generation == s_storage.active_generation ||
                 generation == s_storage.previous_generation) continue;
             char path[384];
-            snprintf(path, sizeof(path), "%s/%s", M3_ROOT, entry->d_name);
+            snprintf(path, sizeof(path), "%s/%s", SYNC_ROOT, entry->d_name);
             unlink(path);
         }
         closedir(directory);
     }
-    directory = opendir(M3_BUNDLES_DIR);
+    directory = opendir(SYNC_BUNDLES_DIR);
     if (directory != NULL) {
         struct dirent *entry;
         while ((entry = readdir(directory)) != NULL) {
             uint32_t generation;
-            if (!m3_parse_generation(entry->d_name, "bundle-", ".sdb", &generation) ||
+            if (!sync_parse_generation(entry->d_name, "bundle-", ".sdb", &generation) ||
                 generation == s_storage.active_generation ||
                 generation == s_storage.previous_generation ||
                 generation == s_download_generation) continue;
             char path[384];
-            snprintf(path, sizeof(path), "%s/%s", M3_BUNDLES_DIR, entry->d_name);
+            snprintf(path, sizeof(path), "%s/%s", SYNC_BUNDLES_DIR, entry->d_name);
             unlink(path);
         }
         closedir(directory);
     }
 }
 
-static void m3_find_active_pointer(void)
+static void sync_find_active_pointer(void)
 {
     s_storage.active_bundle_valid = false;
     s_storage.active_generation = 0;
@@ -612,17 +612,17 @@ static void m3_find_active_pointer(void)
     uint32_t limit = UINT32_MAX;
     uint8_t valid_count = 0;
     for (;;) {
-        m3_pointer_t pointer = {0};
+        sync_pointer_t pointer = {0};
         char pointer_path[384];
-        if (!m3_find_pointer_below(limit, &pointer, pointer_path, sizeof(pointer_path))) break;
+        if (!sync_find_pointer_below(limit, &pointer, pointer_path, sizeof(pointer_path))) break;
         limit = pointer.generation;
         char bundle_path[128];
-        snprintf(bundle_path, sizeof(bundle_path), "%s/%s", M3_BUNDLES_DIR, pointer.bundle_name);
+        snprintf(bundle_path, sizeof(bundle_path), "%s/%s", SYNC_BUNDLES_DIR, pointer.bundle_name);
         struct stat bundle;
         const bool valid = stat(bundle_path, &bundle) == 0 &&
-                           bundle.st_size >= (off_t) sizeof(m3_bundle_header_t) &&
-                           bundle.st_size <= M3_MAX_BUNDLE_BYTES &&
-                           m3_bundle_fully_valid(bundle_path, (uint32_t) bundle.st_size,
+                           bundle.st_size >= (off_t) sizeof(sync_bundle_header_t) &&
+                           bundle.st_size <= SYNC_MAX_BUNDLE_BYTES &&
+                           sync_bundle_fully_valid(bundle_path, (uint32_t) bundle.st_size,
                                                  pointer.bundle_crc32);
         if (valid && valid_count == 0) {
             s_storage.active_generation = pointer.generation;
@@ -634,70 +634,70 @@ static void m3_find_active_pointer(void)
             s_storage.previous_generation = pointer.generation;
             break;
         } else {
-            ESP_LOGW(TAG, "M3_SD result=invalid_generation generation=%u", pointer.generation);
+            ESP_LOGW(TAG, "STORAGE result=invalid_generation generation=%u", pointer.generation);
             unlink(pointer_path);
         }
     }
-    m3_cleanup_generations();
+    sync_cleanup_generations();
 }
 
-static bool m3_storage_init(void)
+static bool sync_storage_init(void)
 {
     if (bsp_sdcard_mount() != ESP_OK) {
-        ESP_LOGE(TAG, "M3_SD result=mount_failed");
+        ESP_LOGE(TAG, "STORAGE result=mount_failed");
         return false;
     }
-    s_storage.mounted = m3_mkdir(M3_ROOT) && m3_mkdir(M3_BUNDLES_DIR);
+    s_storage.mounted = sync_mkdir(SYNC_ROOT) && sync_mkdir(SYNC_BUNDLES_DIR);
     if (!s_storage.mounted) {
-        ESP_LOGE(TAG, "M3_SD result=directory_init_failed");
+        ESP_LOGE(TAG, "STORAGE result=directory_init_failed");
         return false;
     }
     struct stat media;
-    if (stat(M3_MEDIA_FILE, &media) != 0 && stat(M3_MEDIA_BACKUP_FILE, &media) == 0 &&
-        rename(M3_MEDIA_BACKUP_FILE, M3_MEDIA_FILE) == 0) {
-        ESP_LOGW(TAG, "M3_MEDIA action=recover_previous");
-    } else if (stat(M3_MEDIA_FILE, &media) == 0) {
+    if (stat(SYNC_MEDIA_FILE, &media) != 0 && stat(SYNC_MEDIA_BACKUP_FILE, &media) == 0 &&
+        rename(SYNC_MEDIA_BACKUP_FILE, SYNC_MEDIA_FILE) == 0) {
+        ESP_LOGW(TAG, "MEDIA_SYNC action=recover_previous");
+    } else if (stat(SYNC_MEDIA_FILE, &media) == 0) {
         /* F7 boot rollback: if the active screensaver is present but cannot be
          * decoded, restore the last good backup instead of playing nothing or
          * crashing the indexer. */
-        bool media_valid = media.st_size >= 4 && media.st_size <= (off_t) M3_MAX_MEDIA_BYTES;
+        bool media_valid = media.st_size >= 4 && media.st_size <= (off_t) SYNC_MAX_MEDIA_BYTES;
 #ifdef MEDIA_ENABLED
-        media_valid = media_valid && mjpeg_file_valid(M3_MEDIA_FILE);
+        media_valid = media_valid && mjpeg_file_valid(SYNC_MEDIA_FILE);
 #endif
         if (!media_valid) {
-            unlink(M3_MEDIA_FILE);
-            if (stat(M3_MEDIA_BACKUP_FILE, &media) == 0 &&
-                rename(M3_MEDIA_BACKUP_FILE, M3_MEDIA_FILE) == 0) {
-                ESP_LOGW(TAG, "M3_MEDIA action=restore_backup reason=invalid_active");
+            unlink(SYNC_MEDIA_FILE);
+            if (stat(SYNC_MEDIA_BACKUP_FILE, &media) == 0 &&
+                rename(SYNC_MEDIA_BACKUP_FILE, SYNC_MEDIA_FILE) == 0) {
+                ESP_LOGW(TAG, "MEDIA_SYNC action=restore_backup reason=invalid_active");
             } else {
-                ESP_LOGW(TAG, "M3_MEDIA action=discard_invalid_active");
+                ESP_LOGW(TAG, "MEDIA_SYNC action=discard_invalid_active");
             }
         }
     }
     uint32_t active_media_bytes = 0;
     s_storage.active_media_crc32 = 0;
-    (void) m3_file_crc32(M3_MEDIA_FILE, M3_MAX_MEDIA_BYTES,
+    (void) sync_file_crc32(SYNC_MEDIA_FILE, SYNC_MAX_MEDIA_BYTES,
                          &active_media_bytes, &s_storage.active_media_crc32);
-    m3_find_active_pointer();
-    if (!m3_upload_state_load()) {
-        unlink(M3_STATE_FILE);
-        ESP_LOGI(TAG, "M3_SD result=ready active_generation=%u active_valid=%u", s_storage.active_generation, s_storage.active_bundle_valid);
+    sync_find_active_pointer();
+    if (!sync_upload_state_load()) {
+        unlink(SYNC_STATE_FILE);
+        ESP_LOGI(TAG, "STORAGE result=ready active_generation=%u active_valid=%u", s_storage.active_generation, s_storage.active_bundle_valid);
     } else {
-        ESP_LOGW(TAG, "M3_SD result=resume_available bytes=%u/%u", s_storage.received_bytes, s_storage.total_bytes);
+        ESP_LOGW(TAG, "STORAGE result=resume_available bytes=%u/%u", s_storage.received_bytes, s_storage.total_bytes);
     }
     return true;
 }
 
-static void m3_send_response(uint8_t opcode, uint32_t sequence, m3_status_t status, uint32_t value)
+static void sync_send_response(uint8_t opcode, uint32_t sequence, sync_status_t status, uint32_t value)
 {
     struct __attribute__((packed)) {
-        m3_frame_header_t header;
+        sync_frame_header_t header;
         uint32_t status;
         uint32_t value;
     } response = {
         .header = {
-            .magic = M3_PROTOCOL_MAGIC,
-            .version = M3_PROTOCOL_VERSION,
+            .magic = SYNC_PROTOCOL_MAGIC,
+            .version = SYNC_PROTOCOL_VERSION,
             .opcode = opcode | 0x80,
             .sequence = sequence,
             .payload_size = 8,
@@ -705,48 +705,48 @@ static void m3_send_response(uint8_t opcode, uint32_t sequence, m3_status_t stat
         .status = status,
         .value = value,
     };
-    response.header.payload_crc32 = m3_crc32(&response.status, sizeof(response.status) + sizeof(response.value));
+    response.header.payload_crc32 = sync_crc32(&response.status, sizeof(response.status) + sizeof(response.value));
     if (!s_usb_mounted) return;
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(M3_RESPONSE_WAIT_MS);
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(SYNC_RESPONSE_WAIT_MS);
     while (s_usb_mounted && tud_vendor_n_write_available(0) < sizeof(response) &&
            xTaskGetTickCount() < deadline) {
         vTaskDelay(1);
     }
     if (!s_usb_mounted || tud_vendor_n_write_available(0) < sizeof(response)) {
-        ESP_LOGE(TAG, "M3_SYNC result=response_timeout opcode=%u sequence=%u", opcode, sequence);
+        ESP_LOGE(TAG, "DEVICE_SYNC result=response_timeout opcode=%u sequence=%u", opcode, sequence);
         return;
     }
     const uint32_t written = tud_vendor_n_write(0, &response, sizeof(response));
     tud_vendor_n_write_flush(0);
     if (written != sizeof(response)) {
-        ESP_LOGE(TAG, "M3_SYNC result=response_short opcode=%u sequence=%u bytes=%u",
+        ESP_LOGE(TAG, "DEVICE_SYNC result=response_short opcode=%u sequence=%u bytes=%u",
                  opcode, sequence, written);
     }
 }
 
-static void m3_send_payload(uint8_t opcode, uint32_t sequence, const void *payload, uint32_t payload_size)
+static void sync_send_payload(uint8_t opcode, uint32_t sequence, const void *payload, uint32_t payload_size)
 {
-    m3_frame_header_t header = {
-        .magic = M3_PROTOCOL_MAGIC, .version = M3_PROTOCOL_VERSION,
+    sync_frame_header_t header = {
+        .magic = SYNC_PROTOCOL_MAGIC, .version = SYNC_PROTOCOL_VERSION,
         .opcode = opcode | 0x80, .sequence = sequence, .payload_size = payload_size,
-        .payload_crc32 = m3_crc32(payload, payload_size),
+        .payload_crc32 = sync_crc32(payload, payload_size),
     };
     const uint32_t total = sizeof(header) + payload_size;
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(M3_RESPONSE_WAIT_MS);
+    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(SYNC_RESPONSE_WAIT_MS);
     while (s_usb_mounted && tud_vendor_n_write_available(0) < total && xTaskGetTickCount() < deadline) vTaskDelay(1);
     if (!s_usb_mounted || tud_vendor_n_write_available(0) < total ||
         tud_vendor_n_write(0, &header, sizeof(header)) != sizeof(header) ||
         tud_vendor_n_write(0, payload, payload_size) != payload_size) {
-        ESP_LOGE(TAG, "M3_SYNC result=download_response_failed sequence=%u", sequence);
+        ESP_LOGE(TAG, "DEVICE_SYNC result=download_response_failed sequence=%u", sequence);
         return;
     }
     tud_vendor_n_write_flush(0);
 }
 
-static void m3_download_close(void)
+static void sync_download_close(void)
 {
-    /* Only the M3 sync task owns the download stream. TinyUSB callbacks must
-     * never close it (see m3_usb_event_cb); they publish the connection change
+    /* Only the device sync task owns the download stream. TinyUSB callbacks must
+     * never close it (see sync_usb_event_cb); they publish the connection change
      * and the sync task performs the close on its next pass. */
     if (s_download_file != NULL) fclose(s_download_file);
     s_download_file = NULL;
@@ -754,132 +754,132 @@ static void m3_download_close(void)
     s_download_generation = 0;
 }
 
-static void m3_handle_download_chunk(const m3_frame_header_t *frame, const uint8_t *payload)
+static void sync_handle_download_chunk(const sync_frame_header_t *frame, const uint8_t *payload)
 {
     if (!s_storage.active_bundle_valid || s_download_file == NULL || frame->payload_size != sizeof(uint32_t)) {
-        m3_send_response(M3_OP_DOWNLOAD_CHUNK, frame->sequence, M3_STATUS_BAD_STATE, 0); return;
+        sync_send_response(SYNC_OP_DOWNLOAD_CHUNK, frame->sequence, SYNC_STATUS_BAD_STATE, 0); return;
     }
     uint32_t offset;
     memcpy(&offset, payload, sizeof(offset));
     if (offset != s_download_offset && fseek(s_download_file, (long) offset, SEEK_SET) != 0) {
         /* The file position is unrecoverable; close the transaction so a
          * retry starts from DOWNLOAD_BEGIN instead of a stale handle. */
-        m3_download_close();
-        m3_send_response(M3_OP_DOWNLOAD_CHUNK, frame->sequence, M3_STATUS_IO, offset); return;
+        sync_download_close();
+        sync_send_response(SYNC_OP_DOWNLOAD_CHUNK, frame->sequence, SYNC_STATUS_IO, offset); return;
     }
-    uint8_t chunk[M3_MAX_FRAME_PAYLOAD];
+    uint8_t chunk[SYNC_MAX_FRAME_PAYLOAD];
     const size_t count = fread(chunk, 1, sizeof(chunk), s_download_file);
     s_download_offset = offset + count;
-    m3_send_payload(M3_OP_DOWNLOAD_CHUNK, frame->sequence, chunk, count);
+    sync_send_payload(SYNC_OP_DOWNLOAD_CHUNK, frame->sequence, chunk, count);
 }
 
-static void m3_handle_download_begin(const m3_frame_header_t *frame)
+static void sync_handle_download_begin(const sync_frame_header_t *frame)
 {
-    m3_download_close();
+    sync_download_close();
     struct stat info;
     if (!s_storage.active_bundle_valid || stat(s_active_bundle_path, &info) != 0 ||
         (s_download_file = fopen(s_active_bundle_path, "rb")) == NULL) {
-        m3_send_response(M3_OP_DOWNLOAD_BEGIN, frame->sequence, M3_STATUS_BAD_STATE, 0);
+        sync_send_response(SYNC_OP_DOWNLOAD_BEGIN, frame->sequence, SYNC_STATUS_BAD_STATE, 0);
         return;
     }
     s_download_generation = s_storage.active_generation;
-    m3_send_response(M3_OP_DOWNLOAD_BEGIN, frame->sequence, M3_STATUS_OK, (uint32_t) info.st_size);
+    sync_send_response(SYNC_OP_DOWNLOAD_BEGIN, frame->sequence, SYNC_STATUS_OK, (uint32_t) info.st_size);
 }
 
-static void m3_handle_download_end(const m3_frame_header_t *frame)
+static void sync_handle_download_end(const sync_frame_header_t *frame)
 {
     /* Explicit end-of-download: the host read every byte, so release the file
      * handle now. Without this, generation cleanup could unlink a file that
      * remains open after two later commits (see F5). */
-    m3_download_close();
-    m3_send_response(M3_OP_DOWNLOAD_END, frame->sequence, M3_STATUS_OK, 0);
+    sync_download_close();
+    sync_send_response(SYNC_OP_DOWNLOAD_END, frame->sequence, SYNC_STATUS_OK, 0);
 }
 
-static void m3_handle_begin(const m3_frame_header_t *frame, const uint8_t *payload)
+static void sync_handle_begin(const sync_frame_header_t *frame, const uint8_t *payload)
 {
-    if (!s_storage.mounted || frame->payload_size != sizeof(m3_begin_t)) {
-        m3_send_response(M3_OP_BEGIN, frame->sequence, M3_STATUS_BAD_FRAME, 0);
+    if (!s_storage.mounted || frame->payload_size != sizeof(sync_begin_t)) {
+        sync_send_response(SYNC_OP_BEGIN, frame->sequence, SYNC_STATUS_BAD_FRAME, 0);
         return;
     }
-    m3_begin_t begin;
+    sync_begin_t begin;
     memcpy(&begin, payload, sizeof(begin));
-    if (begin.total_bytes < sizeof(m3_bundle_header_t) || begin.total_bytes > M3_MAX_BUNDLE_BYTES) {
-        m3_send_response(M3_OP_BEGIN, frame->sequence, M3_STATUS_BAD_BUNDLE, 0);
+    if (begin.total_bytes < sizeof(sync_bundle_header_t) || begin.total_bytes > SYNC_MAX_BUNDLE_BYTES) {
+        sync_send_response(SYNC_OP_BEGIN, frame->sequence, SYNC_STATUS_BAD_BUNDLE, 0);
         return;
     }
     if (s_storage.upload_open && s_storage.total_bytes == begin.total_bytes &&
         s_storage.bundle_crc32 == begin.bundle_crc32) {
-        if (!m3_bundle_upload_open(true)) {
-            m3_send_response(M3_OP_BEGIN, frame->sequence, M3_STATUS_IO, s_storage.durable_bytes);
+        if (!sync_bundle_upload_open(true)) {
+            sync_send_response(SYNC_OP_BEGIN, frame->sequence, SYNC_STATUS_IO, s_storage.durable_bytes);
             return;
         }
-        m3_send_response(M3_OP_BEGIN, frame->sequence, M3_STATUS_OK, s_storage.received_bytes);
+        sync_send_response(SYNC_OP_BEGIN, frame->sequence, SYNC_STATUS_OK, s_storage.received_bytes);
         return;
     }
-    m3_bundle_upload_close();
-    unlink(M3_STAGE_FILE);
-    unlink(M3_STATE_FILE);
+    sync_bundle_upload_close();
+    unlink(SYNC_STAGE_FILE);
+    unlink(SYNC_STATE_FILE);
     s_storage.upload_open = true;
     s_storage.total_bytes = begin.total_bytes;
     s_storage.bundle_crc32 = begin.bundle_crc32;
     s_storage.received_bytes = 0;
     s_storage.durable_bytes = 0;
-    if (!m3_bundle_upload_open(false) || !m3_upload_state_write()) {
-        m3_bundle_upload_close();
+    if (!sync_bundle_upload_open(false) || !sync_upload_state_write()) {
+        sync_bundle_upload_close();
         s_storage.upload_open = false;
-        m3_send_response(M3_OP_BEGIN, frame->sequence, M3_STATUS_IO, 0);
+        sync_send_response(SYNC_OP_BEGIN, frame->sequence, SYNC_STATUS_IO, 0);
         return;
     }
-    ESP_LOGI(TAG, "M3_SYNC action=begin bytes=%u crc=%08" PRIx32, begin.total_bytes, begin.bundle_crc32);
-    m3_send_response(M3_OP_BEGIN, frame->sequence, M3_STATUS_OK, 0);
+    ESP_LOGI(TAG, "DEVICE_SYNC action=begin bytes=%u crc=%08" PRIx32, begin.total_bytes, begin.bundle_crc32);
+    sync_send_response(SYNC_OP_BEGIN, frame->sequence, SYNC_STATUS_OK, 0);
 }
 
-static void m3_handle_chunk(const m3_frame_header_t *frame, const uint8_t *payload, bool respond)
+static void sync_handle_chunk(const sync_frame_header_t *frame, const uint8_t *payload, bool respond)
 {
-    if (!s_storage.upload_open || frame->payload_size < sizeof(m3_chunk_prefix_t)) {
-        if (respond) m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_BAD_STATE, s_storage.durable_bytes);
+    if (!s_storage.upload_open || frame->payload_size < sizeof(sync_chunk_prefix_t)) {
+        if (respond) sync_send_response(SYNC_OP_CHUNK, frame->sequence, SYNC_STATUS_BAD_STATE, s_storage.durable_bytes);
         return;
     }
-    m3_chunk_prefix_t prefix;
+    sync_chunk_prefix_t prefix;
     memcpy(&prefix, payload, sizeof(prefix));
     const uint8_t *chunk = payload + sizeof(prefix);
     const size_t chunk_size = frame->payload_size - sizeof(prefix);
     if (prefix.offset != s_storage.received_bytes || chunk_size == 0 ||
-        chunk_size > M3_MAX_FRAME_PAYLOAD - sizeof(prefix) ||
+        chunk_size > SYNC_MAX_FRAME_PAYLOAD - sizeof(prefix) ||
         chunk_size > s_storage.total_bytes - s_storage.received_bytes ||
-        prefix.chunk_crc32 != m3_crc32(chunk, chunk_size)) {
-        if (respond) m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_BAD_FRAME, s_storage.durable_bytes);
+        prefix.chunk_crc32 != sync_crc32(chunk, chunk_size)) {
+        if (respond) sync_send_response(SYNC_OP_CHUNK, frame->sequence, SYNC_STATUS_BAD_FRAME, s_storage.durable_bytes);
         return;
     }
-    bool ok = m3_bundle_upload_open(true);
-    if (ok && s_storage.upload_buffer_used + chunk_size > M3_BUNDLE_WRITE_BUFFER_BYTES) {
-        ok = m3_bundle_upload_flush_buffer();
+    bool ok = sync_bundle_upload_open(true);
+    if (ok && s_storage.upload_buffer_used + chunk_size > SYNC_BUNDLE_WRITE_BUFFER_BYTES) {
+        ok = sync_bundle_upload_flush_buffer();
     }
     if (ok) {
         memcpy(s_storage.upload_buffer + s_storage.upload_buffer_used, chunk, chunk_size);
         s_storage.upload_buffer_used += chunk_size;
     }
     if (!ok) {
-        if (respond) m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_IO, s_storage.durable_bytes);
+        if (respond) sync_send_response(SYNC_OP_CHUNK, frame->sequence, SYNC_STATUS_IO, s_storage.durable_bytes);
         return;
     }
     s_storage.received_bytes += chunk_size;
-    if (respond && !m3_bundle_upload_checkpoint()) {
-        m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_IO, s_storage.durable_bytes);
+    if (respond && !sync_bundle_upload_checkpoint()) {
+        sync_send_response(SYNC_OP_CHUNK, frame->sequence, SYNC_STATUS_IO, s_storage.durable_bytes);
         return;
     }
-    if (respond) m3_send_response(M3_OP_CHUNK, frame->sequence, M3_STATUS_OK, s_storage.durable_bytes);
+    if (respond) sync_send_response(SYNC_OP_CHUNK, frame->sequence, SYNC_STATUS_OK, s_storage.durable_bytes);
 }
 
-static void m3_handle_commit(const m3_frame_header_t *frame)
+static void sync_handle_commit(const sync_frame_header_t *frame)
 {
     const bool checkpointed = s_storage.upload_open &&
                               s_storage.received_bytes == s_storage.total_bytes &&
-                              m3_bundle_upload_checkpoint();
-    m3_bundle_upload_close();
+                              sync_bundle_upload_checkpoint();
+    sync_bundle_upload_close();
     if (!checkpointed ||
-        !m3_bundle_fully_valid(M3_STAGE_FILE, s_storage.total_bytes, s_storage.bundle_crc32)) {
-        m3_send_response(M3_OP_COMMIT, frame->sequence, M3_STATUS_BAD_BUNDLE, s_storage.received_bytes);
+        !sync_bundle_fully_valid(SYNC_STAGE_FILE, s_storage.total_bytes, s_storage.bundle_crc32)) {
+        sync_send_response(SYNC_OP_COMMIT, frame->sequence, SYNC_STATUS_BAD_BUNDLE, s_storage.received_bytes);
         return;
     }
     const uint32_t generation = s_storage.active_generation + 1;
@@ -887,23 +887,23 @@ static void m3_handle_commit(const m3_frame_header_t *frame)
     char bundle_path[128];
     char pointer_path[128];
     snprintf(bundle_name, sizeof(bundle_name), "bundle-%08" PRIu32 ".sdb", generation);
-    snprintf(bundle_path, sizeof(bundle_path), "%s/%s", M3_BUNDLES_DIR, bundle_name);
-    snprintf(pointer_path, sizeof(pointer_path), "%s/active-%08" PRIu32 ".ptr", M3_ROOT, generation);
-    if (rename(M3_STAGE_FILE, bundle_path) != 0) {
-        m3_send_response(M3_OP_COMMIT, frame->sequence, M3_STATUS_IO, s_storage.received_bytes);
+    snprintf(bundle_path, sizeof(bundle_path), "%s/%s", SYNC_BUNDLES_DIR, bundle_name);
+    snprintf(pointer_path, sizeof(pointer_path), "%s/active-%08" PRIu32 ".ptr", SYNC_ROOT, generation);
+    if (rename(SYNC_STAGE_FILE, bundle_path) != 0) {
+        sync_send_response(SYNC_OP_COMMIT, frame->sequence, SYNC_STATUS_IO, s_storage.received_bytes);
         return;
     }
-    m3_pointer_t pointer = {.magic = M3_POINTER_MAGIC, .generation = generation, .bundle_crc32 = s_storage.bundle_crc32};
+    sync_pointer_t pointer = {.magic = SYNC_POINTER_MAGIC, .generation = generation, .bundle_crc32 = s_storage.bundle_crc32};
     const size_t bundle_name_length = strnlen(bundle_name, sizeof(pointer.bundle_name) - 1);
     memcpy(pointer.bundle_name, bundle_name, bundle_name_length);
     pointer.bundle_name[bundle_name_length] = '\0';
-    pointer.record_crc32 = m3_crc32(&pointer, offsetof(m3_pointer_t, record_crc32));
-    if (!m3_write_exact(pointer_path, &pointer, sizeof(pointer))) {
+    pointer.record_crc32 = sync_crc32(&pointer, offsetof(sync_pointer_t, record_crc32));
+    if (!sync_write_exact(pointer_path, &pointer, sizeof(pointer))) {
         // Bundle remains unreferenced; old pointer is still valid and boot-safe.
-        m3_send_response(M3_OP_COMMIT, frame->sequence, M3_STATUS_IO, s_storage.received_bytes);
+        sync_send_response(SYNC_OP_COMMIT, frame->sequence, SYNC_STATUS_IO, s_storage.received_bytes);
         return;
     }
-    unlink(M3_STATE_FILE);
+    unlink(SYNC_STATE_FILE);
     s_storage.previous_generation = s_storage.active_generation;
     s_storage.active_generation = generation;
     s_storage.active_bundle_crc32 = s_storage.bundle_crc32;
@@ -912,17 +912,17 @@ static void m3_handle_commit(const m3_frame_header_t *frame)
     s_storage.upload_open = false;
     s_storage.received_bytes = 0;
     s_storage.durable_bytes = 0;
-    m3_cleanup_generations();
-    ESP_LOGI(TAG, "M3_SYNC action=commit generation=%u bundle=%s", generation, bundle_name);
-    m3_send_response(M3_OP_COMMIT, frame->sequence, M3_STATUS_OK, generation);
+    sync_cleanup_generations();
+    ESP_LOGI(TAG, "DEVICE_SYNC action=commit generation=%u bundle=%s", generation, bundle_name);
+    sync_send_response(SYNC_OP_COMMIT, frame->sequence, SYNC_STATUS_OK, generation);
 #ifdef MEDIA_ENABLED
-    BaseType_t restart_ok = xTaskCreate(m3_restart_after_commit, "bundle_restart", 2048,
+    BaseType_t restart_ok = xTaskCreate(sync_restart_after_commit, "bundle_restart", 2048,
                                         NULL, 4, NULL);
-    if (restart_ok != pdPASS) ESP_LOGE(TAG, "M3_SYNC result=restart_task_failed");
+    if (restart_ok != pdPASS) ESP_LOGE(TAG, "DEVICE_SYNC result=restart_task_failed");
 #endif
 }
 
-static bool m3_validate_mjpeg_file(const char *path, uint32_t expected_bytes, uint32_t expected_crc)
+static bool sync_validate_mjpeg_file(const char *path, uint32_t expected_bytes, uint32_t expected_crc)
 {
     FILE *file = fopen(path, "rb");
     if (file == NULL) return false;
@@ -946,59 +946,59 @@ static bool m3_validate_mjpeg_file(const char *path, uint32_t expected_bytes, ui
 #endif
 }
 
-static void m3_handle_media_begin(const m3_frame_header_t *frame, const uint8_t *payload)
+static void sync_handle_media_begin(const sync_frame_header_t *frame, const uint8_t *payload)
 {
-    if (!s_storage.mounted || frame->payload_size != sizeof(m3_begin_t)) {
-        m3_send_response(M3_OP_MEDIA_BEGIN, frame->sequence, M3_STATUS_BAD_FRAME, 0); return;
+    if (!s_storage.mounted || frame->payload_size != sizeof(sync_begin_t)) {
+        sync_send_response(SYNC_OP_MEDIA_BEGIN, frame->sequence, SYNC_STATUS_BAD_FRAME, 0); return;
     }
-    m3_begin_t begin; memcpy(&begin, payload, sizeof(begin));
-    if (begin.total_bytes < 4 || begin.total_bytes > M3_MAX_MEDIA_BYTES) {
-        m3_send_response(M3_OP_MEDIA_BEGIN, frame->sequence, M3_STATUS_BAD_BUNDLE, 0); return;
+    sync_begin_t begin; memcpy(&begin, payload, sizeof(begin));
+    if (begin.total_bytes < 4 || begin.total_bytes > SYNC_MAX_MEDIA_BYTES) {
+        sync_send_response(SYNC_OP_MEDIA_BEGIN, frame->sequence, SYNC_STATUS_BAD_BUNDLE, 0); return;
     }
     if (s_media_upload.open && s_media_upload.total_bytes == begin.total_bytes && s_media_upload.crc32 == begin.bundle_crc32) {
-        m3_send_response(M3_OP_MEDIA_BEGIN, frame->sequence, M3_STATUS_OK, s_media_upload.received_bytes); return;
+        sync_send_response(SYNC_OP_MEDIA_BEGIN, frame->sequence, SYNC_STATUS_OK, s_media_upload.received_bytes); return;
     }
     if (s_media_upload.file != NULL) fclose(s_media_upload.file);
     free(s_media_upload.write_buffer);
-    unlink(M3_MEDIA_STAGE_FILE);
-    FILE *file = fopen(M3_MEDIA_STAGE_FILE, "wb");
+    unlink(SYNC_MEDIA_STAGE_FILE);
+    FILE *file = fopen(SYNC_MEDIA_STAGE_FILE, "wb");
     if (file == NULL) {
-        s_media_upload = (m3_media_upload_t) {0};
-        m3_send_response(M3_OP_MEDIA_BEGIN, frame->sequence, M3_STATUS_IO, 0); return;
+        s_media_upload = (sync_media_upload_t) {0};
+        sync_send_response(SYNC_OP_MEDIA_BEGIN, frame->sequence, SYNC_STATUS_IO, 0); return;
     }
-    uint8_t *write_buffer = malloc(M3_MEDIA_WRITE_BUFFER_BYTES);
+    uint8_t *write_buffer = malloc(SYNC_MEDIA_WRITE_BUFFER_BYTES);
     if (write_buffer == NULL) {
         free(write_buffer);
-        fclose(file); unlink(M3_MEDIA_STAGE_FILE);
-        s_media_upload = (m3_media_upload_t) {0};
-        m3_send_response(M3_OP_MEDIA_BEGIN, frame->sequence, M3_STATUS_IO, 0); return;
+        fclose(file); unlink(SYNC_MEDIA_STAGE_FILE);
+        s_media_upload = (sync_media_upload_t) {0};
+        sync_send_response(SYNC_OP_MEDIA_BEGIN, frame->sequence, SYNC_STATUS_IO, 0); return;
     }
-    s_media_upload = (m3_media_upload_t) {
+    s_media_upload = (sync_media_upload_t) {
         .open = true, .file = file, .write_buffer = write_buffer,
         .total_bytes = begin.total_bytes, .crc32 = begin.bundle_crc32,
     };
-    ESP_LOGI(TAG, "M3_MEDIA action=begin bytes=%u crc=%08" PRIx32, begin.total_bytes, begin.bundle_crc32);
-    m3_send_response(M3_OP_MEDIA_BEGIN, frame->sequence, M3_STATUS_OK, 0);
+    ESP_LOGI(TAG, "MEDIA_SYNC action=begin bytes=%u crc=%08" PRIx32, begin.total_bytes, begin.bundle_crc32);
+    sync_send_response(SYNC_OP_MEDIA_BEGIN, frame->sequence, SYNC_STATUS_OK, 0);
 }
 
-static void m3_handle_media_chunk(const m3_frame_header_t *frame, const uint8_t *payload, bool respond)
+static void sync_handle_media_chunk(const sync_frame_header_t *frame, const uint8_t *payload, bool respond)
 {
-    if (!s_media_upload.open || frame->payload_size < sizeof(m3_chunk_prefix_t)) {
-        if (respond) m3_send_response(M3_OP_MEDIA_CHUNK, frame->sequence, M3_STATUS_BAD_STATE, s_media_upload.received_bytes);
+    if (!s_media_upload.open || frame->payload_size < sizeof(sync_chunk_prefix_t)) {
+        if (respond) sync_send_response(SYNC_OP_MEDIA_CHUNK, frame->sequence, SYNC_STATUS_BAD_STATE, s_media_upload.received_bytes);
         return;
     }
-    m3_chunk_prefix_t prefix; memcpy(&prefix, payload, sizeof(prefix));
+    sync_chunk_prefix_t prefix; memcpy(&prefix, payload, sizeof(prefix));
     const uint8_t *chunk = payload + sizeof(prefix);
     const size_t chunk_size = frame->payload_size - sizeof(prefix);
     if (prefix.offset != s_media_upload.received_bytes || chunk_size == 0 ||
-        chunk_size > M3_MAX_FRAME_PAYLOAD - sizeof(prefix) ||
+        chunk_size > SYNC_MAX_FRAME_PAYLOAD - sizeof(prefix) ||
         chunk_size > s_media_upload.total_bytes - s_media_upload.received_bytes ||
-        prefix.chunk_crc32 != m3_crc32(chunk, chunk_size)) {
-        if (respond) m3_send_response(M3_OP_MEDIA_CHUNK, frame->sequence, M3_STATUS_BAD_FRAME, s_media_upload.received_bytes);
+        prefix.chunk_crc32 != sync_crc32(chunk, chunk_size)) {
+        if (respond) sync_send_response(SYNC_OP_MEDIA_CHUNK, frame->sequence, SYNC_STATUS_BAD_FRAME, s_media_upload.received_bytes);
         return;
     }
     bool ok = s_media_upload.file != NULL && s_media_upload.write_buffer != NULL;
-    if (ok && s_media_upload.write_buffer_used + chunk_size > M3_MEDIA_WRITE_BUFFER_BYTES) {
+    if (ok && s_media_upload.write_buffer_used + chunk_size > SYNC_MEDIA_WRITE_BUFFER_BYTES) {
         ok = fwrite(s_media_upload.write_buffer, 1, s_media_upload.write_buffer_used,
                     s_media_upload.file) == s_media_upload.write_buffer_used;
         s_media_upload.write_buffer_used = 0;
@@ -1008,14 +1008,14 @@ static void m3_handle_media_chunk(const m3_frame_header_t *frame, const uint8_t 
         s_media_upload.write_buffer_used += chunk_size;
     }
     if (!ok) {
-        if (respond) m3_send_response(M3_OP_MEDIA_CHUNK, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes);
+        if (respond) sync_send_response(SYNC_OP_MEDIA_CHUNK, frame->sequence, SYNC_STATUS_IO, s_media_upload.received_bytes);
         return;
     }
     s_media_upload.received_bytes += chunk_size;
-    if (respond) m3_send_response(M3_OP_MEDIA_CHUNK, frame->sequence, M3_STATUS_OK, s_media_upload.received_bytes);
+    if (respond) sync_send_response(SYNC_OP_MEDIA_CHUNK, frame->sequence, SYNC_STATUS_OK, s_media_upload.received_bytes);
 }
 
-static void m3_handle_media_commit(const m3_frame_header_t *frame)
+static void sync_handle_media_commit(const sync_frame_header_t *frame)
 {
     if (s_media_upload.file != NULL) {
         bool flushed = s_media_upload.write_buffer != NULL &&
@@ -1025,14 +1025,14 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
         fclose(s_media_upload.file);
         s_media_upload.file = NULL;
         if (!flushed) {
-            m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes); return;
+            sync_send_response(SYNC_OP_MEDIA_COMMIT, frame->sequence, SYNC_STATUS_IO, s_media_upload.received_bytes); return;
         }
     }
     free(s_media_upload.write_buffer);
     s_media_upload.write_buffer = NULL;
     if (!s_media_upload.open || s_media_upload.received_bytes != s_media_upload.total_bytes ||
-        !m3_validate_mjpeg_file(M3_MEDIA_STAGE_FILE, s_media_upload.total_bytes, s_media_upload.crc32)) {
-        m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_BAD_BUNDLE, s_media_upload.received_bytes); return;
+        !sync_validate_mjpeg_file(SYNC_MEDIA_STAGE_FILE, s_media_upload.total_bytes, s_media_upload.crc32)) {
+        sync_send_response(SYNC_OP_MEDIA_COMMIT, frame->sequence, SYNC_STATUS_BAD_BUNDLE, s_media_upload.received_bytes); return;
     }
     /* FATFS cannot replace an existing name with rename. Preserve the last
      * known-good file under a recovery name before activating the new one.
@@ -1040,39 +1040,39 @@ static void m3_handle_media_commit(const m3_frame_header_t *frame)
      * after activation (F1); renames must never hit an open handle. */
 #ifdef MEDIA_ENABLED
     if (media_control(MEDIA_CTRL_QUIESCE, 30000) != 0) {
-        ESP_LOGE(TAG, "M3_MEDIA result=quiesce_failed");
-        m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes);
+        ESP_LOGE(TAG, "MEDIA_SYNC result=quiesce_failed");
+        sync_send_response(SYNC_OP_MEDIA_COMMIT, frame->sequence, SYNC_STATUS_IO, s_media_upload.received_bytes);
         return;
     }
 #endif
-    unlink(M3_MEDIA_BACKUP_FILE);
+    unlink(SYNC_MEDIA_BACKUP_FILE);
     struct stat previous_media;
-    const bool had_previous = stat(M3_MEDIA_FILE, &previous_media) == 0;
-    if (had_previous && rename(M3_MEDIA_FILE, M3_MEDIA_BACKUP_FILE) != 0) {
-        m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes); return;
+    const bool had_previous = stat(SYNC_MEDIA_FILE, &previous_media) == 0;
+    if (had_previous && rename(SYNC_MEDIA_FILE, SYNC_MEDIA_BACKUP_FILE) != 0) {
+        sync_send_response(SYNC_OP_MEDIA_COMMIT, frame->sequence, SYNC_STATUS_IO, s_media_upload.received_bytes); return;
     }
-    if (rename(M3_MEDIA_STAGE_FILE, M3_MEDIA_FILE) != 0) {
-        if (had_previous) rename(M3_MEDIA_BACKUP_FILE, M3_MEDIA_FILE);
-        m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_IO, s_media_upload.received_bytes); return;
+    if (rename(SYNC_MEDIA_STAGE_FILE, SYNC_MEDIA_FILE) != 0) {
+        if (had_previous) rename(SYNC_MEDIA_BACKUP_FILE, SYNC_MEDIA_FILE);
+        sync_send_response(SYNC_OP_MEDIA_COMMIT, frame->sequence, SYNC_STATUS_IO, s_media_upload.received_bytes); return;
     }
 #ifdef MEDIA_ENABLED
     /* Resume playback from the new file so the pre-restart window never runs
      * with a stale ready state. A failed re-index only disables playback; the
      * boot recovery path can still restore the backup file. */
     if (media_control(MEDIA_CTRL_RELOAD, 30000) != 0) {
-        ESP_LOGW(TAG, "M3_MEDIA result=reload_failed");
+        ESP_LOGW(TAG, "MEDIA_SYNC result=reload_failed");
     }
 #endif
     const uint32_t uploaded = s_media_upload.total_bytes;
     const uint32_t uploaded_crc32 = s_media_upload.crc32;
-    s_media_upload = (m3_media_upload_t) {0};
+    s_media_upload = (sync_media_upload_t) {0};
     s_storage.active_media_crc32 = uploaded_crc32;
-    ESP_LOGI(TAG, "M3_MEDIA action=commit bytes=%u path=%s", uploaded, M3_MEDIA_FILE);
-    m3_send_response(M3_OP_MEDIA_COMMIT, frame->sequence, M3_STATUS_OK, uploaded);
+    ESP_LOGI(TAG, "MEDIA_SYNC action=commit bytes=%u path=%s", uploaded, SYNC_MEDIA_FILE);
+    sync_send_response(SYNC_OP_MEDIA_COMMIT, frame->sequence, SYNC_STATUS_OK, uploaded);
 #ifdef MEDIA_ENABLED
-    BaseType_t restart_ok = xTaskCreate(m3_restart_after_commit, "media_restart", 2048,
+    BaseType_t restart_ok = xTaskCreate(sync_restart_after_commit, "media_restart", 2048,
                                         NULL, 4, NULL);
-    if (restart_ok != pdPASS) ESP_LOGE(TAG, "M3_MEDIA result=restart_task_failed");
+    if (restart_ok != pdPASS) ESP_LOGE(TAG, "MEDIA_SYNC result=restart_task_failed");
 #endif
 }
 
@@ -1090,11 +1090,11 @@ typedef struct __attribute__((packed)) {
     uint32_t upload_crc32;
     uint32_t media_bytes; /* size of the active screensaver file, 0 when absent */
     uint32_t media_crc32;
-} m3_status_v3_t;
+} sync_status_v3_t;
 
-static void m3_send_status(uint8_t opcode, uint32_t sequence)
+static void sync_send_status(uint8_t opcode, uint32_t sequence)
 {
-    m3_status_v3_t status = {
+    sync_status_v3_t status = {
         .version = 3,
         .flags = s_storage.upload_open ? 1U : 0U,
         .active_generation = s_storage.active_generation,
@@ -1106,64 +1106,64 @@ static void m3_send_status(uint8_t opcode, uint32_t sequence)
         .media_crc32 = s_storage.active_media_crc32,
     };
     struct stat media;
-    if (stat(M3_MEDIA_FILE, &media) == 0 && media.st_size <= (off_t) M3_MAX_MEDIA_BYTES) {
+    if (stat(SYNC_MEDIA_FILE, &media) == 0 && media.st_size <= (off_t) SYNC_MAX_MEDIA_BYTES) {
         status.media_bytes = (uint32_t) media.st_size;
     }
-    m3_send_payload(opcode, sequence, &status, sizeof(status));
+    sync_send_payload(opcode, sequence, &status, sizeof(status));
 }
 
-static void m3_dispatch_frame(const m3_frame_header_t *frame, const uint8_t *payload)
+static void sync_dispatch_frame(const sync_frame_header_t *frame, const uint8_t *payload)
 {
-    if (frame->opcode == M3_OP_HELLO) {
+    if (frame->opcode == SYNC_OP_HELLO) {
         // Protocol v1, resume, checksums, atomic bundles, no MSC, media upload,
         // and batched media/bundle chunks (silent intermediate frames).
-        m3_send_response(M3_OP_HELLO, frame->sequence, M3_STATUS_OK, 0x000003FF);
-    } else if (frame->opcode == M3_OP_BEGIN) {
-        m3_handle_begin(frame, payload);
-    } else if (frame->opcode == M3_OP_CHUNK) {
-        m3_handle_chunk(frame, payload,
-                        (frame->reserved & M3_FRAME_FLAG_NO_RESPONSE) == 0);
-    } else if (frame->opcode == M3_OP_COMMIT) {
-        m3_handle_commit(frame);
-    } else if (frame->opcode == M3_OP_MEDIA_BEGIN) {
-        m3_handle_media_begin(frame, payload);
-    } else if (frame->opcode == M3_OP_MEDIA_CHUNK) {
-        m3_handle_media_chunk(frame, payload,
-                              (frame->reserved & M3_FRAME_FLAG_NO_RESPONSE) == 0);
-    } else if (frame->opcode == M3_OP_MEDIA_COMMIT) {
-        m3_handle_media_commit(frame);
-    } else if (frame->opcode == M3_OP_DOWNLOAD_BEGIN) {
-        m3_handle_download_begin(frame);
-    } else if (frame->opcode == M3_OP_DOWNLOAD_CHUNK) {
-        m3_handle_download_chunk(frame, payload);
-    } else if (frame->opcode == M3_OP_DOWNLOAD_END) {
-        m3_handle_download_end(frame);
-    } else if (frame->opcode == M3_OP_MEDIA_ABORT) {
+        sync_send_response(SYNC_OP_HELLO, frame->sequence, SYNC_STATUS_OK, 0x000003FF);
+    } else if (frame->opcode == SYNC_OP_BEGIN) {
+        sync_handle_begin(frame, payload);
+    } else if (frame->opcode == SYNC_OP_CHUNK) {
+        sync_handle_chunk(frame, payload,
+                        (frame->reserved & SYNC_FRAME_FLAG_NO_RESPONSE) == 0);
+    } else if (frame->opcode == SYNC_OP_COMMIT) {
+        sync_handle_commit(frame);
+    } else if (frame->opcode == SYNC_OP_MEDIA_BEGIN) {
+        sync_handle_media_begin(frame, payload);
+    } else if (frame->opcode == SYNC_OP_MEDIA_CHUNK) {
+        sync_handle_media_chunk(frame, payload,
+                              (frame->reserved & SYNC_FRAME_FLAG_NO_RESPONSE) == 0);
+    } else if (frame->opcode == SYNC_OP_MEDIA_COMMIT) {
+        sync_handle_media_commit(frame);
+    } else if (frame->opcode == SYNC_OP_DOWNLOAD_BEGIN) {
+        sync_handle_download_begin(frame);
+    } else if (frame->opcode == SYNC_OP_DOWNLOAD_CHUNK) {
+        sync_handle_download_chunk(frame, payload);
+    } else if (frame->opcode == SYNC_OP_DOWNLOAD_END) {
+        sync_handle_download_end(frame);
+    } else if (frame->opcode == SYNC_OP_MEDIA_ABORT) {
         if (s_media_upload.file != NULL) fclose(s_media_upload.file);
         free(s_media_upload.write_buffer);
-        unlink(M3_MEDIA_STAGE_FILE); s_media_upload = (m3_media_upload_t) {0};
-        m3_send_response(M3_OP_MEDIA_ABORT, frame->sequence, M3_STATUS_OK, 0);
+        unlink(SYNC_MEDIA_STAGE_FILE); s_media_upload = (sync_media_upload_t) {0};
+        sync_send_response(SYNC_OP_MEDIA_ABORT, frame->sequence, SYNC_STATUS_OK, 0);
 #ifdef MEDIA_ENABLED
-    } else if (frame->opcode == M3_OP_TEST_SCREENSAVER) {
+    } else if (frame->opcode == SYNC_OP_TEST_SCREENSAVER) {
         const uint32_t media_error = media_trigger_screensaver();
-        m3_send_response(M3_OP_TEST_SCREENSAVER, frame->sequence,
-                         media_error == 0 ? M3_STATUS_OK : M3_STATUS_MEDIA_UNAVAILABLE,
+        sync_send_response(SYNC_OP_TEST_SCREENSAVER, frame->sequence,
+                         media_error == 0 ? SYNC_STATUS_OK : SYNC_STATUS_MEDIA_UNAVAILABLE,
                          media_error);
 #endif
-    } else if (frame->opcode == M3_OP_ABORT) {
-        m3_bundle_upload_close();
-        m3_download_close();
-        unlink(M3_STAGE_FILE); unlink(M3_STATE_FILE);
+    } else if (frame->opcode == SYNC_OP_ABORT) {
+        sync_bundle_upload_close();
+        sync_download_close();
+        unlink(SYNC_STAGE_FILE); unlink(SYNC_STATE_FILE);
         s_storage.upload_open = false; s_storage.received_bytes = 0; s_storage.durable_bytes = 0;
-        m3_send_response(M3_OP_ABORT, frame->sequence, M3_STATUS_OK, 0);
-    } else if (frame->opcode == M3_OP_STATUS || frame->opcode == M3_OP_DIAG) {
-        m3_send_status(frame->opcode, frame->sequence);
+        sync_send_response(SYNC_OP_ABORT, frame->sequence, SYNC_STATUS_OK, 0);
+    } else if (frame->opcode == SYNC_OP_STATUS || frame->opcode == SYNC_OP_DIAG) {
+        sync_send_status(frame->opcode, frame->sequence);
     } else {
-        m3_send_response(frame->opcode, frame->sequence, M3_STATUS_BAD_FRAME, 0);
+        sync_send_response(frame->opcode, frame->sequence, SYNC_STATUS_BAD_FRAME, 0);
     }
 }
 
-static void m3_feed_bytes(const uint8_t *bytes, size_t length)
+static void sync_feed_bytes(const uint8_t *bytes, size_t length)
 {
     while (length > 0) {
         const size_t room = sizeof(s_frame_buffer) - s_frame_length;
@@ -1172,22 +1172,22 @@ static void m3_feed_bytes(const uint8_t *bytes, size_t length)
         s_frame_length += copy;
         bytes += copy;
         length -= copy;
-        if (s_frame_length < sizeof(m3_frame_header_t)) continue;
-        m3_frame_header_t frame;
+        if (s_frame_length < sizeof(sync_frame_header_t)) continue;
+        sync_frame_header_t frame;
         memcpy(&frame, s_frame_buffer, sizeof(frame));
         const size_t full_length = sizeof(frame) + frame.payload_size;
-        if (frame.magic != M3_PROTOCOL_MAGIC || frame.version != M3_PROTOCOL_VERSION ||
-            frame.payload_size > M3_MAX_FRAME_PAYLOAD || full_length > sizeof(s_frame_buffer)) {
+        if (frame.magic != SYNC_PROTOCOL_MAGIC || frame.version != SYNC_PROTOCOL_VERSION ||
+            frame.payload_size > SYNC_MAX_FRAME_PAYLOAD || full_length > sizeof(s_frame_buffer)) {
             s_frame_length = 0;
-            m3_send_response(0, frame.sequence, M3_STATUS_BAD_FRAME, 0);
+            sync_send_response(0, frame.sequence, SYNC_STATUS_BAD_FRAME, 0);
             continue;
         }
         if (s_frame_length < full_length) continue;
         const uint8_t *payload = s_frame_buffer + sizeof(frame);
-        if (frame.payload_crc32 != m3_crc32(payload, frame.payload_size)) {
-            m3_send_response(frame.opcode, frame.sequence, M3_STATUS_BAD_FRAME, s_storage.received_bytes);
+        if (frame.payload_crc32 != sync_crc32(payload, frame.payload_size)) {
+            sync_send_response(frame.opcode, frame.sequence, SYNC_STATUS_BAD_FRAME, s_storage.received_bytes);
         } else {
-            m3_dispatch_frame(&frame, payload);
+            sync_dispatch_frame(&frame, payload);
         }
         const size_t remaining = s_frame_length - full_length;
         memmove(s_frame_buffer, s_frame_buffer + full_length, remaining);
@@ -1195,20 +1195,20 @@ static void m3_feed_bytes(const uint8_t *bytes, size_t length)
     }
 }
 
-static void m3_sync_task(void *argument)
+static void sync_task(void *argument)
 {
     (void) argument;
-    m3_rx_packet_t packet;
+    sync_rx_packet_t packet;
     while (true) {
         if (xQueueReceive(s_rx_queue, &packet, pdMS_TO_TICKS(50)) == pdTRUE) {
-            m3_feed_bytes(packet.bytes, packet.length);
+            sync_feed_bytes(packet.bytes, packet.length);
         }
         /* Detach is published by the TinyUSB callback as a flag; the sync task
          * owns the download stream and closes it here, never in the callback.
          * The bounded queue wait keeps this check responsive without spinning. */
         if (!s_usb_mounted && s_download_file != NULL) {
-            ESP_LOGW(TAG, "M3_SYNC result=download_cancelled reason=detach");
-            m3_download_close();
+            ESP_LOGW(TAG, "DEVICE_SYNC result=download_cancelled reason=detach");
+            sync_download_close();
         }
     }
 }
@@ -1221,31 +1221,31 @@ void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bufsize)
      * (buffer=NULL, bufsize=0); the received bytes must then be drained from
      * the vendor FIFO. Keep the direct-buffer path for non-buffered builds. */
     if (buffer != NULL && bufsize > 0) {
-        if (bufsize > M3_RX_PACKET_BYTES) {
-            ESP_LOGE(TAG, "M3_SYNC result=rx_frame_too_large bytes=%u", bufsize);
+        if (bufsize > SYNC_RX_PACKET_BYTES) {
+            ESP_LOGE(TAG, "DEVICE_SYNC result=rx_frame_too_large bytes=%u", bufsize);
             return;
         }
-        m3_rx_packet_t packet = {.length = bufsize};
+        sync_rx_packet_t packet = {.length = bufsize};
         memcpy(packet.bytes, buffer, packet.length);
         if (xQueueSend(s_rx_queue, &packet, 0) != pdTRUE) {
-            ESP_LOGW(TAG, "M3_SYNC result=rx_queue_full");
+            ESP_LOGW(TAG, "DEVICE_SYNC result=rx_queue_full");
         }
         return;
     }
 
     while (tud_vendor_n_available(itf) > 0) {
-        m3_rx_packet_t packet = {0};
+        sync_rx_packet_t packet = {0};
         const uint32_t available = tud_vendor_n_available(itf);
-        const uint32_t requested = available < M3_RX_PACKET_BYTES ? available : M3_RX_PACKET_BYTES;
+        const uint32_t requested = available < SYNC_RX_PACKET_BYTES ? available : SYNC_RX_PACKET_BYTES;
         packet.length = tud_vendor_n_read(itf, packet.bytes, requested);
         if (packet.length == 0) break;
         if (xQueueSend(s_rx_queue, &packet, 0) != pdTRUE) {
-            ESP_LOGW(TAG, "M3_SYNC result=rx_queue_full");
+            ESP_LOGW(TAG, "DEVICE_SYNC result=rx_queue_full");
         }
     }
 }
 
-static void m3_usb_event_cb(tinyusb_event_t *event, void *argument)
+static void sync_usb_event_cb(tinyusb_event_t *event, void *argument)
 {
     (void) argument;
     if (event->id == TINYUSB_EVENT_ATTACHED) {
@@ -1253,19 +1253,19 @@ static void m3_usb_event_cb(tinyusb_event_t *event, void *argument)
 #ifdef MEDIA_ENABLED
         hid_release_all("usb_attached");
 #endif
-        ESP_LOGI(TAG, "M3_USB state=mounted interfaces=keyboard,vendor_sync");
+        ESP_LOGI(TAG, "DEVICE_USB state=mounted interfaces=keyboard,vendor_sync");
     } else if (event->id == TINYUSB_EVENT_DETACHED) {
         s_usb_mounted = false;
         /* The download stream is owned by the sync task; the callback only
-         * publishes the connection change (see m3_download_close). */
+         * publishes the connection change (see sync_download_close). */
 #ifdef MEDIA_ENABLED
         hid_release_all("usb_detached");
 #endif
-        ESP_LOGW(TAG, "M3_USB state=unmounted transfer_resume=%u", s_storage.upload_open);
+        ESP_LOGW(TAG, "DEVICE_USB state=unmounted transfer_resume=%u", s_storage.upload_open);
     }
 }
 
-static void m3_usb_init(void)
+static void sync_usb_init(void)
 {
     tinyusb_config_t config = TINYUSB_DEFAULT_CONFIG();
     config.descriptor.device = &s_device_descriptor;
@@ -1273,14 +1273,14 @@ static void m3_usb_init(void)
     config.descriptor.full_speed_config = s_full_speed_configuration_descriptor;
     config.descriptor.string = s_string_descriptors;
     config.descriptor.string_count = sizeof(s_string_descriptors) / sizeof(s_string_descriptors[0]);
-    config.event_cb = m3_usb_event_cb;
+    config.event_cb = sync_usb_event_cb;
 #if (TUD_OPT_HIGH_SPEED)
     config.descriptor.high_speed_config = s_high_speed_configuration_descriptor;
 #endif
     ESP_ERROR_CHECK(tinyusb_driver_install(&config));
 }
 
-static void m3_recovery_ui(void)
+static void sync_recovery_ui(void)
 {
     lv_obj_t *screen = lv_screen_active();
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), 0);
@@ -1299,12 +1299,12 @@ static void m3_recovery_ui(void)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "M3_START idf=%s target=esp32p4", esp_get_idf_version());
-    const bool storage_ok = m3_storage_init();
-    s_rx_queue = xQueueCreate(M3_RX_QUEUE_DEPTH, sizeof(m3_rx_packet_t));
+    ESP_LOGI(TAG, "DEVICE_START idf=%s target=esp32p4", esp_get_idf_version());
+    const bool storage_ok = sync_storage_init();
+    s_rx_queue = xQueueCreate(SYNC_RX_QUEUE_DEPTH, sizeof(sync_rx_packet_t));
     ESP_ERROR_CHECK(s_rx_queue == NULL ? ESP_ERR_NO_MEM : ESP_OK);
-    ESP_ERROR_CHECK(xTaskCreate(m3_sync_task, "m3_sync", 6144, NULL, 6, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
-    m3_usb_init();
+    ESP_ERROR_CHECK(xTaskCreate(sync_task, "device_sync", 6144, NULL, 6, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    sync_usb_init();
 
     bsp_display_cfg_t display_cfg = {
         .lv_adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG(),
@@ -1316,16 +1316,16 @@ void app_main(void)
     if (s_display != NULL) {
         bsp_display_backlight_on();
         ESP_ERROR_CHECK(esp_lv_adapter_lock(UINT32_MAX));
-        m3_recovery_ui();
+        sync_recovery_ui();
         esp_lv_adapter_unlock();
 #ifdef MEDIA_ENABLED
         media_start(s_display);
 #endif
     }
 #ifdef MEDIA_ENABLED
-    ESP_LOGI(TAG, "M3_COMPLETE sd_ready=%u active_bundle=%u hid_output=macro_runtime msc=disabled",
+    ESP_LOGI(TAG, "DEVICE_READY sd_ready=%u active_bundle=%u hid_output=macro_runtime msc=disabled",
 #else
-    ESP_LOGI(TAG, "M3_COMPLETE sd_ready=%u active_bundle=%u hid_output=disabled msc=disabled",
+    ESP_LOGI(TAG, "DEVICE_READY sd_ready=%u active_bundle=%u hid_output=disabled msc=disabled",
 #endif
              storage_ok, s_storage.active_bundle_valid);
 }

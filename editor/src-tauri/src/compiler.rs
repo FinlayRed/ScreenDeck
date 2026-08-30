@@ -10,12 +10,12 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use thiserror::Error;
 
-const SDB3_MAGIC: u32 = 0x3342_4453;
-const M5UI_MAGIC: u32 = 0x4955_354D;
-const M5UI_HEADER_BYTES: usize = 72;
-const M5UI_PROFILE_BYTES: usize = 8;
-const M5UI_BUTTON_BYTES: usize = 8;
-const M5UI_ASSET_BYTES: usize = 20;
+const BUNDLE_MAGIC: u32 = 0x4C42_4453; // SDBL
+const UI_BUNDLE_MAGIC: u32 = 0x4955_4453; // SDUI
+const UI_BUNDLE_HEADER_BYTES: usize = 72;
+const UI_BUNDLE_PROFILE_BYTES: usize = 8;
+const UI_BUNDLE_BUTTON_BYTES: usize = 8;
+const UI_BUNDLE_ASSET_BYTES: usize = 20;
 const MACRO_DESCRIPTOR_BYTES: usize = 8;
 const MACRO_STEP_BYTES: usize = 8;
 const RADIAL_DESCRIPTOR_BYTES: usize = 4;
@@ -144,9 +144,9 @@ fn compile_validated(project: &Project) -> Result<Vec<u8>, CompileError> {
             "too many pages or icon assets for the device bundle".into(),
         ));
     }
-    let profiles_offset = M5UI_HEADER_BYTES;
-    let pages_offset = profiles_offset + project.profiles.len() * M5UI_PROFILE_BYTES;
-    let assets_offset = pages_offset + page_count * 32 * M5UI_BUTTON_BYTES;
+    let profiles_offset = UI_BUNDLE_HEADER_BYTES;
+    let pages_offset = profiles_offset + project.profiles.len() * UI_BUNDLE_PROFILE_BYTES;
+    let assets_offset = pages_offset + page_count * 32 * UI_BUNDLE_BUTTON_BYTES;
     let button_ref_count = page_count * 32;
     let step_count: usize = project.macros.iter().map(|item| item.steps.len()).sum();
     let radial_count: usize = project
@@ -164,7 +164,7 @@ fn compile_validated(project: &Project) -> Result<Vec<u8>, CompileError> {
         .filter_map(|b| b.radial.as_ref())
         .map(|r| r.items.len())
         .sum();
-    let button_macro_refs_offset = assets_offset + project.assets.len() * M5UI_ASSET_BYTES;
+    let button_macro_refs_offset = assets_offset + project.assets.len() * UI_BUNDLE_ASSET_BYTES;
     let macro_descriptors_offset = button_macro_refs_offset + button_ref_count * 2;
     let macro_steps_offset =
         macro_descriptors_offset + project.macros.len() * MACRO_DESCRIPTOR_BYTES;
@@ -172,9 +172,9 @@ fn compile_validated(project: &Project) -> Result<Vec<u8>, CompileError> {
     let radial_items_offset = radial_descriptors_offset + radial_count * RADIAL_DESCRIPTOR_BYTES;
     let blob_offset = radial_items_offset + radial_item_count * RADIAL_ITEM_BYTES;
     let mut payload = Vec::with_capacity(blob_offset);
-    payload.extend_from_slice(&M5UI_MAGIC.to_le_bytes());
+    payload.extend_from_slice(&UI_BUNDLE_MAGIC.to_le_bytes());
     payload.extend_from_slice(&3u16.to_le_bytes());
-    payload.extend_from_slice(&(M5UI_HEADER_BYTES as u16).to_le_bytes());
+    payload.extend_from_slice(&(UI_BUNDLE_HEADER_BYTES as u16).to_le_bytes());
     payload.extend_from_slice(&(project.profiles.len() as u16).to_le_bytes());
     payload.extend_from_slice(&(page_count as u16).to_le_bytes());
     payload.extend_from_slice(&(project.assets.len() as u16).to_le_bytes());
@@ -444,7 +444,7 @@ fn compile_validated(project: &Project) -> Result<Vec<u8>, CompileError> {
         return Err(CompileError::TooLarge(total));
     }
     let mut bundle = Vec::with_capacity(total);
-    bundle.extend_from_slice(&SDB3_MAGIC.to_le_bytes());
+    bundle.extend_from_slice(&BUNDLE_MAGIC.to_le_bytes());
     bundle.extend_from_slice(&1u16.to_le_bytes());
     bundle.extend_from_slice(&16u16.to_le_bytes());
     bundle.extend_from_slice(&(total as u32).to_le_bytes());
@@ -511,10 +511,10 @@ fn estimate_bundle_bytes(project: &Project) -> usize {
         .filter_map(|button| button.radial.as_ref())
         .map(|radial| radial.items.len())
         .sum();
-    let metadata = M5UI_HEADER_BYTES
-        + project.profiles.len() * M5UI_PROFILE_BYTES
-        + page_count * 32 * M5UI_BUTTON_BYTES
-        + project.assets.len() * M5UI_ASSET_BYTES
+    let metadata = UI_BUNDLE_HEADER_BYTES
+        + project.profiles.len() * UI_BUNDLE_PROFILE_BYTES
+        + page_count * 32 * UI_BUNDLE_BUTTON_BYTES
+        + project.assets.len() * UI_BUNDLE_ASSET_BYTES
         + page_count * 32 * 2
         + project.macros.len() * MACRO_DESCRIPTOR_BYTES
         + step_count * MACRO_STEP_BYTES
@@ -590,16 +590,16 @@ fn consumer_name(usage: u16) -> Option<String> {
 
 pub fn decompile(bundle: &[u8]) -> Result<Project, String> {
     if bundle.len() < 72
-        || u32_at(bundle, 0)? != SDB3_MAGIC
+        || u32_at(bundle, 0)? != BUNDLE_MAGIC
         || u32_at(bundle, 8)? as usize != bundle.len()
         || u32_at(bundle, 12)? != crc32(&bundle[16..])
     {
-        return Err("invalid SDB3 bundle".into());
+        return Err("invalid ScreenDeck bundle".into());
     }
     let p = &bundle[16..];
-    if u32_at(p, 0)? != M5UI_MAGIC
+    if u32_at(p, 0)? != UI_BUNDLE_MAGIC
         || u16_at(p, 4)? != 3
-        || u16_at(p, 6)? as usize != M5UI_HEADER_BYTES
+        || u16_at(p, 6)? as usize != UI_BUNDLE_HEADER_BYTES
     {
         return Err("unsupported runtime bundle version".into());
     }

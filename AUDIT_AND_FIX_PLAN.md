@@ -89,20 +89,20 @@ The sync task directly resets and frees global media state while the media task 
 - Confirm that only one index pass runs at a time.
 - Confirm deterministic status replies for queued, ready, and invalid-media states.
 
-### F3. Firmware activates bundles before validating the M5UI payload
+### F3. Firmware activates bundles before validating the UI bundle payload
 
 **Evidence:** `firmware/main/storage.c:458-475,571-580,779-821`, `firmware/main/media.c:361-425`, and `tests/device-sync.ps1:127-155`.
 
-Storage validates only the SDB envelope and payload CRC. It marks the generation active before the runtime parser checks M5UI magic, offsets, counts, references, assets, and animation streams. An invalid but CRC-correct bundle reports success, restarts, and replaces the working UI without selecting the previous valid generation.
+Storage validates only the bundle envelope and payload CRC. It marks the generation active before the runtime parser checks UI bundle magic, offsets, counts, references, assets, and animation streams. An invalid but CRC-correct bundle reports success, restarts, and replaces the working UI without selecting the previous valid generation.
 
 **Fix plan:**
 
-1. Extract the M5UI structural validator from `load_ui_bundle` into a side-effect-free validator that can operate on a file or bounded buffer.
-2. Validate both the SDB envelope and all inner M5UI semantics before writing the active pointer.
+1. Extract the UI bundle structural validator from `load_ui_bundle` into a side-effect-free validator that can operate on a file or bounded buffer.
+2. Validate both the bundle envelope and all inner UI bundle semantics before writing the active pointer.
 3. Keep activation separate from validation.
 4. At boot, treat a generation as valid only when both layers pass.
 5. If the newest generation fails, select the previous valid generation and remove or quarantine the bad pointer.
-6. Change the smoke test to build a minimal valid M5UI bundle. Add a separate negative test that expects rejection and never activates it.
+6. Change the smoke test to build a minimal valid UI bundle. Add a separate negative test that expects rejection and never activates it.
 
 **Acceptance tests:**
 
@@ -110,7 +110,7 @@ Storage validates only the SDB envelope and payload CRC. It marks the generation
 - Confirm that the prior generation stays active after every rejected commit.
 - Corrupt the newest generation on disk and confirm boot fallback to the previous valid generation.
 
-### F4. Unaligned M5UI offsets can cause a boot panic
+### F4. Unaligned UI bundle offsets can cause a boot panic
 
 **Evidence:** `firmware/main/media.c:367-410,925`.
 
@@ -431,7 +431,7 @@ Implement I1, I2, I3, I4, E9, and E14.
 Create one versioned contract document or generated schema containing:
 
 - Protocol version and response fields.
-- Maximum SDB bytes.
+- Maximum bundle bytes.
 - Icon FPS and frame-count limits.
 - Screensaver width, height, FPS, duration, frame count, frame bytes, and total bytes.
 - Commit identity and reconnect verification rules.
@@ -523,7 +523,7 @@ The audit passed these checks:
   - Verification: 20 Rust tests (7 new), clippy clean, rustfmt clean, firmware builds, PowerShell parser checks pass, T1 assertion verified at runtime.
 
 - **Phase 2 (2026-08-12):** Transactional activation landed on `phase/2-transactional-activation`.
-  - F3: `ui_bundle_valid` extracted as a side-effect-free, file-based M5UI validator (magic, schema, counts, offsets, references, assets, animation streams). Both `COMMIT` and boot pointer selection now require the full SDB + M5UI validation (`m3_bundle_fully_valid`), so a CRC-correct but invalid bundle can never be marked active. The smoke test now commits a minimal valid bundle and gains `-RejectInvalidBundle`, which expects rejection and confirms the generation does not advance.
+  - F3: `ui_bundle_valid` extracted as a side-effect-free, file-based UI bundle validator (magic, schema, counts, offsets, references, assets, animation streams). Both `COMMIT` and boot pointer selection now require the full bundle envelope + UI bundle validation (`sync_bundle_fully_valid`), so a CRC-correct but invalid bundle can never be marked active. The smoke test now commits a minimal valid bundle and gains `-RejectInvalidBundle`, which expects rejection and confirms the generation does not advance.
   - F4: every typed-table offset is alignment-checked (`_Alignof`) in the validator, the in-memory loader additionally rejects odd `button_macro_refs_offset`, and table parsing copies into aligned locals instead of casting file bytes.
   - F7: `mjpeg_file_valid` validates complete frame boundaries, count (<=1800), per-frame size (<=2 MiB), and every frame decoding to 720x1280 before activation and at boot; boot now restores the backup when the active file is present but undecodable.
   - E3: archive saves build in a uniquely named temp file, `sync_all`, then atomically replace via `MoveFileExW` (Windows) so no earlier failure can destroy the previous archive; the same pattern applies to workspace persistence. A regression test injects a mid-save failure and asserts the previous archive stays byte-identical with no staging leftovers.
@@ -563,7 +563,7 @@ Update this list as fixes land:
 - [x] E1 WinUSB cancellation lifetime
 - [x] F1 Safe screensaver replacement
 - [x] F2 Serialized screensaver testing/indexing
-- [x] F3 Full pre-activation M5UI validation
+- [x] F3 Full pre-activation UI bundle validation
 - [x] F4 Typed-table alignment validation
 - [x] F5 Download transaction cleanup
 - [x] E2 Symmetric project persistence
