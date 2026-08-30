@@ -10,9 +10,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# A dependency-free Windows smoke test for the M3 WinUSB function. The future
-# Tauri client will use the same stable interface GUID and SDC3 wire format.
-if (-not ('Screendeck.M3WinUsb' -as [type])) {
+# A dependency-free Windows smoke test for the device-sync WinUSB function. The future
+# Tauri client uses the same stable interface GUID and device-sync wire format.
+if (-not ('Screendeck.DeviceSyncWinUsb' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -21,7 +21,7 @@ using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
 namespace Screendeck {
-  public static class M3WinUsb {
+  public static class DeviceSyncWinUsb {
     static readonly Guid InterfaceGuid = new Guid("F38C253C-7E95-4F15-A9FD-7BBC31E4F0C4");
     const uint Present = 0x2, DeviceInterface = 0x10, ReadWrite = 0xC0000000, OpenExisting = 3;
     const byte PipeTransferTimeout = 3;
@@ -48,7 +48,7 @@ namespace Screendeck {
     static string Path() {
       Guid interfaceGuid = InterfaceGuid;
       IntPtr set = SetupDiGetClassDevs(ref interfaceGuid, IntPtr.Zero, IntPtr.Zero, Present | DeviceInterface);
-      if (set == new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error(), "M3 WinUSB interface not present");
+      if (set == new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error(), "device-sync WinUSB interface not present");
       try {
         var data = new IfaceData { cbSize = Marshal.SizeOf(typeof(IfaceData)) };
         Check(SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref interfaceGuid, 0, ref data));
@@ -62,19 +62,19 @@ namespace Screendeck {
       } finally { SetupDiDestroyDeviceInfoList(set); }
     }
     public static uint Crc32(byte[] data) {
-      // esp_rom_crc32_le() complements its public seed internally. M3 passes
+      // esp_rom_crc32_le() complements its public seed internally. The device-sync implementation passes
       // UINT32_MAX, which corresponds to a raw reflected CRC accumulator of 0.
       uint crc = 0;
       foreach (byte value in data) { crc ^= value; for (int bit=0; bit<8; bit++) crc = (crc >> 1) ^ ((crc & 1) != 0 ? 0xedb88320u : 0u); }
       return ~crc;
     }
     static void Put16(byte[] value, int offset, ushort number) { Array.Copy(BitConverter.GetBytes(number), 0, value, offset, 2); }
-    // A minimal structurally valid M5UI payload (schema 3): one profile, one
+    // A minimal structurally valid UI bundle payload (schema 3): one profile, one
     // page of 32 empty buttons, no assets, macros, or radials. Offsets are
     // chosen to satisfy range and 2-byte alignment checks (F3/F4).
     public static byte[] MinimalUiPayload() {
       var payload = new byte[400];
-      Put(payload, 0, 0x4955354D); // magic 'MU5I'
+      Put(payload, 0, 0x49554453); // SDUI
       Put16(payload, 4, 3);        // version
       Put16(payload, 6, 72);       // header_bytes
       Put16(payload, 8, 1);        // profile_count
@@ -110,7 +110,7 @@ namespace Screendeck {
     static byte[] ExchangePayload(byte opcode, uint sequence, byte[] payload) {
       payload = payload ?? Array.Empty<byte>();
       var frame = new byte[20 + payload.Length];
-      Put(frame, 0, 0x33434453); frame[4] = 1; frame[5] = opcode; Put(frame, 8, sequence); Put(frame, 12, (uint)payload.Length); Put(frame, 16, Crc32(payload));
+      Put(frame, 0, 0x59534453); frame[4] = 1; frame[5] = opcode; Put(frame, 8, sequence); Put(frame, 12, (uint)payload.Length); Put(frame, 16, Crc32(payload));
       Array.Copy(payload, 0, frame, 20, payload.Length);
       // WinUsb_Initialize requires FILE_FLAG_OVERLAPPED (Microsoft WinUSB API).
       using (var file = CreateFile(Path(), ReadWrite, 3, IntPtr.Zero, OpenExisting, 0x40000000, IntPtr.Zero)) {
@@ -121,10 +121,10 @@ namespace Screendeck {
           IfaceDesc descriptor; Check(WinUsb_QueryInterfaceSettings(usb, 0, out descriptor));
           byte input=0, output=0;
           for (byte i=0; i<descriptor.pipes; i++) { PipeInfo pipe; Check(WinUsb_QueryPipe(usb, 0, i, out pipe)); if ((pipe.address & 0x80) != 0) input=pipe.address; else output=pipe.address; }
-          if (input == 0 || output == 0) throw new InvalidOperationException("M3 bulk endpoints were not found (interface=" + descriptor.number + ", pipes=" + descriptor.pipes + ").");
+          if (input == 0 || output == 0) throw new InvalidOperationException("device-sync bulk endpoints were not found (interface=" + descriptor.number + ", pipes=" + descriptor.pipes + ").");
           uint timeout = 3000; Check(WinUsb_SetPipePolicy(usb, input, PipeTransferTimeout, 4, ref timeout));
           uint written; Check(WinUsb_WritePipe(usb, output, frame, (uint)frame.Length, out written, IntPtr.Zero));
-          if (written != frame.Length) throw new InvalidOperationException("Short M3 write.");
+          if (written != frame.Length) throw new InvalidOperationException("Short device sync write.");
           var response = new List<byte>();
           while (response.Count < 20 || response.Count < 20 + (int)U32(response.ToArray(), 12)) {
             var packet = new byte[512]; uint read; Check(WinUsb_ReadPipe(usb, input, packet, (uint)packet.Length, out read, IntPtr.Zero));
@@ -132,30 +132,30 @@ namespace Screendeck {
           }
           var bytes = response.ToArray();
           int bodySize = (int)U32(bytes, 12);
-          if (U32(bytes, 0) != 0x33434453 || bytes[4] != 1 || bytes[5] != (byte)(opcode | 0x80) || U32(bytes, 8) != sequence || bytes.Length < 20 + bodySize) throw new InvalidOperationException("Malformed M3 response.");
+          if (U32(bytes, 0) != 0x59534453 || bytes[4] != 1 || bytes[5] != (byte)(opcode | 0x80) || U32(bytes, 8) != sequence || bytes.Length < 20 + bodySize) throw new InvalidOperationException("Malformed device-sync response.");
           var body = new byte[bodySize]; Array.Copy(bytes, 20, body, 0, bodySize);
-          if (U32(bytes, 16) != Crc32(body)) throw new InvalidOperationException("M3 response CRC mismatch (device=0x" + U32(bytes, 16).ToString("X8") + ", host=0x" + Crc32(body).ToString("X8") + ").");
+          if (U32(bytes, 16) != Crc32(body)) throw new InvalidOperationException("device-sync response CRC mismatch (device=0x" + U32(bytes, 16).ToString("X8") + ", host=0x" + Crc32(body).ToString("X8") + ").");
           return body;
         } finally { WinUsb_Free(usb); }
       }
     }
     public static uint[] Exchange(byte opcode, uint sequence, byte[] payload) {
       var body = ExchangePayload(opcode, sequence, payload);
-      if (body.Length != 8) throw new InvalidOperationException("M3 response is not a status/value pair.");
+      if (body.Length != 8) throw new InvalidOperationException("device-sync response is not a status/value pair.");
       return new uint[] { U32(body, 0), U32(body, 4) };
     }
     public static uint Status(uint sequence) {
       var body = ExchangePayload(6, sequence, Array.Empty<byte>());
       if (body.Length == 36 || body.Length == 28) return U32(body, 8);
       if (body.Length == 8) {
-        if (U32(body, 0) != 0) throw new InvalidOperationException("M3 STATUS failed: status=" + U32(body, 0));
+        if (U32(body, 0) != 0) throw new InvalidOperationException("device sync STATUS failed: status=" + U32(body, 0));
         return U32(body, 4);
       }
-      throw new InvalidOperationException("Unsupported M3 STATUS payload size " + body.Length + ".");
+      throw new InvalidOperationException("Unsupported device sync STATUS payload size " + body.Length + ".");
     }
     public static byte[] Bundle(byte[] payload) {
       var bundle = new byte[16 + payload.Length];
-      Put(bundle, 0, 0x33424453); Array.Copy(BitConverter.GetBytes((ushort)1), 0, bundle, 4, 2); Array.Copy(BitConverter.GetBytes((ushort)16), 0, bundle, 6, 2);
+      Put(bundle, 0, 0x4C424453); Array.Copy(BitConverter.GetBytes((ushort)1), 0, bundle, 4, 2); Array.Copy(BitConverter.GetBytes((ushort)16), 0, bundle, 6, 2);
       Put(bundle, 8, (uint)bundle.Length); Put(bundle, 12, Crc32(payload)); Array.Copy(payload, 0, bundle, 16, payload.Length); return bundle;
     }
   }
@@ -170,7 +170,7 @@ namespace Screendeck {
 # is bound before Add-Type runs; the explicit [type] cast selects
 # Marshal.SizeOf(Type) instead of the object overload. PipeInfo is internal,
 # so both visibility flags are required.
-$pipeInfoType = [Screendeck.M3WinUsb].GetNestedType('PipeInfo', [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::NonPublic)
+$pipeInfoType = [Screendeck.DeviceSyncWinUsb].GetNestedType('PipeInfo', [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::NonPublic)
 if ($null -eq $pipeInfoType) { throw 'PipeInfo type not found after Add-Type.' }
 $pipeInfoSize = [Runtime.InteropServices.Marshal]::SizeOf([type]$pipeInfoType)
 if ($pipeInfoSize -ne 12) {
@@ -178,84 +178,84 @@ if ($pipeInfoSize -ne 12) {
 }
 Write-Verbose "WINUSB_PIPE_INFORMATION marshals to $pipeInfoSize bytes (ABI-correct)"
 
-function Invoke-M3([byte] $Opcode, [uint32] $Sequence, [byte[]] $Payload = @()) {
-    $reply = [Screendeck.M3WinUsb]::Exchange($Opcode, $Sequence, $Payload)
-    if ($reply[0] -ne 0) { throw "M3 opcode $Opcode failed: status=$($reply[0]) value=$($reply[1])" }
+function Invoke-DeviceSync([byte] $Opcode, [uint32] $Sequence, [byte[]] $Payload = @()) {
+    $reply = [Screendeck.DeviceSyncWinUsb]::Exchange($Opcode, $Sequence, $Payload)
+    if ($reply[0] -ne 0) { throw "device-sync opcode $Opcode failed: status=$($reply[0]) value=$($reply[1])" }
     return $reply[1]
 }
 
 $sequence = 1
-$devicePath = [Screendeck.M3WinUsb]::DevicePath()
-Write-Verbose "M3 WinUSB path: $devicePath"
-$caps = Invoke-M3 1 $sequence; $sequence++
-if (($caps -band 0x1F) -ne 0x1F) { throw "Unexpected M3 capability word: 0x$($caps.ToString('X8'))" }
-$before = [Screendeck.M3WinUsb]::Status($sequence); $sequence++
-Write-Host "M3 HELLO ok capabilities=0x$($caps.ToString('X8')); generation=$before"
+$devicePath = [Screendeck.DeviceSyncWinUsb]::DevicePath()
+Write-Verbose "device-sync WinUSB path: $devicePath"
+$caps = Invoke-DeviceSync 1 $sequence; $sequence++
+if (($caps -band 0x1F) -ne 0x1F) { throw "Unexpected device-sync capability word: 0x$($caps.ToString('X8'))" }
+$before = [Screendeck.DeviceSyncWinUsb]::Status($sequence); $sequence++
+Write-Host "device sync HELLO ok capabilities=0x$($caps.ToString('X8')); generation=$before"
 if ($CommitTestBundle -and $ResumeTest) { throw 'Choose either -CommitTestBundle or -ResumeTest.' }
 if ($RejectInvalidBundle -and $ResumeTest) { throw 'Choose either -RejectInvalidBundle or -ResumeTest.' }
 # -CommitTestBundle replaces the active UI with a minimal but fully loadable
-# M5UI bundle (F3). It no longer risks an unloadable device, but it still
+# UI bundle (F3). It no longer risks an unloadable device, but it still
 # overwrites the working configuration, so it stays explicitly opt-in.
 if ($CommitTestBundle -and -not $AllowDestructiveBundle) {
     throw 'Refusing to commit a test bundle: it replaces the working device UI. Pass -AllowDestructiveBundle only on a sacrificial device.'
 }
 
 if ($CommitTestBundle -or $ResumeTest) {
-    [byte[]] $payload = if ($CommitTestBundle) { [Screendeck.M3WinUsb]::MinimalUiPayload() } else { 0..95 | ForEach-Object { [byte](($_ * 37 + 11) -band 0xFF) } }
-    [byte[]] $bundle = [Screendeck.M3WinUsb]::Bundle($payload)
-    $bundleCrc = [Screendeck.M3WinUsb]::Crc32($payload)
+    [byte[]] $payload = if ($CommitTestBundle) { [Screendeck.DeviceSyncWinUsb]::MinimalUiPayload() } else { 0..95 | ForEach-Object { [byte](($_ * 37 + 11) -band 0xFF) } }
+    [byte[]] $bundle = [Screendeck.DeviceSyncWinUsb]::Bundle($payload)
+    $bundleCrc = [Screendeck.DeviceSyncWinUsb]::Crc32($payload)
     [byte[]] $begin = [byte[]](@([BitConverter]::GetBytes([uint32]$bundle.Length)) + @([BitConverter]::GetBytes([uint32]$bundleCrc)))
-    $offset = Invoke-M3 2 $sequence $begin; $sequence++
+    $offset = Invoke-DeviceSync 2 $sequence $begin; $sequence++
     if ($offset -gt $bundle.Length) { throw "Device resume offset exceeds test bundle size." }
     if ($ResumeTest) {
         $half = [uint32]($bundle.Length / 2)
         [byte[]] $partial = $bundle[$offset..($half - 1)]
-        $partialCrc = [Screendeck.M3WinUsb]::Crc32($partial)
+        $partialCrc = [Screendeck.DeviceSyncWinUsb]::Crc32($partial)
         [byte[]] $partialPayload = [byte[]](@([BitConverter]::GetBytes([uint32]$offset)) + @([BitConverter]::GetBytes([uint32]$partialCrc)) + @($partial))
-        $received = Invoke-M3 3 $sequence $partialPayload; $sequence++
-        if ($received -ne $half) { throw "M3 resume setup acknowledged $received bytes; expected $half." }
-        $resumed = Invoke-M3 2 $sequence $begin; $sequence++
-        if ($resumed -ne $half) { throw "M3 resume offset was $resumed; expected $half." }
-        $null = Invoke-M3 5 $sequence; $sequence++
-        Write-Host "M3 RESUME ok persisted_offset=$resumed; upload aborted without changing generation"
+        $received = Invoke-DeviceSync 3 $sequence $partialPayload; $sequence++
+        if ($received -ne $half) { throw "device-sync resume setup acknowledged $received bytes; expected $half." }
+        $resumed = Invoke-DeviceSync 2 $sequence $begin; $sequence++
+        if ($resumed -ne $half) { throw "device-sync resume offset was $resumed; expected $half." }
+        $null = Invoke-DeviceSync 5 $sequence; $sequence++
+        Write-Host "device sync RESUME ok persisted_offset=$resumed; upload aborted without changing generation"
         $offset = $bundle.Length
     }
     if ($CommitTestBundle -and $offset -lt $bundle.Length) {
         [byte[]] $chunk = $bundle[$offset..($bundle.Length - 1)]
-        $chunkCrc = [Screendeck.M3WinUsb]::Crc32($chunk)
+        $chunkCrc = [Screendeck.DeviceSyncWinUsb]::Crc32($chunk)
         [byte[]] $chunkPayload = [byte[]](@([BitConverter]::GetBytes([uint32]$offset)) + @([BitConverter]::GetBytes([uint32]$chunkCrc)) + @($chunk))
-        $received = Invoke-M3 3 $sequence $chunkPayload; $sequence++
-        if ($received -ne $bundle.Length) { throw "M3 acknowledged $received bytes; expected $($bundle.Length)." }
+        $received = Invoke-DeviceSync 3 $sequence $chunkPayload; $sequence++
+        if ($received -ne $bundle.Length) { throw "device sync acknowledged $received bytes; expected $($bundle.Length)." }
     }
     if ($CommitTestBundle) {
-        $generation = Invoke-M3 4 $sequence; $sequence++
-        Write-Host "M3 COMMIT ok generation=$generation bytes=$($bundle.Length) payload_crc=0x$($bundleCrc.ToString('X8'))"
+        $generation = Invoke-DeviceSync 4 $sequence; $sequence++
+        Write-Host "device sync COMMIT ok generation=$generation bytes=$($bundle.Length) payload_crc=0x$($bundleCrc.ToString('X8'))"
     }
 }
 
 if ($RejectInvalidBundle) {
-    # F3 negative test: a CRC-correct bundle whose M5UI payload is invalid must
+    # F3 negative test: a CRC-correct bundle whose UI bundle payload is invalid must
     # be rejected by COMMIT and must never advance the active generation.
-    [byte[]] $invalid = [Screendeck.M3WinUsb]::MinimalUiPayload()
-    $invalid[0] = 0xEE  # corrupt the M5UI magic; the SDB envelope CRC stays valid
-    [byte[]] $badBundle = [Screendeck.M3WinUsb]::Bundle($invalid)
-    $badCrc = [Screendeck.M3WinUsb]::Crc32($invalid)
+    [byte[]] $invalid = [Screendeck.DeviceSyncWinUsb]::MinimalUiPayload()
+    $invalid[0] = 0xEE  # corrupt the UI bundle magic; the bundle envelope CRC stays valid
+    [byte[]] $badBundle = [Screendeck.DeviceSyncWinUsb]::Bundle($invalid)
+    $badCrc = [Screendeck.DeviceSyncWinUsb]::Crc32($invalid)
     [byte[]] $badBegin = [byte[]](@([BitConverter]::GetBytes([uint32]$badBundle.Length)) + @([BitConverter]::GetBytes([uint32]$badCrc)))
-    $offset = Invoke-M3 2 $sequence $badBegin; $sequence++
+    $offset = Invoke-DeviceSync 2 $sequence $badBegin; $sequence++
     if ($offset -gt $badBundle.Length) { throw "Device resume offset exceeds invalid bundle size." }
     if ($offset -lt $badBundle.Length) {
         [byte[]] $chunk = $badBundle[$offset..($badBundle.Length - 1)]
-        $chunkCrc = [Screendeck.M3WinUsb]::Crc32($chunk)
+        $chunkCrc = [Screendeck.DeviceSyncWinUsb]::Crc32($chunk)
         [byte[]] $chunkPayload = [byte[]](@([BitConverter]::GetBytes([uint32]$offset)) + @([BitConverter]::GetBytes([uint32]$chunkCrc)) + @($chunk))
-        $received = Invoke-M3 3 $sequence $chunkPayload; $sequence++
-        if ($received -ne $badBundle.Length) { throw "M3 acknowledged $received bytes; expected $($badBundle.Length)." }
+        $received = Invoke-DeviceSync 3 $sequence $chunkPayload; $sequence++
+        if ($received -ne $badBundle.Length) { throw "device sync acknowledged $received bytes; expected $($badBundle.Length)." }
     }
     $rejected = $false
-    try { $null = Invoke-M3 4 $sequence } catch { $rejected = $true }
-    if (-not $rejected) { throw 'Invalid M5UI bundle was accepted by COMMIT.' }
-    $generationAfter = [Screendeck.M3WinUsb]::Status($sequence); $sequence++
+    try { $null = Invoke-DeviceSync 4 $sequence } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Invalid UI bundle was accepted by COMMIT.' }
+    $generationAfter = [Screendeck.DeviceSyncWinUsb]::Status($sequence); $sequence++
     if ($generationAfter -ne $before) {
         throw "Invalid bundle activated: generation advanced from $before to $generationAfter."
     }
-    Write-Host "M3 NEGATIVE ok invalid_bundle=rejected generation=$before"
+    Write-Host "device sync negative test ok invalid_bundle=rejected generation=$before"
 }

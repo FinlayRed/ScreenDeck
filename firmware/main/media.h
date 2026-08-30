@@ -25,11 +25,11 @@ void media_start(lv_display_t *display);
 uint32_t media_trigger_screensaver(void);
 void hid_release_all(const char *reason);
 
-/* Side-effect-free structural validation of an SDB3 payload (M5UI).
+/* Side-effect-free structural validation of a ScreenDeck bundle payload.
  * `payload_offset` is the payload's byte offset from the file start and
  * `payload_size` bounds every read. The validator seeks to the payload before
  * reading it. Checks
- * the M5UI magic, schema, table ranges, counts, references, assets, animation
+ * the UI bundle magic, schema, table ranges, counts, references, assets, animation
  * streams, and typed-table alignment (F3/F4). Never allocates the payload and
  * never mutates media state. */
 bool ui_bundle_valid(FILE *file, long payload_offset, uint32_t payload_size);
